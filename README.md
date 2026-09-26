@@ -7,7 +7,7 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-smart-download
+dsh plugin --profile web add @leisureyu/dsh-smart-download
 ```
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
@@ -72,14 +72,14 @@ dsh plugin --profile web add dsh-smart-download
 
 **契约**：本插件所有“返回默认值”的路径——
 
-| 环节 | 静默失败形态 | 必须断言的正向信号 |
-| --- | --- | --- |
-| `probeUrl` | 探测异常 → 不支持 | 已知支持的 URL 必须返回 `supportsMultiThread: true` |
-| `decide` | 分支遗漏 → 落 curl | 已知大文件必须返回 `method: 'aria2'` |
-| `parseAria2Summary` | 认不出 → `null` | 真实样本必须解析出 `pct/spd(/eta)` |
-| `parseCurlProgress` | 认不出 → `null` | 真实样本必须解析出单调递增到 100% 的百分比 |
-| `ProgressReporter` | 目录不可写 → 跳过 | 可写目录必须存在文件且内容递增 |
-| `LineBuffer` | 切分状态错误 | 跨 chunk / `\r` / `\r\n` 边界必须切出正确的行 |
+| 环节                  | 静默失败形态        | 必须断言的正向信号                                  |
+| ------------------- | ------------- | ------------------------------------------ |
+| `probeUrl`          | 探测异常 → 不支持    | 已知支持的 URL 必须返回 `supportsMultiThread: true` |
+| `decide`            | 分支遗漏 → 落 curl | 已知大文件必须返回 `method: 'aria2'`                |
+| `parseAria2Summary` | 认不出 → `null`  | 真实样本必须解析出 `pct/spd(/eta)`                  |
+| `parseCurlProgress` | 认不出 → `null`  | 真实样本必须解析出单调递增到 100% 的百分比                   |
+| `ProgressReporter`  | 目录不可写 → 跳过    | 可写目录必须存在文件且内容递增                            |
+| `LineBuffer`        | 切分状态错误        | 跨 chunk / `\r` / `\r\n` 边界必须切出正确的行         |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -89,12 +89,12 @@ dsh plugin --profile web add dsh-smart-download
 
 ## 支持平台
 
-| 平台 | 架构 | 是否支持 |
-| --- | --- | --- |
-| Windows | x64 | ✅ 首发支持 |
-| Windows | arm64 | ⏳ 计划中 |
-| macOS | x64 / arm64 | ⏳ 计划中 |
-| Linux | x64 / arm64 | ⏳ 计划中 |
+| 平台      | 架构          | 是否支持   |
+| ------- | ----------- | ------ |
+| Windows | x64         | ✅ 首发支持 |
+| Windows | arm64       | ⏳ 计划中  |
+| macOS   | x64 / arm64 | ⏳ 计划中  |
+| Linux   | x64 / arm64 | ⏳ 计划中  |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
 

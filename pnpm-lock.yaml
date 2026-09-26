@@ -23,6 +23,10 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.6.2
+    optionalDependencies:
+      '@leisureyu/aria2-win32-x64':
+        specifier: 1.37.2
+        version: 1.37.2
 
   packages/aria2-win32-x64: {}
 
@@ -331,6 +335,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@leisureyu/aria2-win32-x64@1.37.2':
+    resolution: {integrity: sha512-o49MeJcvrSaRHGf7oNoAwUHuoTX6SIZOIbG1UyJ1uRFvD5HiAZFcjNbIpWaAXaN9JRaVoEMsBkyjm9baJS/Imw==}
+    cpu: [x64]
+    os: [win32]
+
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
@@ -582,6 +591,9 @@ snapshots:
     optional: true
 
   '@esbuild/win32-x64@0.28.2':
+    optional: true
+
+  '@leisureyu/aria2-win32-x64@1.37.2':
     optional: true
 
   '@standard-schema/spec@1.1.0': {}

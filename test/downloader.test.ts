@@ -69,9 +69,14 @@ test('ARIA2_PACKAGE 指向 win32-x64 子包', () => {
   assert.equal(ARIA2_PACKAGE, '@leisureyu/aria2-win32-x64')
 })
 
-test('getAria2Path 在未安装二进制子包时返回 null', () => {
-  // 开发 / CI 测试环境下 bin/aria2c.exe 尚未放入，应返回 null
-  assert.equal(getAria2Path(), null)
+test('getAria2Path 返回子包二进制路径或 null', () => {
+  const result = getAria2Path()
+  // 两种合法状态：找到二进制（返回路径）或未找到（返回 null）
+  // 子包发布后，pnpm install 会把它装到 node_modules，因此这里不能再假设一定为 null
+  assert.ok(
+    result === null || result.includes('aria2c.exe'),
+    `预期为 null 或包含 aria2c.exe 的路径，实际: ${result}`,
+  )
 })
 
 /* ------------------------------ runProcess ------------------------------ */

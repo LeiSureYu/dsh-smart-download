@@ -1,5 +1,5 @@
 {
-  "name": "dsh-smart-download",
+  "name": "@leisureyu/dsh-smart-download",
   "version": "0.1.0",
   "description": "Multi-threaded downloader plugin for DeepSeek Harness, powered by bundled aria2",
   "type": "module",

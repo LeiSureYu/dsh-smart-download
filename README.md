@@ -93,7 +93,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 | ------- | ----------- | ------ |
 | Windows | x64         | ✅ 首发支持 |
 | Windows | arm64       | ⏳ 计划中  |
-| macOS   | x64 / arm64 | ⏳ 计划中  |
+| macOS   | x64 / arm64 | ❌️ 暂不支持 |
 | Linux   | x64 / arm64 | ⏳ 计划中  |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。

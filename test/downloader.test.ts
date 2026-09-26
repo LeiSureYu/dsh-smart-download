@@ -111,7 +111,7 @@ test('runProcess: 预先 abort 的信号 -> reject 为取消', async () => {
 test('runProcess: 运行中 abort -> 子进程被强制结束', async () => {
   const pidFile = path.join(
     os.tmpdir(),
-    `dsh-smart-download-pid-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
+    `dsh-smart-dl-pid-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
   )
   // 子进程：先把自己的 PID 写入文件，然后常驻
   const hangScript =

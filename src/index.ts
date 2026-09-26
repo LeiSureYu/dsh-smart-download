@@ -1,5 +1,5 @@
 /**
- * dsh-smart-download 插件入口：
+ * dsh-smart-dl 插件入口：
  * 注册 smart_download 工具。先用 probe 探测，再用 decide 按文件大小与 aria2 可用性
  * 决定 aria2（4/8 连接）或 curl 回退，并通过 ProgressReporter 双轨上报进度。
  *
@@ -21,7 +21,7 @@ import type {
   ToolExecutionContext,
 } from './types.js'
 
-export const name = 'dsh-smart-download'
+export const name = 'dsh-smart-dl'
 export const inject = ['tools']
 
 export function apply(ctx: Context): void {

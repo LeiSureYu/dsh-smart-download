@@ -1,6 +1,6 @@
 # @leisureyu/aria2-win32-x64
 
-为 **Windows x64** 平台预打包的 [aria2](https://aria2.github.io/) `aria2c.exe` 二进制文件，作为 `dsh-smart-download` 插件的随包依赖分发，使用户无需自行安装 aria2。
+为 **Windows x64** 平台预打包的 [aria2](https://aria2.github.io/) `aria2c.exe` 二进制文件，作为 `dsh-smart-dl` 插件的随包依赖分发，使用户无需自行安装 aria2。
 
 - 版本：aria2 **1.37.0**
 - 平台：`win32` / `x64`

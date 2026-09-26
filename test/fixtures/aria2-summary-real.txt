@@ -1,0 +1,30 @@
+
+09/26 18:29:36 [[1;32mNOTICE[0m] Downloading 1 item(s)
+                                                                                *** Download Progress Summary as of Sat Sep 26 18:29:37 2026 *** 
+===============================================================================
+[#8d9e04 11MiB/40MiB(27%) CN:4 DL:10MiB ETA:2s]
+FILE: C:/Users/Qing/AppData/Local/Temp/dsh-fixgen-YLM55n/aria.bin
+-------------------------------------------------------------------------------
+
+                                                                                *** Download Progress Summary as of Sat Sep 26 18:29:38 2026 *** 
+===============================================================================
+[#8d9e04 22MiB/40MiB(55%) CN:4 DL:10MiB ETA:1s]
+FILE: C:/Users/Qing/AppData/Local/Temp/dsh-fixgen-YLM55n/aria.bin
+-------------------------------------------------------------------------------
+
+                                                                                *** Download Progress Summary as of Sat Sep 26 18:29:39 2026 *** 
+===============================================================================
+[#8d9e04 33MiB/40MiB(82%) CN:4 DL:10MiB]
+FILE: C:/Users/Qing/AppData/Local/Temp/dsh-fixgen-YLM55n/aria.bin
+-------------------------------------------------------------------------------
+
+
+09/26 18:29:40 [[1;32mNOTICE[0m] Download complete: C:/Users/Qing/AppData/Local/Temp/dsh-fixgen-YLM55n/aria.bin
+
+Download Results:
+gid   |stat|avg speed  |path/URI
+======+====+===========+=======================================================
+8d9e04|OK  |    10MiB/s|C:/Users/Qing/AppData/Local/Temp/dsh-fixgen-YLM55n/aria.bin
+
+Status Legend:
+(OK):download completed.

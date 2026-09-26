@@ -1,0 +1,61 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+
+      - name: Download aria2 binary for Windows x64
+        shell: pwsh
+        run: |
+          $version = "1.37.0"
+          $url = "https://github.com/aria2/aria2/releases/download/release-$version/aria2-$version-win-64bit-build1.zip"
+          Invoke-WebRequest -Uri $url -OutFile aria2.zip
+          Expand-Archive aria2.zip -DestinationPath aria2-tmp
+          New-Item -ItemType Directory -Force -Path packages/aria2-win32-x64/bin | Out-Null
+          Copy-Item "aria2-tmp/aria2-$version-win-64bit-build1/aria2c.exe" "packages/aria2-win32-x64/bin/aria2c.exe"
+
+      - name: Install dependencies
+        # aria2 子包为 optionalDependencies，此刻尚未发布，解析失败会被 pnpm 跳过，不阻断安装
+        run: pnpm install
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Publish subpackage
+        working-directory: packages/aria2-win32-x64
+        run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main package
+        # 必须在子包发布成功后再发布主包，因为主包依赖该子包
+        run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

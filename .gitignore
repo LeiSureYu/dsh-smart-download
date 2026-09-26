@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+*.tsbuildinfo
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 由 CI 下载的 aria2 二进制，不入库
+packages/aria2-win32-x64/bin/aria2c.exe
+# CI 临时文件
+aria2.zip
+aria2-tmp/
+
+# 编辑器
+.idea/
+.vscode/

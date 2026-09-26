@@ -1,0 +1,4 @@
+# 该目录用于存放 aria2c.exe。
+# 二进制由 CI 下载（见 .github/workflows/publish.yml），不提交到 Git。
+# 本地开发时请从以下地址下载并解压，将 aria2c.exe 放到本目录：
+# https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip

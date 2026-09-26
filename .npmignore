@@ -1,0 +1,13 @@
+# 主包仅发布编译产物（见 package.json 的 "files" 字段）
+# 以下内容显式排除，避免误入发布包
+src/
+test/
+.github/
+packages/
+tsconfig.json
+.gitignore
+.npmignore
+*.ts
+*.map
+*.tsbuildinfo
+*.log

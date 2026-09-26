@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write # OIDC：npm trusted publishing 必需，不再需要任何长期 token
 
     steps:
       - uses: actions/checkout@v4
@@ -24,8 +24,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure npm CLI supports trusted publishing (>= 11.5.1)
+        shell: bash
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Download aria2 binary for Windows x64
         shell: pwsh
@@ -47,6 +53,11 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # 认证走 npm trusted publishing（OIDC），不需要 NPM_TOKEN。
+      # npm 网页侧前置条件（每个「包」单独配置，且必须勾选允许直接 npm publish）：
+      #   @leisureyu/dsh-smart-dl        → Settings → Trusted Publisher
+      #   @leisureyu/dsh-aria2-win32-x64 → Settings → Trusted Publisher
+      #   Organization or user: LeiSureYu ；Repository: dsh-smart-download ；Workflow: publish.yml
       - name: Publish subpackage
         # 子包（aria2 二进制）只在版本真正变化时才需要发布；已存在则跳过，
         # 否则会因 "Cannot publish over previously published version" 让整条流水线失败。
@@ -58,13 +69,9 @@ jobs:
           if npm view "$name@$ver" version >/dev/null 2>&1; then
             echo "skip: $name@$ver already published"
           else
-            pnpm publish --access public --no-git-checks
+            npm publish --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         # 必须在子包发布成功后再发布主包，因为主包依赖该子包
-        run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

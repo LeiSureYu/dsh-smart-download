@@ -48,8 +48,18 @@ jobs:
         run: pnpm test
 
       - name: Publish subpackage
+        # 子包（aria2 二进制）只在版本真正变化时才需要发布；已存在则跳过，
+        # 否则会因 "Cannot publish over previously published version" 让整条流水线失败。
         working-directory: packages/aria2-win32-x64
-        run: pnpm publish --access public --no-git-checks
+        shell: bash
+        run: |
+          name=$(node -p "require('./package.json').name")
+          ver=$(node -p "require('./package.json').version")
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "skip: $name@$ver already published"
+          else
+            pnpm publish --access public --no-git-checks
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

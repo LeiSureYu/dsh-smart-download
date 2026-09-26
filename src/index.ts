@@ -38,13 +38,13 @@ export function apply(ctx: Context): void {
         },
         output: {
           type: 'string',
-          required: false,
           description: 'Output file path (optional)',
         },
       },
       output: {
         schema: {
           type: 'object',
+          additionalProperties: false,
           properties: {
             success: { type: 'boolean' },
             path: { type: 'string' },

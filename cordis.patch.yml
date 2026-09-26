@@ -1,0 +1,6 @@
+# dsh-smart-dl bundle patch —— 把「多线程下载」工具插件插入 profile 配置树。
+# 作为一层 bundle 覆盖层应用：dsh 在 `dsh plugin add` 时读取本文件（由
+# package.json 的 `dsh.bundle.patch` 声明），把下面的 insert 行合入配置。
+- insert:
+    - id: dsh-smart-dl
+      name: '@leisureyu/dsh-smart-dl'

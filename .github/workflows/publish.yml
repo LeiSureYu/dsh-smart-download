@@ -26,7 +26,6 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          cache: 'pnpm'
 
       - name: Download aria2 binary for Windows x64
         shell: pwsh

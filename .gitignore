@@ -27,3 +27,4 @@ aria2-tmp/
 # pnpm 临时文件
 _tmp_*
 
+.npmrc

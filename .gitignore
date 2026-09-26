@@ -23,3 +23,7 @@ aria2-tmp/
 # 编辑器
 .idea/
 .vscode/
+
+# pnpm 临时文件
+_tmp_*
+

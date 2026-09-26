@@ -31,7 +31,7 @@ jobs:
       - name: Download aria2 binary for Windows x64
         shell: pwsh
         run: |
-          $version = "1.37.1"
+          $version = "1.37.0"
           $url = "https://github.com/aria2/aria2/releases/download/release-$version/aria2-$version-win-64bit-build1.zip"
           Invoke-WebRequest -Uri $url -OutFile aria2.zip
           Expand-Archive aria2.zip -DestinationPath aria2-tmp

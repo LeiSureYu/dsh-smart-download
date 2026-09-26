@@ -1,0 +1,35 @@
+name: Unpublish broken versions (one-off)
+
+# 一次性任务：撤掉早期坏版本 0.1.1 / 0.1.3 / 0.1.4。
+# 用仓库里的 NPM_TOKEN（Granular token，已勾选 Bypass two-factor authentication）执行，
+# 因此不需要本地 2FA 验证码。用完即可删除本文件。
+
+on:
+  push:
+    paths:
+      - '.github/workflows/unpublish-broken.yml'
+  workflow_dispatch:
+
+jobs:
+  unpublish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Unpublish broken versions
+        shell: bash
+        run: |
+          for v in 0.1.1 0.1.3 0.1.4; do
+            echo "----- unpublish @leisureyu/dsh-smart-dl@$v"
+            npm unpublish "@leisureyu/dsh-smart-dl@$v" --force || echo "!! $v 撤销失败（可能已不存在）"
+          done
+          echo "----- 剩余版本："
+          npm view @leisureyu/dsh-smart-dl versions
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

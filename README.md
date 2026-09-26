@@ -107,7 +107,7 @@ A：这是对 `node_modules` 内未签名 `aria2c.exe` 的常见启发式告警�
 A：通常是目标服务器**不支持 Range 请求**（无法分片），或文件本身较小。插件会自动回退到 `curl` 单线程下载；返回结果中的 `fellback` 与 `reason` 字段会说明具体原因。
 
 **Q：提示找不到 aria2 / 始终走 curl？**
-A：请确认当前为 **Windows x64**，且 `optionalDependencies` 中的 `@leisureyu/aria2-win32-x64` 安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。
+A：请确认当前为 **Windows x64**，且 `optionalDependencies` 中的 `@leisureyu/dsh-aria2-win32-x64` 安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。
 
 **Q：下载会弹黑色命令行窗口吗？**
 A：不会。子进程均以 `windowsHide: true` 启动。
@@ -143,7 +143,7 @@ pnpm typecheck
 
 ## 第三方组件声明
 
-本插件分发的 `aria2c.exe` 来自 [aria2](https://aria2.github.io/) 官方发布包，aria2 依据 **GPL-2.0-or-later** 许可，二进制子包 `@leisureyu/aria2-win32-x64` 同样声明为 `GPL-2.0-or-later`。
+本插件分发的 `aria2c.exe` 来自 [aria2](https://aria2.github.io/) 官方发布包，aria2 依据 **GPL-2.0-or-later** 许可，二进制子包 `@leisureyu/dsh-aria2-win32-x64` 同样声明为 `GPL-2.0-or-later`。
 
 ## License
 

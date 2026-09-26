@@ -23,7 +23,7 @@ import type { ProgressReporter } from './progress.js'
 const require = createRequire(import.meta.url)
 
 /** aria2 二进制所在子包名（发布前请把 scope 替换为你自己的 npm scope） */
-export const ARIA2_PACKAGE = '@leisureyu/aria2-win32-x64'
+export const ARIA2_PACKAGE = '@leisureyu/dsh-aria2-win32-x64'
 
 /** 子进程逐行回调 */
 export interface ProcessLineHandlers {

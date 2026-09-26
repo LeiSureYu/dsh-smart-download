@@ -66,7 +66,7 @@ test('buildCurlArgs 拼接符合预期（progress-bar，无 silent）', () => {
 })
 
 test('ARIA2_PACKAGE 指向 win32-x64 子包', () => {
-  assert.equal(ARIA2_PACKAGE, '@leisureyu/aria2-win32-x64')
+  assert.equal(ARIA2_PACKAGE, '@leisureyu/dsh-aria2-win32-x64')
 })
 
 test('getAria2Path 返回子包二进制路径或 null', () => {

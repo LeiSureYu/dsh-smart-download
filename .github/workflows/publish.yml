@@ -31,7 +31,7 @@ jobs:
       - name: Download aria2 binary for Windows x64
         shell: pwsh
         run: |
-          $version = "1.37.0"
+          $version = "1.37.1"
           $url = "https://github.com/aria2/aria2/releases/download/release-$version/aria2-$version-win-64bit-build1.zip"
           Invoke-WebRequest -Uri $url -OutFile aria2.zip
           Expand-Archive aria2.zip -DestinationPath aria2-tmp
@@ -40,7 +40,7 @@ jobs:
 
       - name: Install dependencies
         # aria2 子包为 optionalDependencies，此刻尚未发布，解析失败会被 pnpm 跳过，不阻断安装
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build
         run: pnpm build

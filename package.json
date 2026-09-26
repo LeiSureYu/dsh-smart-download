@@ -22,7 +22,7 @@
     }
   },
   "optionalDependencies": {
-    "@leisureyu/aria2-win32-x64": "1.37.0"
+    "@leisureyu/aria2-win32-x64": "1.37.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",

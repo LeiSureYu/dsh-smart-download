@@ -18,7 +18,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
 
-> **版本要求：请使用 `0.1.5` 或更高。**&#8203; 早期发布（`0.1.1` / `0.1.3` / `0.1.4`）在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.1.5`。
+> **版本要求：请使用 `0.1.5` 或更高。** 早期发布（`0.1.1` / `0.1.3` / `0.1.4`）在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.1.5`。
 
 ## 工作原理
 

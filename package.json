@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-smart-download",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-threaded downloader plugin for DeepSeek Harness, powered by bundled aria2",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     }
   },
   "optionalDependencies": {
-    "@leisureyu/aria2-win32-x64": "1.37.2"
+    "@leisureyu/aria2-win32-x64": "1.37.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",

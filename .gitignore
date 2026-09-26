@@ -27,4 +27,10 @@ aria2-tmp/
 # pnpm 临时文件
 _tmp_*
 
+# lockfile 由 CI 用 pnpm 9 重新生成（本地 pnpm 11 生成的格式不兼容）
+pnpm-lock.yaml
+
+# pnpm 11 本机的 build 审批/workspaces 状态文件，不入库
+pnpm-workspace.yaml
+
 .npmrc

@@ -1,5 +1,11 @@
 # dsh-smart-dl
 
+[![npm version](https://img.shields.io/npm/v/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
+[![npm downloads](https://img.shields.io/npm/dm/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
+[![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
+[![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
+![platform](https://img.shields.io/badge/platform-windows%20x64-0078D4)
+
 > DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册一个 `smart_download` 工具。当模型需要下载文件时，插件会先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 进行多线程加速下载，否则自动回退到系统自带的 `curl` 单线程下载，保证在任何情况下都能完成下载。
@@ -7,10 +13,12 @@
 ## 安装
 
 ```bash
-dsh 插件 --profile web add @leisureyu/dsh-smart-dl
+dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
+
+> **版本要求：请使用 `0.1.5` 或更高。**&#8203; 早期发布（`0.1.1` / `0.1.3` / `0.1.4`）在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.1.5`。
 
 ## 工作原理
 
@@ -32,7 +40,7 @@ dsh 插件 --profile web add @leisureyu/dsh-smart-dl
      · ≥ 50MB       -> aria2 8 连接（保守上限，不开 16）
         │
    ┌────┴──────────────────────────┐
-▼ aria2 文件 ▼ curl 文件
+   ▼ aria2 档                       ▼ curl 档
 [3a] 能定位到随包 aria2c.exe？    [3b] curl 单线程（含进度条）
    │ 是              │ 否
    ▼                 ▼
@@ -65,8 +73,8 @@ dsh 插件 --profile web add @leisureyu/dsh-smart-dl
 开发过程中实测发现了三个**同类型的静默失败**：
 
 1. **aria2 摘要格式变化**：关闭 readout 后，GID 变为十六进制、无 `SIZE:` 前缀、速度字段由 `SPD:` 变为 `DL:`；
-`抑制进度**：即使进度输出到 stderr，`——silent`也会同时屏蔽`--progress-bar`选项；
-3. **aria2 在接近完成时省略 ETA**：对于即将完成的任务，其摘要行整体不显示 ETA 字段。
+2. **curl `--silent` 抑制进度**：即使进度走 stderr，`--silent` 也会把 `--progress-bar` 一并压掉；
+3. **aria2 临近完成时省略 ETA**：快完成的摘要行整体不输出 ETA 字段。
 
 它们都不是逻辑错误，而是**对外部程序真实行为的假设错了**：逻辑都对、测试都绿、下载也成功，只是某个环节悄悄返回了默认值（“不支持” / `curl` / `null` / 跳过写入）。这类问题的危险在于退出码仍是 0，“不抛错”的测试永远抓不住。
 
@@ -79,7 +87,7 @@ dsh 插件 --profile web add @leisureyu/dsh-smart-dl
 | `parseAria2Summary` | 认不出 → `null`  | 真实样本必须解析出 `pct/spd(/eta)`                  |
 | `parseCurlProgress` | 认不出 → `null`  | 真实样本必须解析出单调递增到 100% 的百分比                   |
 | `ProgressReporter`  | 目录不可写 → 跳过    | 可写目录必须存在文件且内容递增                            |
-| `行缓冲区`        |切分状态错误|跨块 /` ` / `  `边界必须切出正确的行|
+| `LineBuffer`        | 切分状态错误        | 跨 chunk / `\r` / `\r\n` 边界必须切出正确的行         |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -91,10 +99,10 @@ dsh 插件 --profile web add @leisureyu/dsh-smart-dl
 
 | 平台      | 架构          | 是否支持   |
 | ------- | ----------- | ------ |
-| Windows | x64    | ✅ 首发支持 |
-| Windows | arm64  | ⏳ 计划中  |
-| macOS   | x64 | ❌️ 暂不支持 |
-| Linux   | x64 | ⏳ 计划中  |
+| Windows | x64         | ✅ 首发支持 |
+| Windows | arm64       | ⏳ 计划中  |
+| macOS   | x64 / arm64 | ❌ 暂不支持 |
+| Linux   | x64 / arm64 | ⏳ 计划中  |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
 
@@ -106,7 +114,7 @@ A：这是对 `node_modules` 内未签名 `aria2c.exe` 的常见启发式告警�
 **Q：下载速度没有提升？**
 A：通常是目标服务器**不支持 Range 请求**（无法分片），或文件本身较小。插件会自动回退到 `curl` 单线程下载；返回结果中的 `fellback` 与 `reason` 字段会说明具体原因。
 
-**问：提示找不到 aria2 / 始终走 curl？**
+**Q：提示找不到 aria2 / 始终走 curl？**
 A：请确认当前为 **Windows x64**，且 `optionalDependencies` 中的 `@leisureyu/dsh-aria2-win32-x64` 安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。
 
 **Q：下载会弹黑色命令行窗口吗？**

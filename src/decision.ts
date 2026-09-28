@@ -24,7 +24,7 @@ export function decideConcurrency(size: number): ConcurrencyLevel {
 }
 
 /**
- * 决策函数：纯函数，便于单测。
+ * 决策函数：除「aria2 缺失」分支的提示文案会带上当前平台外，不依赖外部状态，便于单测。
  *
  * @param probe 探测结果
  * @param aria2Available 随包 aria2c 是否可定位
@@ -67,7 +67,7 @@ export function decide(probe: ProbeResult, aria2Available: boolean): Decision {
       method: 'curl',
       concurrency: 1,
       fellback: true,
-      reason: '未找到 aria2 二进制（仅支持 Windows x64）',
+      reason: `未找到 aria2 二进制（当前平台 ${process.platform}-${process.arch} 不受支持或子包未安装）`,
     }
   }
 

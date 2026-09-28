@@ -1,0 +1,29 @@
+{
+  "name": "@leisureyu/dsh-aria2-linux-arm64",
+  "version": "1.37.0",
+  "description": "Bundled static aria2c binary for Linux arm64",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeiSureYu/dsh-smart-download.git",
+    "directory": "packages/aria2-linux-arm64"
+  },
+  "type": "commonjs",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/aria2c",
+    "README.md"
+  ],
+  "keywords": [
+    "aria2",
+    "aria2c",
+    "linux",
+    "arm64",
+    "binary"
+  ],
+  "license": "GPL-2.0-or-later"
+}

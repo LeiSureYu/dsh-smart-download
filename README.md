@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
-![platform](https://img.shields.io/badge/platform-windows%20x64-0078D4)
+![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
 
 > DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
 
@@ -18,7 +18,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
 
-> **版本要求：请使用 `0.1.5` 或更高。** 早期发布（`0.1.1` / `0.1.3` / `0.1.4`）在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.1.5`。
+> **版本要求：请使用 `0.2.0` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.2.0`。
 
 ## 工作原理
 
@@ -41,7 +41,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 档                       ▼ curl 档
-[3a] 能定位到随包 aria2c.exe？    [3b] curl 单线程（含进度条）
+[3a] 能定位到随包 aria2c？         [3b] curl 单线程（含进度条）
    │ 是              │ 否
    ▼                 ▼
  aria2 4/8 连接     curl 单线程（回退）
@@ -97,25 +97,29 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 ## 支持平台
 
-| 平台      | 架构          | 是否支持   |
-| ------- | ----------- | ------ |
-| Windows | x64         | ✅ 首发支持 |
-| Windows | arm64       | ⏳ 计划中  |
-| macOS   | x64 / arm64 | ❌ 暂不支持 |
-| Linux   | x64 / arm64 | ⏳ 计划中  |
+| 平台      | 架构    | 是否支持              | 二进制子包                          |
+| ------- | ----- | ----------------- | ------------------------------ |
+| Windows | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-win32-x64`   |
+| Windows | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-win32-arm64` |
+| Linux   | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-linux-x64`   |
+| Linux   | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-linux-arm64` |
+| macOS   | x64 / arm64 | ❌ 暂不支持     | —                              |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
 
 ## 常见问题
 
 **Q：安装或运行时被 Windows Defender（或其他杀毒软件）拦截？**
-A：这是对 `node_modules` 内未签名 `aria2c.exe` 的常见启发式告警。可将项目的 `node_modules` 目录加入 Windows Defender 的白名单（“病毒和威胁防护 → 管理设置 → 排除项”）。`aria2c.exe` 直接来自 aria2 官方发布包，未做任何修改。
+A：这是对 `node_modules` 内未签名 `aria2c.exe` 的常见启发式告警。可将项目的 `node_modules` 目录加入 Windows Defender 的白名单（“病毒和威胁防护 → 管理设置 → 排除项”）。`aria2c.exe` 均未做任何修改：Windows x64 取自 aria2 官方发布包，Windows arm64 取自第三方 ARM64 构建（见下方“第三方组件声明”）。
 
 **Q：下载速度没有提升？**
 A：通常是目标服务器**不支持 Range 请求**（无法分片），或文件本身较小。插件会自动回退到 `curl` 单线程下载；返回结果中的 `fellback` 与 `reason` 字段会说明具体原因。
 
 **Q：提示找不到 aria2 / 始终走 curl？**
-A：请确认当前为 **Windows x64**，且 `optionalDependencies` 中的 `@leisureyu/dsh-aria2-win32-x64` 安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。
+A：请确认当前平台属于上表四行之一（Windows x64 / arm64、Linux x64 / arm64），且 `optionalDependencies` 中对应的二进制子包安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。返回结果的 `reason` 字段会说明具体原因。macOS 暂不支持，将始终回退 curl。
+
+**Q：Linux 上提示 `aria2c: Permission denied`？**
+A：这是 tarball 里二进制缺少可执行位。本项目在 CI 中**于 Linux runner 上打包**并强制断言 `bin/aria2c` 为 `0755`，正常安装不会出现；若你手动重打包过，请在打包前 `chmod 755`。
 
 **Q：下载会弹黑色命令行窗口吗？**
 A：不会。子进程均以 `windowsHide: true` 启动。
@@ -138,20 +142,45 @@ pnpm test
 pnpm typecheck
 ```
 
-本地开发时，`packages/aria2-win32-x64/bin/aria2c.exe` 需要手动放置（该二进制不入库）：
+本地开发时，各平台的二进制需要手动放置（这些二进制不入库），下载地址与目标路径：
 
-1. 下载 <https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip>；
-2. 解压后将其中的 `aria2c.exe` 复制到 `packages/aria2-win32-x64/bin/aria2c.exe`。
+| 平台 | 下载 | 放置到 |
+| --- | --- | --- |
+| Windows x64 | <https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip> | `packages/aria2-win32-x64/bin/aria2c.exe` |
+| Windows arm64 | <https://github.com/minnyres/aria2-windows-arm64/releases/download/v1.37.0/aria2_1.37.0_arm64.zip> | `packages/aria2-win32-arm64/bin/aria2c.exe` |
+| Linux x64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-x86_64-linux-musl_static.zip> | `packages/aria2-linux-x64/bin/aria2c` |
+| Linux arm64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-aarch64-linux-musl_static.zip> | `packages/aria2-linux-arm64/bin/aria2c` |
+
+Linux 二进制解压后记得 `chmod 755`，否则本地 `npm pack` 出来的 tarball 也会缺少可执行位。
 
 ### 发布
 
-推送 `v*` tag 即触发 GitHub Actions（`.github/workflows/publish.yml`）：CI 在 Windows 上下载并填入 `aria2c.exe`，**先发布二进制子包，再发布主包**（主包依赖子包，顺序不可颠倒）。
+推送 `v*` tag 即触发 GitHub Actions（`.github/workflows/publish.yml`），分三个 job：
+
+1. `binaries-windows`（windows runner）：下载 Windows x64 / arm64 二进制并校验 SHA256；
+2. `binaries-linux`（ubuntu runner）：下载 Linux x64 / arm64 静态二进制、校验 SHA256、`chmod 755`；
+3. `publish`（ubuntu runner）：还原上述二进制 → 构建 → 测试 → **先发布全部二进制子包，再发布主包**（主包依赖子包，顺序不可颠倒）。
+
+> 发布必须在 Linux 上完成：npm 打包会记录文件执行位，在 Windows 上打包会把 `bin/aria2c` 记成 `0644`，装完直接调用会失败。CI 里对此有正向断言（tarball 中 `bin/aria2c` 必须是 `-rwxr-xr-x`）。
+
+认证采用「先 OIDC、后 token」双保险：每个包先尝试 npm trusted publishing（OIDC，无需长期 token）；失败则回退仓库密钥 `NPM_TOKEN`——新包**首次**发布无法用 OIDC 引导（[npm/cli#8544](https://github.com/npm/cli/issues/8544) 仍未修复），必须用 token，之后即可只靠 OIDC。
+
+> 启用 OIDC 需要在 npm 网页为每个包配置 Trusted Publisher（Organization or user `LeiSureYu`、Repository `dsh-smart-download`、Workflow `publish.yml`，并勾选允许直接 `npm publish`）。配置前流水线会自动走 token 回退，不会失败。
 
 > 注意：本仓库已使用 npm scope `@leisureyu`。如需改换 scope，需同步修改主包 `optionalDependencies`、子包 `name`、`src/downloader.ts` 中的 `ARIA2_PACKAGE` 以及 `test/downloader.test.ts` 中的断言。
 
 ## 第三方组件声明
 
-本插件分发的 `aria2c.exe` 来自 [aria2](https://aria2.github.io/) 官方发布包，aria2 依据 **GPL-2.0-or-later** 许可，二进制子包 `@leisureyu/dsh-aria2-win32-x64` 同样声明为 `GPL-2.0-or-later`。
+本插件分发的 `aria2c` 均来自 [aria2](https://aria2.github.io/) 1.37.0，aria2 依据 **GPL-2.0-or-later** 许可，各二进制子包同样声明为 `GPL-2.0-or-later`。
+
+aria2 官方仅提供 **Windows x64** 与源码包，因此另外三个平台使用第三方构建（均未做任何修改，仅原样分发）：
+
+| 平台 | 来源 | 压缩包 SHA256 |
+| --- | --- | --- |
+| Windows x64 | aria2 官方发布包 | `67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288` |
+| Windows arm64 | [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64) `v1.37.0` | `5694080902fff84c8636e561c48f7a65278e8d4f05efefe953637f60a397c81f` |
+| Linux x64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a` |
+| Linux arm64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6` |
 
 ## License
 

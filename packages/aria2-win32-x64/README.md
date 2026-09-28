@@ -14,6 +14,9 @@
 https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip
 ```
 
+- 压缩包 SHA256：`67D015301EEF0B612191212D564C5BB0A14B5B9C4796B76454276A4D28D9B288`
+- 二进制：`aria2c.exe`，PE32+ x86-64
+
 由 CI（`.github/workflows/publish.yml`）下载并复制到 `bin/aria2c.exe`，**不提交到 Git 仓库**。本地开发时请按主仓库 README 的说明手动放置该文件。
 
 ## 许可证

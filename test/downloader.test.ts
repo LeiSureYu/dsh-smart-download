@@ -1,6 +1,7 @@
 /**
  * downloader.ts 测试：
  * - 参数拼接（aria2 / curl）；
+ * - 平台 → aria2 子包映射（Windows 用 .exe，Linux 无后缀；未支持平台回退 null）；
  * - getAria2Path 在缺少二进制时返回 null；
  * - runProcess 的成功、非零退出（含 stderr）、AbortSignal 透传与强制结束。
  * 通过把 Node 自身作为子进程来验证，不依赖 aria2 / curl / 网络。
@@ -12,7 +13,8 @@ import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  ARIA2_PACKAGE,
+  ARIA2_TARGETS,
+  aria2TargetFor,
   buildAria2Args,
   buildCurlArgs,
   downloadWithCurl,
@@ -65,18 +67,51 @@ test('buildCurlArgs 拼接符合预期（progress-bar，无 silent）', () => {
   ])
 })
 
-test('ARIA2_PACKAGE 指向 win32-x64 子包', () => {
-  assert.equal(ARIA2_PACKAGE, '@leisureyu/dsh-aria2-win32-x64')
+test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正确', () => {
+  assert.deepEqual(Object.keys(ARIA2_TARGETS).sort(), [
+    'linux-arm64',
+    'linux-x64',
+    'win32-arm64',
+    'win32-x64',
+  ])
+  assert.equal(ARIA2_TARGETS['win32-x64']?.pkg, '@leisureyu/dsh-aria2-win32-x64')
+  assert.equal(ARIA2_TARGETS['win32-x64']?.bin, 'bin/aria2c.exe')
+  assert.equal(ARIA2_TARGETS['win32-arm64']?.pkg, '@leisureyu/dsh-aria2-win32-arm64')
+  assert.equal(ARIA2_TARGETS['win32-arm64']?.bin, 'bin/aria2c.exe')
+  assert.equal(ARIA2_TARGETS['linux-x64']?.pkg, '@leisureyu/dsh-aria2-linux-x64')
+  assert.equal(ARIA2_TARGETS['linux-x64']?.bin, 'bin/aria2c')
+  assert.equal(ARIA2_TARGETS['linux-arm64']?.pkg, '@leisureyu/dsh-aria2-linux-arm64')
+  assert.equal(ARIA2_TARGETS['linux-arm64']?.bin, 'bin/aria2c')
+})
+
+test('aria2TargetFor：Windows 用 .exe，Linux 用无后缀二进制', () => {
+  assert.equal(aria2TargetFor('win32', 'x64')?.bin, 'bin/aria2c.exe')
+  assert.equal(aria2TargetFor('win32', 'arm64')?.bin, 'bin/aria2c.exe')
+  assert.equal(aria2TargetFor('linux', 'x64')?.bin, 'bin/aria2c')
+  assert.equal(aria2TargetFor('linux', 'arm64')?.bin, 'bin/aria2c')
+})
+
+test('aria2TargetFor：未支持平台返回 null（回退 curl）', () => {
+  assert.equal(aria2TargetFor('darwin', 'x64'), null)
+  assert.equal(aria2TargetFor('darwin', 'arm64'), null)
+  assert.equal(aria2TargetFor('linux', 'ia32'), null)
+  assert.equal(aria2TargetFor('freebsd', 'x64'), null)
 })
 
 test('getAria2Path 返回子包二进制路径或 null', () => {
   const result = getAria2Path()
+  const target = aria2TargetFor(process.platform, process.arch)
   // 两种合法状态：找到二进制（返回路径）或未找到（返回 null）
   // 子包发布后，pnpm install 会把它装到 node_modules，因此这里不能再假设一定为 null
-  assert.ok(
-    result === null || result.includes('aria2c.exe'),
-    `预期为 null 或包含 aria2c.exe 的路径，实际: ${result}`,
-  )
+  if (target) {
+    assert.ok(
+      result === null || result.endsWith(target.bin.replace('/', path.sep)) ||
+        result.includes(target.bin.split('/').pop() as string),
+      `预期为 null 或指向 ${target.bin} 的路径，实际: ${result}`,
+    )
+  } else {
+    assert.equal(result, null, `不支持的平台应返回 null，实际: ${result}`)
+  }
 })
 
 /* ------------------------------ runProcess ------------------------------ */

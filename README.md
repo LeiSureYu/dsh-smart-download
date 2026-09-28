@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
 ![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/leisureyu/dsh-smart-download)
 
 **简体中文** · [English](./README.en.md)
 
@@ -19,6 +20,8 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
+
+**支持的 profile**：`web`（上面的 `--profile web` 即为此插件验证过的 profile）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
 
 > **版本要求：请使用 `0.2.1` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.2.1`。
 >
@@ -110,6 +113,31 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 | macOS   | x64 / arm64 | ❌ 暂不支持     | —                              |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
+
+## 权限说明
+
+本插件只做两件事：**发起下载**与**写进度文件**。逐项说明如下。
+
+| 行为 | 说明 |
+| --- | --- |
+| 网络出站请求 | 对目标 URL 发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。仅访问调用方传入的 URL，不访问其他地址。 |
+| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件；下载命令未启用 `--allow-overwrite` / `--continue`，因此遇到同名文件不会静默覆盖。 |
+| 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`（若未设置该环境变量则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `~/.dsh/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
+| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，Windows 上 1s 内未退出则强制 kill）。 |
+| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`USERPROFILE` / `HOME`。 |
+
+**不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
+
+## 兼容性
+
+| 项目 | 要求 |
+| --- | --- |
+| Node.js | `>=22.0.0`（用到 `AbortSignal.any` / `AbortSignal.timeout`） |
+| `@deepseek-ai/cordis` | `^4.0.0`（peerDependency） |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` 或 `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明） |
+| npm 包管理器 | npm / pnpm 均可；需支持 `optionalDependencies` 的 `os` / `cpu` 过滤 |
+
+macOS 未列入支持平台：**不是兼容性问题，而是缺少对应的 aria2 二进制子包**。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
 
 ## 常见问题
 

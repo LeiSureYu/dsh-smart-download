@@ -1,6 +1,6 @@
 /**
  * 下载执行逻辑：
- * - 支持多线程时调用随插件分发的 aria2c.exe（按决策档位开连接）；
+ * - 支持多线程时调用随插件分发的 aria2c（按决策档位开连接）；
  * - 否则回退到系统自带的 curl；
  * - 统一处理 AbortSignal 取消、Windows 隐藏窗口、stderr 收集与进度解析。
  */
@@ -22,8 +22,29 @@ import type { ProgressReporter } from './progress.js'
 
 const require = createRequire(import.meta.url)
 
-/** aria2 二进制所在子包名（发布前请把 scope 替换为你自己的 npm scope） */
-export const ARIA2_PACKAGE = '@leisureyu/dsh-aria2-win32-x64'
+/**
+ * 随包 aria2 的目标平台描述。
+ * 每个受支持平台对应一个独立的 npm 子包，子包用 os/cpu 字段声明适用平台，
+ * npm / pnpm 在不匹配的平台上会自动跳过安装。
+ */
+export interface Aria2Target {
+  /** 子包名 */
+  pkg: string
+  /** 子包内二进制的相对路径 */
+  bin: string
+}
+
+/**
+ * 平台 → 子包映射表。
+ * 键为 `${process.platform}-${process.arch}`，与 npm 的 os/cpu 字段语义一致。
+ * 未列入的平台（如 darwin）视为不支持，getAria2Path 返回 null，由调用方回退 curl。
+ */
+export const ARIA2_TARGETS: Readonly<Record<string, Aria2Target>> = Object.freeze({
+  'win32-x64': { pkg: '@leisureyu/dsh-aria2-win32-x64', bin: 'bin/aria2c.exe' },
+  'win32-arm64': { pkg: '@leisureyu/dsh-aria2-win32-arm64', bin: 'bin/aria2c.exe' },
+  'linux-x64': { pkg: '@leisureyu/dsh-aria2-linux-x64', bin: 'bin/aria2c' },
+  'linux-arm64': { pkg: '@leisureyu/dsh-aria2-linux-arm64', bin: 'bin/aria2c' },
+})
 
 /** 子进程逐行回调 */
 export interface ProcessLineHandlers {
@@ -32,13 +53,26 @@ export interface ProcessLineHandlers {
 }
 
 /**
- * 定位随插件分发的 aria2c.exe。
- * 仅在 Windows x64 上可用；找不到时返回 null，由调用方回退 curl。
+ * 查询给定平台 / 架构对应的 aria2 子包描述。
+ * 不支持的平台返回 null。纯函数，便于单测（无需真的跑在目标平台上）。
+ */
+export function aria2TargetFor(
+  platform: string,
+  arch: string,
+): Aria2Target | null {
+  return ARIA2_TARGETS[`${platform}-${arch}`] ?? null
+}
+
+/**
+ * 定位随插件分发的 aria2 二进制。
+ * 按当前平台 / 架构选择子包；平台不受支持或子包未安装时返回 null，
+ * 由调用方回退到 curl。
  */
 export function getAria2Path(): string | null {
-  if (process.platform !== 'win32' || process.arch !== 'x64') return null
+  const target = aria2TargetFor(process.platform, process.arch)
+  if (!target) return null
   try {
-    return require.resolve(`${ARIA2_PACKAGE}/bin/aria2c.exe`)
+    return require.resolve(`${target.pkg}/${target.bin}`)
   } catch {
     return null
   }

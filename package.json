@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-smart-dl",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Multi-threaded downloader plugin for DeepSeek Harness, powered by bundled aria2",
   "repository": {
     "type": "git",
@@ -27,6 +27,9 @@
     }
   },
   "optionalDependencies": {
+    "@leisureyu/dsh-aria2-linux-arm64": "1.37.0",
+    "@leisureyu/dsh-aria2-linux-x64": "1.37.0",
+    "@leisureyu/dsh-aria2-win32-arm64": "1.37.0",
     "@leisureyu/dsh-aria2-win32-x64": "1.37.0"
   },
   "peerDependencies": {

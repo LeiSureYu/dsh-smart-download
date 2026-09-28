@@ -9,9 +9,24 @@
 
 [简体中文](./README.md) · **English**
 
-> Multi-threaded downloader plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai) with a bundled `aria2` — **zero configuration**: install it and it works, no separate aria2 install needed.
-> Supports **mirror acceleration** and **resumable downloads**, plus a `download_status` tool to query progress.
-> On the `web` profile it also shows a **live progress panel** in the bottom-right corner (file name / percentage / speed / ETA) that disappears when the download finishes.
+> **A downloader with aria2 built in, for DSH.** One command to install, nothing else to set up: large files download over multiple connections, it falls back automatically when a server won't cooperate, and an interrupted download can be resumed.
+
+![Live progress panel on the web profile](docs/progress-pill.png)
+
+```bash
+dsh plugin --profile web add @leisureyu/dsh-smart-dl
+```
+
+**What you get:**
+
+- ⚡ **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
+- 📦 **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
+- 👀 **Visible progress** — on the `web` profile a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
+- 🔁 **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
+- 🌐 **Mirror acceleration** — an optional `mirror` parameter routes the download through a GitHub mirror.
+- 🔍 **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
+
+Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.0` or newer.
 
 `dsh-smart-dl` registers two tools with DSH:
 

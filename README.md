@@ -9,9 +9,24 @@
 
 **简体中文** · [English](./README.en.md)
 
-> DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
-> 支持 **镜像加速**、**断点续传**，并可用 `download_status` 查询下载进度。
-> 在 `web` profile 下，下载中会在界面右下角显示**实时进度面板**（文件名 / 百分比 / 速度 / 剩余时间），完成后自动消失。
+> **给 DSH 装上一个内置 aria2 的下载器。** 一条命令装好，不用自己配环境：大文件自动多线程加速，服务器不支持就自动回退，中途断了还能续传。
+
+![web profile 下的实时进度面板](docs/progress-pill.png)
+
+```bash
+dsh plugin --profile web add @leisureyu/dsh-smart-dl
+```
+
+**装完你能得到什么：**
+
+- ⚡ **自动多线程加速** —— 下载前先探测目标服务器，支持多连接就调用内置 `aria2c` 并发下载，不支持则自动回退到系统 `curl`，两种情况都能下完。
+- 📦 **零配置** —— aria2 二进制随插件一起安装（npm `optionalDependencies`），无需自行下载或配置 PATH。
+- 👀 **进度看得见** —— `web` profile 下界面右下角有实时进度面板（文件名 / 百分比 / 速度 / 剩余时间），下载完成后自动消失。
+- 🔁 **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
+- 🌐 **镜像加速** —— 可选 `mirror` 参数，走 GitHub 镜像站加速下载。
+- 🔍 **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
+
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.4.0` 或更新版本。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 

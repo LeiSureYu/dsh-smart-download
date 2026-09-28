@@ -24,6 +24,7 @@ import { applyMirror } from './mirror.js'
 import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
 import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
+import { clearMarker, planResume, writeMarker } from './resume.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import type {
   DownloadStatusArgs,
@@ -120,10 +121,20 @@ export function apply(ctx: Context): void {
         const sizeField =
           probe.contentLength === undefined ? {} : { size: probe.contentLength }
 
-        // 是否启用断点续传：只有确认服务器支持 Range 时才续传。
-        // 实测：curl -C - 在服务器不支持 Range 且已存在半截文件时会以退出码 33 失败，
-        // 而同一场景不带 -C - 能正常全量重下。aria2 -c 则无条件安全。
-        const resume = probe.supportsMultiThread
+        // 是否启用断点续传（0.6.0 起前置一层安全校验）。
+        // 仅凭「服务器支持 Range」就续传是不够的：curl -C - 与 aria2 -c 都只看
+        // 本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是退出码
+        // 0 而文件是错的。planResume() 会比对远端长度与 ETag / Last-Modified，
+        // 无法证实同源时删掉本地半包全量重下（详见 src/resume.ts）。
+        const resumePlan = planResume(outputPath, probe, probe.supportsMultiThread)
+        const resume = resumePlan.resume
+        if (resumePlan.discarded) {
+          reporter.report(0, resumePlan.reason)
+        }
+        // 记下本次远端资源的指纹：此后留下的任何半包都对应这个指纹，
+        // 下次续传时才有得比（否则只能靠长度，挡不住「等长但内容变了」）。
+        // 下载失败时刻意保留，成功完成时才清除。
+        if (probe.contentLength !== undefined) writeMarker(outputPath, probe)
 
         // 2. 决策：按文件大小与 aria2 可用性选择方式 / 并发
         const aria2Path = getAria2Path()
@@ -143,6 +154,10 @@ export function apply(ctx: Context): void {
               reporter,
             )
             reporter.done()
+            // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
+            // 否则 download_status / 轨道一读取方会看到上一次的中间状态。
+            await reporter.awaitFlush()
+            clearMarker(outputPath)
             return {
               ...base,
               success: true,
@@ -165,6 +180,8 @@ export function apply(ctx: Context): void {
                 resume,
               )
               reporter.done('下载完成（curl 回退）')
+              await reporter.awaitFlush()
+              clearMarker(outputPath)
               return {
                 ...base,
                 success: true,
@@ -176,6 +193,7 @@ export function apply(ctx: Context): void {
               }
             } catch (curlErr) {
               reporter.fail(aria2Message)
+              await reporter.awaitFlush()
               throw curlErr
             }
           }
@@ -192,6 +210,8 @@ export function apply(ctx: Context): void {
             resume,
           )
           reporter.done()
+          await reporter.awaitFlush()
+          clearMarker(outputPath)
           return {
             ...base,
             success: true,
@@ -203,6 +223,7 @@ export function apply(ctx: Context): void {
           }
         } catch (err) {
           reporter.fail(err instanceof Error ? err.message : String(err))
+          await reporter.awaitFlush()
           throw err
         }
       },

@@ -82,14 +82,23 @@ export function getAria2Path(): string | null {
  * 拼接 aria2 命令行参数。
  * -x/-s 使用决策得到的并发数；
  * -c 开启断点续传（同名文件已存在时从断点继续，而不是重头再来）；
+ * --allow-overwrite=true 允许覆盖已存在的同名文件；
  * --summary-interval=1 每秒输出摘要，--show-console-readout=false 关闭原地刷新，
  * 便于以“每行一条”的方式解析进度。
  * 注意：aria2 的 -o 只接受相对文件名，目录必须通过 -d 指定。
+ *
+ * 为什么必须显式 `--allow-overwrite=true`（0.6.0 实测）：
+ * aria2 默认遇到同名文件不会覆盖，而是**另存为 `f.1.bin`**（实测：目录里同时
+ * 出现 `f.bin` 400 字节旧内容与 `f.1.bin` 1000 字节新内容）。这时下载「成功」
+ * 了，但调用方拿到的 `output` 路径指向的仍是那个旧文件 —— 一次静默的路径错位。
+ * 加上该开关后实测落盘正确覆盖为 1000 字节。
+ * 注意它与 `-c` 并不冲突：`-c` 只在能续传时生效，不能续传时该开关接管覆盖语义。
  */
 export function buildAria2Args(
   url: string,
   outputPath: string,
   concurrency: number = 8,
+  resume: boolean = true,
 ): string[] {
   const dir = dirname(outputPath)
   const base = basename(outputPath)
@@ -97,7 +106,9 @@ export function buildAria2Args(
     '-x', String(concurrency), // 单服务器最大连接数
     '-s', String(concurrency), // 同时使用的连接数
     '-k', '1M', // 最小分片大小
-    '-c', // 断点续传：沿用已下载的 .aria2 控制文件与已存在的文件
+    // 断点续传：仅在确认安全时开启（见 src/resume.ts）
+    ...(resume ? ['-c'] : []),
+    '--allow-overwrite=true', // 不能续传时覆盖旧文件，而不是另存 f.1.bin
     '--file-allocation=none', // 不预分配磁盘空间，Windows 上更快
     '--console-log-level=warn',
     '--summary-interval=1', // 每秒输出一次进度摘要
@@ -128,19 +139,19 @@ export function buildCurlArgs(
   outputPath: string,
   resume: boolean = false,
 ): string[] {
-  const args = [
+  // 用条件展开代替 `splice(2, 0, ...)`：位置魔法意味着「在数组字面量中间插入
+  // 一个元素」，一旦前面插入/删除任何开关，续传开关就会插错位置（曾经一次
+  // 误插让 `-o` 与输出路径分离）。条件展开让顺序由字面量本身表达。
+  return [
     '--progress-bar',
     '-L', // 跟随重定向
+    // 断点续传：自动读取已下载长度并从断点继续；文件不存在时从 0 开始
+    ...(resume ? ['-C', '-'] : []),
     '-o', outputPath,
     '--fail', // HTTP 错误时返回非零退出码
     '--show-error', // 输出错误信息
     url,
   ]
-  if (resume) {
-    // 断点续传：自动读取已下载长度并从断点继续；文件不存在时从 0 开始
-    args.splice(2, 0, '-C', '-')
-  }
-  return args
 }
 
 /** 确保输出文件所在目录存在 */
@@ -283,9 +294,10 @@ export async function downloadWithAria2(
   concurrency: number,
   signal?: AbortSignal,
   reporter?: ProgressReporter,
+  resume: boolean = true,
 ): Promise<void> {
   await ensureOutputDir(outputPath)
-  const args = buildAria2Args(url, outputPath, concurrency)
+  const args = buildAria2Args(url, outputPath, concurrency, resume)
   await runProcess(aria2Path, args, signal, {
     onStdout: (line) => {
       const parsed = parseAria2Summary(line)

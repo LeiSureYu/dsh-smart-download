@@ -64,6 +64,27 @@ test('decide: aria2 不可用 -> curl', () => {
   assert.match(d.reason, /aria2/)
 })
 
+test('decide: aria2 不可用时的理由带当前平台（env 可注入，平台依赖已纯函数化）', () => {
+  // 0.6.0 之前 decide() 直接读 process.platform，测试跑在哪个平台就只能断言
+  // 哪个平台；现在通过 env 注入，可以覆盖任意平台组合。
+  const d = decide(probe({ contentLength: 100 * MB }), false, {
+    platform: 'darwin',
+    arch: 'arm64',
+  })
+  assert.equal(d.method, 'curl')
+  assert.match(d.reason, /darwin-arm64/)
+})
+
+test('decide: 不传 env 时仍回落真实 process.platform / process.arch（行为不变）', () => {
+  const d = decide(probe({ contentLength: 100 * MB }), false)
+  assert.match(d.reason, new RegExp(`${process.platform}-${process.arch}`))
+})
+
+test('decide: env 只给一个字段时，另一个仍取真实环境', () => {
+  const d = decide(probe({ contentLength: 100 * MB }), false, { platform: 'linux' })
+  assert.match(d.reason, new RegExp(`linux-${process.arch}`))
+})
+
 /* ------------------------------ decide: aria2 分支 ------------------------------ */
 
 test('decide: 1MB~50MB + aria2 可用 -> aria2 4 连接', () => {

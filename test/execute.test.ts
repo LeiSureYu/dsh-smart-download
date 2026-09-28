@@ -13,7 +13,14 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -349,4 +356,78 @@ test('download_status：不带会话时只扫轨道二，不抛错', async () =>
   } finally {
     if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
   }
+})
+
+/* ---------------- 0.6.0：续传安全（静默损坏回归） ---------------- */
+
+/**
+ * 远端「等长但内容变了」时，curl -C - 与 aria2 -c 实测都是退出码 0 且保留旧内容。
+ * 这里预置一个等长旧半包 + 旧指纹，断言最终落盘的是新内容。
+ */
+test('续传安全：远端等长但内容变了 -> 删掉旧文件重下，落盘为新内容', async () => {
+  // 512KB < 1MB 阈值，决策固定走 curl，避免依赖本机是否装了 aria2 子包
+  const SIZE = 512 * 1024
+  const NEW_BYTE = 0x47
+  const OLD_BYTE = 0x41
+  // 长度与本次远端完全一致、内容不同的旧文件：只比长度看不出问题
+  const stale = Buffer.alloc(SIZE, OLD_BYTE)
+  const body = Buffer.alloc(SIZE, NEW_BYTE) // 本次的真实内容
+
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      etag: '"v-new"',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'stale-resume.bin')
+    // 旧文件 + 旧指纹：长度与本次一致、内容不同 —— 只有指纹能识破
+    writeFileSync(out, stale)
+    writeFileSync(
+      `${out}.part.json`,
+      JSON.stringify({ v: 1, length: SIZE, etag: '"v-old"' }),
+      'utf-8',
+    )
+
+    const result = await run({ url: `${base}/stale-resume.bin`, output: out })
+
+    assert.equal(result.success, true)
+    const written = readFileSync(out)
+    assert.equal(written.length, SIZE, '应完整重下')
+    assert.equal(written[0], NEW_BYTE, '落盘必须是本次的新内容')
+    assert.equal(written.includes(OLD_BYTE), false, '不得残留旧内容字节')
+    // 成功完成后旁车指纹应被清除，避免下次误比对
+    assert.equal(existsSync(`${out}.part.json`), false, '成功后应清掉旁车')
+  })
+})
+
+/** 下载失败/中断时保留旁车指纹，供下次续传比对 */
+test('续传安全：中断后保留 .part.json 指纹', async () => {
+  await withServer((req, res) => {
+    // 探测走 HEAD：必须正常结束，否则探测会在超时前就被 abort 打断，
+    // 拿不到 contentLength 也就不会写旁车。
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': '999999', 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    // 真正的下载永不结束，等待 abort
+    res.writeHead(200, { 'content-length': '999999', 'accept-ranges': 'bytes' })
+    res.write(Buffer.alloc(16, 0x48))
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'interrupted.bin')
+    const controller = new AbortController()
+    const pending = tool.execute(
+      { url: `${base}/interrupted.bin`, output: out },
+      { signal: controller.signal },
+    )
+    // 500ms：确保探测（HEAD）已完成、curl 真正进入下载后再中止，
+    // 否则会在拿到 contentLength 之前就中断，旁车自然还没写。
+    setTimeout(() => controller.abort(), 500)
+    await assert.rejects(() => pending, /取消|abort/i)
+    // 失败时刻意保留指纹：下次续传时才有得比
+    assert.equal(existsSync(`${out}.part.json`), true, '中断后应保留旁车指纹')
+  })
 })

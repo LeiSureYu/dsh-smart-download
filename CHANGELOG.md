@@ -11,6 +11,89 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-29
+
+### 修复 / Fixed
+
+- **续传可能产出「看起来成功、实际是错的」文件（最严重）**：此前只要探测到服务器支持 Range
+  就无条件加 `curl -C -` / `aria2 -c`。但两者都**只看本地文件长度**，不校验远端资源有没有变。
+  用真实 curl 8.13.0 与随包 aria2 1.37.0 在 127.0.0.1 上实测（`work/_fix/probe-resume.mjs`）：
+
+  | 场景 | `curl -C -` | `aria2 -c` |
+  | --- | --- | --- |
+  | 远端变大 400B→1000B（同源） | exit 0，正确 1000B | exit 0，正确 1000B |
+  | 远端变小 400B→200B | **exit 0，落盘仍是 400B** | **exit 0，落盘仍是 400B** |
+  | 等长但内容变了 400B→400B(异) | **exit 0，保留旧内容** | **exit 0，保留旧内容** |
+  | 服务器忽略 Range | exit 33（明确报错） | exit 0，正确 1000B |
+
+  前三行是静默损坏：**退出码 0 且文件是错的**，用户拿到一个错误的产物却没有任何提示。现在续传前
+  先比对「远端长度 + ETag / Last-Modified」，只有能证实本地半包确实是同一资源的前缀时才续传，
+  否则删掉本地文件全量重下（详见 `src/resume.ts`）。
+  **Resuming could silently produce a wrong file**: previously, any server that advertised Range
+  support got `curl -C -` / `aria2 -c` unconditionally. Both tools only look at the local file
+  length and never check whether the remote resource changed. Measured with real curl 8.13.0 and
+  the bundled aria2 1.37.0 on 127.0.0.1 (`work/_fix/probe-resume.mjs`): remote shrinks 400B→200B →
+  both exit 0 with the stale 400B still on disk; same length but different content → both exit 0
+  with the old content intact. Both are silent corruptions: exit code 0 with a wrong file and no
+  warning. Resume now compares "remote length + ETag / Last-Modified" first and only continues when
+  the local partial file can be proven to be a prefix of the same resource; otherwise the local file
+  is deleted and re-downloaded in full (see `src/resume.ts`).
+- **aria2 覆盖下载时返回的路径与真实产物错位**：目标文件已存在时，aria2 既不截断也不覆盖，而是
+  另存为 `f.1.bin` 并把新内容写进去，原 `f.bin` 保持旧内容。插件返回的 `path` 指向 `f.bin`，
+  用户拿到的是旧文件。现在 aria2 调用统一带 `--allow-overwrite=true`（实测：仅留下 `f.bin`，
+  1000B 正确覆盖）。
+  **aria2 wrote to a different path than the one returned**: when the target already existed,
+  aria2 did not truncate or overwrite it; it saved the new content as `f.1.bin` and left the old
+  `f.bin` untouched, while the plugin returned `path` pointing at `f.bin`. aria2 is now always
+  invoked with `--allow-overwrite=true` (measured: only `f.bin` remains, correctly overwritten).
+
+### 新增 / Added
+
+- **`src/resume.ts`：续传安全策略**。导出 `planResume()` / `writeMarker()` / `clearMarker()` /
+  `localFileSize()` / `normalizeEtag()`。判定顺序：无本地文件 → 从头下；远端长度未知 → 删掉重下；
+  本地比远端还长 → 删掉重下；ETag / Last-Modified 变化 → 删掉重下；旁车长度与本次远端长度不一致 →
+  删掉重下；其余 → 按长度续传。删除时会连带清掉 aria2 的 `.aria2` 控制文件（留着它会让 aria2 按旧
+  进度继续）。
+  **`src/resume.ts`: resume safety policy** exporting `planResume()` / `writeMarker()` /
+  `clearMarker()` / `localFileSize()` / `normalizeEtag()`.
+- **`.part.json` 旁车指纹**：下载开始前把本次远端资源的长度与 ETag / Last-Modified 写到
+  `<output>.part.json`。指纹是唯一能挡住「等长但内容变了」的手段（只比长度挡不住）。下载成功时
+  清除；**失败或中断时刻意保留**，供下次续传比对。
+  **`.part.json` sidecar fingerprint**: the remote length plus ETag / Last-Modified are recorded
+  before the download starts. Cleared on success and deliberately kept on failure or interruption.
+- **`decide()` 的平台入参**：新增可选 `DecideEnv { platform?, arch? }`，缺省时才回落
+  `process.platform` / `process.arch`。此前「aria2 不可用」的提示文案直接读环境，导致该分支在别的
+  平台上无法被单测覆盖；现在行为不变但可注入。
+  **`decide()` environment parameter**: optional `DecideEnv { platform?, arch? }`, falling back to
+  `process.platform` / `process.arch` when omitted.
+- **进度写盘异步化**：`ProgressReporter.report()` 不再同步 `appendFileSync` / `writeFileSync`，
+  改为把记录 push 进队列后在 microtask 里批量写出（保序，不合并中间记录），并新增
+  `awaitFlush()` 供调用方在返回前等待落盘。
+  **Progress writes are now asynchronous** with a new `awaitFlush()` for callers to await.
+
+### 变更 / Changed
+
+- **`buildCurlArgs` 去掉位置魔法**：原来用 `args.splice(2, 0, '-C', '-')` 按索引插参，参数顺序一变
+  就会插错位置；现在 `-C -` 直接写在数组字面量里由 `resume` 条件展开。
+  **`buildCurlArgs` no longer splices by index**: `-C -` is now spread conditionally in the array
+  literal.
+- **`buildAria2Args` / `downloadWithAria2` 新增 `resume` 参数**：不续传时不再传 `-c`，配合
+  `--allow-overwrite=true` 走覆盖写。
+  **`buildAria2Args` / `downloadWithAria2` take a `resume` argument**: `-c` is omitted when not
+  resuming.
+
+### 验证 / Verification
+
+- `npm test`：**177 通过 / 0 失败**（0.5.0 为 148）。新增覆盖：`test/resume.test.ts`（24 例，
+  含 ETag 归一化、旁车往返与损坏回退、`planResume` 全分支）、`decide()` 的平台注入、
+  `execute()` 层的两条续传安全集成用例（等长但内容变了 → 必须重下且落盘为新内容；中断后必须保留
+  旁车指纹）。
+  `npm test`: **177 passing / 0 failing** (148 on 0.5.0). New coverage: `test/resume.test.ts`
+  (24 cases), platform injection for `decide()`, and two resume-safety integration cases at the
+  `execute()` level.
+- `npx tsc --noEmit` 干净，`npm run build` 成功。
+  `npx tsc --noEmit` clean, `npm run build` succeeds.
+
 ## [0.5.0] - 2026-09-29
 
 ### 修复 / Fixed
@@ -216,7 +299,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.0...v0.4.1

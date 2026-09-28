@@ -1,10 +1,14 @@
 {
   "name": "@leisureyu/dsh-smart-dl",
-  "version": "0.2.0",
-  "description": "Multi-threaded downloader plugin for DeepSeek Harness, powered by bundled aria2",
+  "version": "0.2.1",
+  "description": "Multi-threaded downloader plugin for DeepSeek Harness: bundles aria2, probes file size and picks aria2 multi-connection or curl fallback automatically (Windows x64/arm64, Linux x64/arm64)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LeiSureYu/dsh-smart-download.git"
+  },
+  "homepage": "https://github.com/LeiSureYu/dsh-smart-download#readme",
+  "bugs": {
+    "url": "https://github.com/LeiSureYu/dsh-smart-download/issues"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -34,7 +38,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-tools": "^0.1.0"
+    "@deepseek-ai/dsh-tools": ">=0.1.7-rc.1 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
@@ -52,9 +56,18 @@
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
+    "deepseek",
+    "dsh",
     "download",
+    "downloader",
+    "download-manager",
+    "download-accelerator",
     "aria2",
-    "multi-thread"
+    "aria2-downloader",
+    "aria2c",
+    "multi-thread",
+    "multi-threaded-download",
+    "multithread"
   ],
   "license": "MIT",
   "engines": {

@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
 ![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/leisureyu/dsh-smart-download)
 
 [简体中文](./README.md) · **English**
 
@@ -19,6 +20,8 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
 
 No further configuration is needed: the aria2 binaries are installed together with the plugin via npm `optionalDependencies`.
+
+**Supported profile**: `web` — the profile this plugin has been verified against (hence `--profile web` above). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
 
 > **Use `0.2.1` or newer.** Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.2.1`.
 >
@@ -110,6 +113,31 @@ In addition, `test/meta-test-discovery.test.ts` enumerates every test file under
 | macOS    | x64 / arm64 | ❌ Not yet          | —                                    |
 
 The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching platforms.
+
+## Permissions
+
+This plugin does exactly two things: **start downloads** and **write progress files**. Itemised below.
+
+| Behaviour | Detail |
+| --- | --- |
+| Outbound network | Sends `HEAD` / `Range` probes to the target URL (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller — no other endpoints. |
+| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted, and the download commands do not enable `--allow-overwrite` / `--continue`, so an existing file of the same name is not silently overwritten. |
+| Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl` (skipped if that variable is unset). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `~/.dsh/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
+| Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, force-killed on Windows if still alive after 1s). |
+| Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR`, `USERPROFILE` / `HOME`. |
+
+What it **does not** need: it does not read your DSH session contents, does not touch credentials or keys, does not modify DSH configuration (the `cordis.patch.yml` is applied by DSH itself at install time), and ships no telemetry or network reporting.
+
+## Compatibility
+
+| Item | Requirement |
+| --- | --- |
+| Node.js | `>=22.0.0` (uses `AbortSignal.any` / `AbortSignal.timeout`) |
+| `@deepseek-ai/cordis` | `^4.0.0` (peerDependency) |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` or `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple) |
+| Package manager | npm or pnpm; must honour `os` / `cpu` filtering of `optionalDependencies` |
+
+macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage for it**. On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
 
 ## FAQ
 

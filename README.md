@@ -6,6 +6,8 @@
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
 ![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
 
+**简体中文** · [English](./README.en.md)
+
 > DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册一个 `smart_download` 工具。当模型需要下载文件时，插件会先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 进行多线程加速下载，否则自动回退到系统自带的 `curl` 单线程下载，保证在任何情况下都能完成下载。
@@ -18,7 +20,9 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
 
-> **版本要求：请使用 `0.2.0` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.2.0`。
+> **版本要求：请使用 `0.2.1` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.2.1`。
+>
+> `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
 ## 工作原理
 

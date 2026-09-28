@@ -11,6 +11,83 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-29
+
+### 修复 / Fixed
+
+- **进度面板永远显示「下载中」（最严重）**：写入 dsh-task-progress 轨道（轨道一）的每条记录都缺少
+  `state` 字段，而该协议的读取端 `parseEvent()` **只认 `state`**，缺失时一律按 `running` 处理。
+  结果：即使 `pct=100`、`msg=下载完成`，界面面板也永远显示「下载中」，`download_status` 只能靠
+  文案猜状态。现在 `report()` 会写入显式 `state`，终态（`done` / `failed` / `cancelled`）一定带对。
+  **Panel stuck on "downloading" forever**: every record written to the dsh-task-progress track
+  (track 1) lacked a `state` field, and that protocol's reader (`parseEvent()`) **only looks at
+  `state`**, defaulting to `running` when it is missing. So even with `pct=100` and
+  `msg=下载完成`, the UI panel showed "downloading" forever and `download_status` could only guess
+  from the message. `report()` now writes an explicit `state`, and terminal states (`done` /
+  `failed` / `cancelled`) always carry the right one.
+- **没有会话上下文时把进度写进没人读的目录**：轨道一此前固定写入 `<cwd>/.dsh-progress/default/`，
+  但 dsh-task-progress 的读取端按 `sessionId` 过滤目录（`snapshot(now, sessionId)`），写错目录等于
+  没写。现在轨道一写入 `<session.cwd>/.dsh-progress/<session.id>/`（来自
+  `exec.agent.session.header`），**拿不到会话时不写轨道一**，而不是写进一个永远不会被读到的目录。
+  **Progress written to a directory nobody reads**: track 1 always went to
+  `<cwd>/.dsh-progress/default/`, but the dsh-task-progress reader filters directories by
+  `sessionId` (`snapshot(now, sessionId)`), so writing to the wrong directory is the same as not
+  writing. Track 1 now goes to `<session.cwd>/.dsh-progress/<session.id>/` (from
+  `exec.agent.session.header`), and is **skipped entirely when there is no session** instead of
+  being written somewhere that is never read.
+- **未读取 `DSH_HOME`，进度写进陈旧 home**：轨道二的缺省目录此前用 `USERPROFILE` / `HOME` 推导，
+  完全忽略 DSH 自己的 `DSH_HOME`。实测本机 `DSH_HOME=C:/Users/Qing/.dsh-home`，而进度仍被写进
+  陈旧的 `~/.dsh/downloads/tasks/`。现在复刻 `@deepseek-ai/dsh-home-paths` 的优先级：显式配置 →
+  `$DSH_HOME`（空 / 纯空白视为未设置）→ `~/.dsh`。
+  **`DSH_HOME` ignored, progress landed in a stale home**: the default directory for track 2 was
+  derived from `USERPROFILE` / `HOME`, ignoring DSH's own `DSH_HOME`. On a machine with
+  `DSH_HOME=C:/Users/Qing/.dsh-home` the progress still went to the stale
+  `~/.dsh/downloads/tasks/`. The precedence of `@deepseek-ai/dsh-home-paths` is now mirrored:
+  explicit config → `$DSH_HOME` (empty / whitespace-only counts as unset) → `~/.dsh`.
+
+### 新增 / Added
+
+- **`cancelled` 状态**：`ProgressReporter.cancel()` 写入 `state: 'cancelled'`，轨道二与
+  `download_status`、界面面板都能区分「取消」与「失败」。`AbortSignal` 触发的中止也走这条路径。
+  **`cancelled` state**: `ProgressReporter.cancel()` writes `state: 'cancelled'`; track 2,
+  `download_status` and the UI panel can now tell "cancelled" apart from "failed". Aborts caused by
+  the `AbortSignal` take this path too.
+- **`download_status` 支持会话定位**：RPC 请求体新增可选 `session: { id, cwd }`，Host 据此扫描
+  该会话的进度目录；界面面板会自动带上当前主会话。不传时行为与之前一致（只扫轨道二）。
+  **Session-aware `download_status`**: the RPC payload accepts an optional `session: { id, cwd }`
+  so the Host can scan that session's progress directory; the UI panel supplies the current main
+  session automatically. Without it the behaviour is unchanged (track 2 only).
+
+### 变更 / Changed
+
+- **去重语义：从「百分比去重」改为「整条记录去重」**。此前进度只在整数百分比变化时才落盘，速度与
+  ETA 变化被丢弃；现在 `pct + state + msg + spd + eta` 完全一致才跳过，因此面板能看到实时的速度与
+  剩余时间，而终态因为 `state` 变化必然穿透去重。
+  **De-duplication changed from "by percentage" to "by the whole record"**: previously progress was
+  only written when the integer percentage changed, dropping speed and ETA updates. Now a record is
+  skipped only when `pct + state + msg + spd + eta` all match, so the panel sees live speed and ETA,
+  while terminal states always break through because `state` changed.
+- **`download_status` 的状态判定以 `state` 为准**：记录带 `state` 时完全按 `state` 映射
+  （`done` → `completed` 等）；老版本进度文件没有 `state` 时，仍回退到按文案与百分比推断，保持
+  向后兼容。
+  **`download_status` now trusts `state`**: when a record carries `state` it maps directly
+  (`done` → `completed`, etc.); older progress files without `state` still fall back to
+  message/percentage inference for backward compatibility.
+
+### 验证 / Verification
+
+- `npm test`：**148 通过 / 0 失败**（0.4.2 为 124）。新增覆盖：`state` 写入与终态穿透、`cancelled`
+  状态、整条记录去重、`resolveTaskProgressDir` / `resolveDshHome` /
+  `resolveDownloadProgressDir` 的优先级与非法输入、无会话时不写轨道一、`download_status` 的
+  `state` 优先级与按会话定位、`execute()` 在带 / 不带会话上下文时轨道一的落点。
+  `npm test`: **148 passing / 0 failing** (124 on 0.4.2). New coverage: `state` writing and
+  terminal-state de-dup bypass, the `cancelled` state, whole-record de-duplication, the precedence
+  and invalid-input handling of `resolveTaskProgressDir` / `resolveDshHome` /
+  `resolveDownloadProgressDir`, "no session → no track 1", `download_status`'s `state` precedence
+  and session targeting, and where `execute()` puts track 1 with and without a session context.
+- `npx tsc --noEmit` 干净，`npm run build` 成功。
+  `npx tsc --noEmit` clean, `npm run build` succeeds.
+
 ## [0.4.2] - 2026-09-29
 
 ### 修复 / Fixed
@@ -139,7 +216,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.3.0...v0.4.0

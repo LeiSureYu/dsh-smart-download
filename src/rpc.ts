@@ -14,6 +14,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
+import type { ProgressSession } from './progress.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
 const API_PATH = '/api'
@@ -66,13 +67,38 @@ function envelopeResponse(rpcId: string, result: RpcOk | RpcFail): Response {
   })
 }
 
-/** 从请求体里取出 limit（非法值回落到默认条数）。 */
-function readLimit(payload: unknown): number {
-  if (payload === null || typeof payload !== 'object') return DEFAULT_STATUS_LIMIT
-  const raw = (payload as { limit?: unknown }).limit
-  const n = Number(raw)
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STATUS_LIMIT
-  return Math.min(50, Math.floor(n))
+/** 从请求体里解析出的查询参数。 */
+interface StatusQuery {
+  /** 最多返回多少个任务 */
+  limit: number
+  /** 当前会话（用于定位轨道一目录）；字段不合法时为 undefined */
+  session?: ProgressSession
+}
+
+/**
+ * 从请求体里解析查询参数（非法值一律回落到安全默认）。
+ *
+ * 客户端会把当前会话的 `{ id, cwd }` 一起传上来，因为轨道一的目录是
+ * `<cwd>/.dsh-progress/<id>/`，而 Host 侧单靠 RPC 无法知道是哪个会话发起的。
+ * 校验交给 `resolveTaskProgressDir`（它按 dsh-task-progress 的目录名规则校验），
+ * 这里只做「形状对不对」的粗筛，避免把任意字符串当路径用。
+ */
+function readPayload(payload: unknown): StatusQuery {
+  if (payload === null || typeof payload !== 'object') {
+    return { limit: DEFAULT_STATUS_LIMIT }
+  }
+  const body = payload as { limit?: unknown; session?: unknown }
+  const n = Number(body.limit)
+  const limit =
+    Number.isFinite(n) && n > 0 ? Math.min(50, Math.floor(n)) : DEFAULT_STATUS_LIMIT
+
+  const rawSession = body.session
+  if (rawSession === null || typeof rawSession !== 'object') return { limit }
+  const candidate = rawSession as { id?: unknown; cwd?: unknown }
+  const id = typeof candidate.id === 'string' ? candidate.id : undefined
+  const cwd = typeof candidate.cwd === 'string' ? candidate.cwd : undefined
+  if (id === undefined && cwd === undefined) return { limit }
+  return { limit, session: { id, cwd } }
 }
 
 /**
@@ -141,9 +167,10 @@ export function registerStatusRpc(ctx: Context): void {
             }
 
             try {
+              const query = readPayload(envelope.payload)
               return envelopeResponse(
                 envelope.rpcId,
-                ok(readDownloadStatus(readLimit(envelope.payload))),
+                ok(readDownloadStatus(query.limit, undefined, query.session)),
               )
             } catch (err) {
               return envelopeResponse(
@@ -157,4 +184,3 @@ export function registerStatusRpc(ctx: Context): void {
     )
   })
 }
-

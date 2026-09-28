@@ -62,12 +62,30 @@ export interface ProbeOptions {
 
 /**
  * DSH 工具执行上下文。
- * 假设：DSH 0.1.0-rc.5 的 execute 第二参会透传一个含 AbortSignal 的对象，
- * 这里只声明本插件实际使用到的字段。
+ *
+ * execute 的第二参是 `@deepseek-ai/dsh-tools` 的 `ToolRunContext`，它带
+ * `signal` 与 `agent`（`readonly agent?: Agent`）。这里只声明本插件真正读到的
+ * 结构化子集：不 import `@deepseek-ai/dsh-agent` / `dsh-session`，避免把
+ * 它们写进 peerDependencies —— 我们只按形状取用，缺字段时自行降级。
+ *
+ * 为什么需要 session：dsh-task-progress 的读取端按 session 过滤
+ * （`snapshot(now, sessionId)`），写入端必须把进度文件放进
+ * `<session.cwd>/.dsh-progress/<session.id>/`，否则那条轨道永远不会被面板读到。
  */
 export interface ToolExecutionContext {
   /** 模型 / 宿主取消本次调用时触发的信号 */
   signal: AbortSignal
+  /** 发起本次调用的 agent（由 agent loop 注入），缺省时拿不到 session */
+  readonly agent?: {
+    readonly session?: {
+      readonly header?: {
+        /** 会话 ID，同时也是进度目录名 */
+        readonly id?: string
+        /** 会话创建时的工作目录 */
+        readonly cwd?: string
+      }
+    }
+  }
 }
 
 /** download_status 工具入参 */
@@ -104,6 +122,13 @@ export interface ProgressRecord {
   /** 简短说明 */
   msg: string
   /**
+   * 任务状态。dsh-task-progress 的 `parseEvent()` **只认这个字段**：
+   * 缺失时一律按 `running` 处理，因此 0.5.0 之前写的轨道一记录即使
+   * `pct` 已经是 100、`msg` 写着「下载完成」，面板也永远显示「下载中」。
+   * 取值：`running` | `done` | `failed` | `cancelled`。
+   */
+  state?: ProgressState
+  /**
    * 人类可读的任务名（通常是输出文件名）。
    * 独立于 `msg`：`msg` 承载状态文案（"下载中（aria2）"），
    * 面板要展示的是文件名，两者不能互相顶掉。
@@ -114,3 +139,6 @@ export interface ProgressRecord {
   /** 剩余时间字符串，如 "4m51s" */
   eta?: string
 }
+
+/** 进度状态，取值与 dsh-task-progress 的协议一致 */
+export type ProgressState = 'running' | 'done' | 'failed' | 'cancelled'

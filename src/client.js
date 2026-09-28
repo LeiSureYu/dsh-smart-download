@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
 			'running': '下载中',
 			'completed': '已完成',
 			'failed': '失败',
+			'cancelled': '已取消',
 			'eta': '剩余 {eta}',
 			'untitled': '未命名任务',
 		};
@@ -57,6 +58,7 @@ window.__ModuleLoader__.load({
 			'running': 'Downloading',
 			'completed': 'Completed',
 			'failed': 'Failed',
+			'cancelled': 'Cancelled',
 			'eta': 'ETA {eta}',
 			'untitled': 'Untitled task',
 		};
@@ -90,6 +92,7 @@ window.__ModuleLoader__.load({
 			running: { bar: 'var(--dsw-alias-interactive-bg-primary, #4d6bfe)', text: 'var(--dsw-alias-label-primary, #1f2329)' },
 			completed: { bar: 'var(--dsw-alias-state-success-primary, #22a06b)', text: 'var(--dsw-alias-label-primary, #1f2329)' },
 			failed: { bar: 'var(--dsw-alias-state-error-primary, #d92d20)', text: 'var(--dsw-alias-state-error-primary, #d92d20)' },
+			cancelled: { bar: 'var(--dsw-alias-label-tertiary, #9ca3af)', text: 'var(--dsw-alias-label-tertiary, #9ca3af)' },
 		};
 
 		/** One task row: label, percentage, bar, speed/ETA. */
@@ -102,6 +105,7 @@ window.__ModuleLoader__.load({
 			if (task.eta && task.status === 'running') meta.push(t('eta', { eta: task.eta }));
 			if (task.status === 'completed') meta.push(t('completed'));
 			if (task.status === 'failed') meta.push(t('failed'));
+			if (task.status === 'cancelled') meta.push(t('cancelled'));
 
 			return react.createElement(
 				'div',
@@ -182,15 +186,63 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Find the session currently occupying the main view. The Host writes
+		 * task-progress records into `<session.cwd>/.dsh-progress/<session.id>/`,
+		 * and only that session's panel will ever read them, so the pill must tell
+		 * the Host which session it is asking about.
+		 *
+		 * `retainedBy.mainView` is the same signal dsh-client-ui-layout uses to
+		 * pick the frame's active session (`ui-layout/lib/client.js`).
+		 * @param state - the `useSessions` snapshot (`{ byId }`).
+		 * @returns the session row, or undefined when no main session exists.
+		 */
+		function mainSession(state) {
+			const byId = state && state.byId;
+			if (!byId) return undefined;
+			for (const id of Object.keys(byId)) {
+				const row = byId[id];
+				if (row && (row.retainedBy && row.retainedBy.mainView ? row.retainedBy.mainView : 0) > 0) return row;
+			}
+			return undefined;
+		}
+
+		/**
+		 * Selector-hook fallback for shells that do not expose `useSessions`.
+		 * It still calls exactly one React hook (`useMemo`), so the component's
+		 * hook order and count are identical whether or not the shell provides
+		 * the real hook — swapping between the two never breaks the Rules of
+		 * Hooks.
+		 * @param selector - a snapshot selector; receives `undefined` here.
+		 * @returns the selector applied to an empty snapshot.
+		 */
+		function useNoSessions(selector) {
+			return react.useMemo(() => selector(undefined), []);
+		}
+
+		/**
 		 * The `shell.overlay` entry. Polls the Host for a status snapshot and
 		 * renders nothing while there is no task worth showing, so the overlay
 		 * layer stays click-through when idle.
-		 * @param props - the injected status caller and the locale seat.
+		 * @param props - the injected status caller, the locale seat, and the
+		 *   framework's `useSessions` hook (absent on older shells).
 		 * @returns the pill, or null.
 		 */
-		function SmartDlProgressPill({ requestStatus, t }) {
+		function SmartDlProgressPill({ requestStatus, t, useSessions }) {
 			const [tasks, setTasks] = react.useState(null);
 			const [now, setNow] = react.useState(() => Date.now());
+			// Read the active session id through the framework hook. Hooks must be
+			// called unconditionally, so fall back to `useNoSessions` when the
+			// shell does not expose `useSessions` (older hosts): the pill then asks
+			// for an unfiltered snapshot, which is exactly the previous behaviour.
+			const useSessionsHook = useSessions || useNoSessions;
+			const sessionId = useSessionsHook((state) => {
+				const session = mainSession(state);
+				return session ? session.id : undefined;
+			});
+			const sessionCwd = useSessionsHook((state) => {
+				const session = mainSession(state);
+				return session ? session.cwd : undefined;
+			});
 
 			react.useEffect(() => {
 				let cancelled = false;
@@ -198,7 +250,11 @@ window.__ModuleLoader__.load({
 				const controller = new AbortController();
 				const tick = async () => {
 					try {
-						const result = await requestStatus({ limit: STATUS_LIMIT }, controller.signal);
+						const payload = { limit: STATUS_LIMIT };
+						// Only send a session the Host can validate; without one the
+						// Host falls back to scanning just the JSON track.
+						if (sessionId && sessionCwd) payload.session = { id: sessionId, cwd: sessionCwd };
+						const result = await requestStatus(payload, controller.signal);
 						if (cancelled) return;
 						if (result && result.ok && result.value && Array.isArray(result.value.tasks)) {
 							setTasks(result.value.tasks);
@@ -215,7 +271,7 @@ window.__ModuleLoader__.load({
 					if (timer !== null) clearInterval(timer);
 					controller.abort();
 				};
-			}, [requestStatus]);
+			}, [requestStatus, sessionId, sessionCwd]);
 
 			if (tasks === null) return null;
 			const visible = tasks.filter(

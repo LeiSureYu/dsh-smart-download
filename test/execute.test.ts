@@ -13,7 +13,7 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -48,20 +48,25 @@ interface RegisteredTool {
   output: { schema: unknown }
 }
 
-/** 用桩 ctx 取出插件注册的 smart_download 工具定义。 */
-function loadTool(): RegisteredTool {
+/** 用桩 ctx 取出插件注册的指定工具定义。 */
+function loadToolNamed(name: string): RegisteredTool {
   let tool: RegisteredTool | undefined
   const ctx = {
     tools: {
       register: (t: RegisteredTool) => {
-        if (t.name === 'smart_download') tool = t
+        if (t.name === name) tool = t
       },
     },
     inject: () => {},
   }
   apply(ctx as never)
-  assert.ok(tool, '应注册 smart_download')
+  assert.ok(tool, `应注册 ${name}`)
   return tool
+}
+
+/** 用桩 ctx 取出插件注册的 smart_download 工具定义。 */
+function loadTool(): RegisteredTool {
+  return loadToolNamed('smart_download')
 }
 
 /* ------------------------------ 本地 server ------------------------------ */
@@ -128,11 +133,14 @@ async function withServer(
   }
 }
 
-/** 跑一次 execute，返回结果 */
-async function run(args: Record<string, unknown>): Promise<SmartDownloadResult> {
-  return (await tool.execute(args, {
-    signal: new AbortController().signal,
-  })) as SmartDownloadResult
+/** 跑一次 execute，返回结果（可选传入 agent 以获得会话上下文） */
+async function run(
+  args: Record<string, unknown>,
+  agent?: unknown,
+): Promise<SmartDownloadResult> {
+  const exec: Record<string, unknown> = { signal: new AbortController().signal }
+  if (agent !== undefined) exec.agent = agent
+  return (await tool.execute(args, exec)) as SmartDownloadResult
 }
 
 /* ------------------------------ 用例 ------------------------------ */
@@ -222,4 +230,123 @@ test('取消信号：下载被中止时以错误结束', async () => {
     setTimeout(() => controller.abort(), 300)
     await assert.rejects(() => pending, /取消|abort/i)
   })
+})
+
+/* ---------------- 0.5.0：会话上下文决定轨道一的落点 ---------------- */
+
+/** 跑一次带 agent 会话上下文的下载，并返回会话进度目录 */
+async function runInSession(base: string, cwd: string, sessionId: string): Promise<string> {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    const result = await run(
+      { url: `${base}/sess.bin`, output: path.join(tmpRoot, `${sessionId}.bin`) },
+      { session: { header: { id: sessionId, cwd } } },
+    )
+    assert.equal(result.success, true)
+    return path.join(cwd, '.dsh-progress', sessionId)
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
+}
+
+test('有 agent 会话时轨道一写进 <cwd>/.dsh-progress/<id>/', async () => {
+  const body = Buffer.alloc(2048, 0x44)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'exec-sess-'))
+    try {
+      const sessionDir = await runInSession(base, cwd, 'sess-exec')
+      const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl'))
+      assert.equal(files.length, 1, '应恰好有一个任务 JSONL')
+      const lines = readFileSync(path.join(sessionDir, files[0]!), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { state?: string })
+      assert.equal(lines[lines.length - 1]?.state, 'done', '末条记录必须带终态 state')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+test('无 agent 时不写轨道一（只有轨道二文件）', async () => {
+  const body = Buffer.alloc(1024, 0x45)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const saved = process.env.DSH_PROGRESS_DIR
+    delete process.env.DSH_PROGRESS_DIR
+    try {
+      const result = await run({ url: `${base}/nosess.bin`, output: path.join(tmpRoot, 'nosess.bin') })
+      assert.equal(result.success, true)
+      // 轨道二（DSH_DOWNLOAD_PROGRESS_DIR 仍指向临时目录）里应有本次任务
+      const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+      const files = readdirSync(dlDir).filter((f) => f.endsWith('.json'))
+      assert.ok(files.length >= 1, '轨道二应写入任务文件')
+    } finally {
+      if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+    }
+  })
+})
+
+/* ---------------- 0.5.0：download_status 的会话定位 ---------------- */
+
+test('download_status：带会话上下文时能读到本次会话的轨道一', async () => {
+  const body = Buffer.alloc(1536, 0x46)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'exec-status-'))
+    const saved = process.env.DSH_PROGRESS_DIR
+    delete process.env.DSH_PROGRESS_DIR
+    try {
+      const agent = { session: { header: { id: 'sess-status', cwd } } }
+      const dl = await run({ url: `${base}/st.bin`, output: path.join(tmpRoot, 'st.bin') }, agent)
+      assert.equal(dl.success, true)
+
+      // 轨道二目录是跨用例共享的，因此这里按 taskId 精确查本次任务
+      const sessionDir = path.join(cwd, '.dsh-progress', 'sess-status')
+      const taskId = readdirSync(sessionDir).find((f) => f.endsWith('.jsonl'))!.slice(0, -6)
+
+      const statusTool = loadToolNamed('download_status')
+      const snap = (await statusTool.execute(
+        { taskId },
+        { signal: new AbortController().signal, agent },
+      )) as {
+        total: number
+        taskDir: string
+        tasks: Array<{ status: string; pct: number }>
+      }
+      assert.equal(snap.taskDir, sessionDir)
+      assert.equal(snap.total, 1)
+      assert.equal(snap.tasks[0]?.status, 'completed', '终态应被 state 正确映射')
+      assert.equal(snap.tasks[0]?.pct, 100)
+    } finally {
+      if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+test('download_status：不带会话时只扫轨道二，不抛错', async () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    const statusTool = loadToolNamed('download_status')
+    const snap = (await statusTool.execute({}, { signal: new AbortController().signal })) as {
+      ok: boolean
+      taskDir: string
+      tasks: unknown[]
+    }
+    assert.equal(snap.ok, true)
+    assert.equal(snap.taskDir, '', '无 DSH_PROGRESS_DIR 且无会话 -> 空串')
+    assert.ok(Array.isArray(snap.tasks))
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
 })

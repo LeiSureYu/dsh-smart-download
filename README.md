@@ -22,7 +22,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.4.2` 或更新版本。
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.5.0` 或更新版本。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -41,7 +41,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 > **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
-> **版本要求：请使用 `0.4.2` 或更高。** `0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.4.2`。
+> **版本要求：请使用 `0.5.0` 或更高。** `0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.5.0`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
@@ -157,7 +157,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 ```json
 {
   "ok": true,
-  "taskDir": "/path/.dsh-progress/default",
+  "taskDir": "/path/.dsh-progress/<session-id>",
   "downloadDir": "/home/u/.dsh/downloads/tasks",
   "total": 1,
   "tasks": [
@@ -187,10 +187,10 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 下载过程中通过 `ProgressReporter` **双轨**写入进度，任一轨道不可写都静默容错，不影响下载：
 
-- 轨道一（dsh-task-progress 格式）：`$DSH_PROGRESS_DIR/<taskId>.jsonl`，每行一条 JSON，append-only；
-- 轨道二（dsh-download-progress 格式）：`$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `~/.dsh/downloads/tasks/<taskId>.json`，整体覆盖写。
+- 轨道一（dsh-task-progress 格式）：`$DSH_PROGRESS_DIR/<taskId>.jsonl`，每行一条 JSON，append-only；未设置该环境变量时，缺省为 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（会话 ID 与工作目录来自 `exec.agent.session.header`）。**拿不到会话上下文时不写轨道一**——dsh-task-progress 的读取端按 session 过滤，写进错误的目录等于没写；
+- 轨道二（本插件自有格式）：`$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`（`DSH_HOME` 缺省为 `~/.dsh`），整体覆盖写。
 
-进度按百分比去重，完成 / 失败终态会穿透去重。aria2 解析 `--summary-interval=1` 的摘要行（含速度与 ETA），curl 解析 `--progress-bar` 的百分比。
+每条记录都带 `state` 字段（`running` / `done` / `failed` / `cancelled`）：dsh-task-progress 的读取端只认 `state`，缺失时一律当作 `running`，因此 0.5.0 之前的进度记录即使 `pct=100`、`msg=下载完成`，面板也永远显示「下载中」。进度**按整条记录去重**（`pct + state + msg + spd + eta` 完全一致才跳过），任一项变化都会写入，因此面板能看到实时的速度与剩余时间；完成 / 失败 / 取消等终态因为 `state` 变化，必然穿透去重。aria2 解析 `--summary-interval=1` 的摘要行（含速度与 ETA），curl 解析 `--progress-bar` 的百分比。
 
 ## 界面进度面板（web profile）
 
@@ -217,6 +217,8 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 它们都不是逻辑错误，而是**对外部程序真实行为的假设错了**：逻辑都对、测试都绿、下载也成功，只是某个环节悄悄返回了默认值（“不支持” / `curl` / `null` / 跳过写入）。这类问题的危险在于退出码仍是 0，“不抛错”的测试永远抓不住。
 
+0.5.0 又抓到同一类的三个：**轨道一缺 `state`**（面板永远显示「下载中」）、**无会话时把进度写进没人读的目录**、**`DSH_HOME` 未生效导致写进陈旧的 home**。它们同样不抛错、测试也曾经全绿——只有「面板/查询是否真的显示了正确状态」这种正向断言才能发现。
+
 **契约**：本插件所有“返回默认值”的路径——
 
 | 环节                  | 静默失败形态        | 必须断言的正向信号                                  |
@@ -232,6 +234,10 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | `buildCurlArgs`     | 续传开关插错位置     | `resume` 为真时 `-C -` 必须存在，为假时必须不存在，且 `-o` 与路径紧邻 |
 | `checkDownloadUrl`  | 不校验协议 → 读本地文件 | `file://` / `ftp://` 必须被拒绝，`http(s)` 必须被放行并返回解析后的 URL |
 | `deriveFilenameFromUrl` | 不净化 → 路径穿越 | `..%2F..%2F..%2Fescaped.txt` 必须推导为单段 `escaped.txt`，且实际写入不得逃出当前目录 |
+| `ProgressReporter`  | 轨道一缺 `state` → 面板永远「下载中」 | 终态记录必须含 `state: 'done' / 'failed' / 'cancelled'`，`readDownloadStatus` 必须据此返回 completed / failed / cancelled |
+| `resolveTaskProgressDir` | 无会话 → 写进没人读的目录 | 无 `DSH_PROGRESS_DIR` 且无会话时必须返回 `null`（即不写轨道一），有会话时必须是 `<cwd>/.dsh-progress/<id>` |
+| `resolveDshHome`    | 不读 `DSH_HOME` → 写进陈旧 home | `DSH_HOME` 必须生效，空 / 纯空白必须回落 `~/.dsh` |
+| `statusFrom`        | 只认文案 → 状态判错 | 记录带 `state` 时必须以 `state` 为准（`state: 'running'` + 文案「下载完成」仍是 running） |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -260,9 +266,9 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）。对通过校验的 URL 发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。仅访问调用方传入的 URL，不访问其他地址。 |
 | 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未启用 `--allow-overwrite`，因此不会静默丢弃已完成的同名文件。 |
 | 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
-| 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`（若未设置该环境变量则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `~/.dsh/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
+| 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
 | 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，Windows 上 1s 内未退出则强制 kill）。 |
-| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`USERPROFILE` / `HOME`。 |
+| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`）。 |
 
 **不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
 
@@ -298,7 +304,7 @@ A：不会。子进程均以 `windowsHide: true` 启动。
 A：调用 `download_status`，它会返回最近任务的百分比、速度与 ETA。传 `taskId` 可只查某一个任务。它是纯只读的，不会影响正在进行的下载。
 
 **Q：GitHub Release 下载太慢，能用镜像吗？**
-A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "https://gh-proxy.com/"`。请注意镜像是第三方服务，不要用���下载含敏感信息的文件。
+A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "https://gh-proxy.com/"`。请注意镜像是第三方服务，不要用它下载含敏感信息的文件。
 
 **Q：下载中断后要重新开始吗？**
 A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`，支持 Range 的服务器会从断点继续。

@@ -20,6 +20,7 @@ import {
 import { decide } from './decision.js'
 import { ProgressReporter } from './progress.js'
 import { applyMirror } from './mirror.js'
+import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
 import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import type { DownloadStatusSnapshot } from './status.js'
@@ -86,6 +87,13 @@ export function apply(ctx: Context): void {
         args: SmartDownloadArgs,
         exec: ToolExecutionContext,
       ): Promise<SmartDownloadResult> {
+        // 0. 协议白名单：URL 可能来自模型读到的任意页面，必须先收紧到 http(s)。
+        // 实测（0.4.1）file:// 会被 curl 接受并复制本地文件到目标路径。
+        const checked = checkDownloadUrl(args.url)
+        if (!checked.ok) {
+          throw new Error(`拒绝下载：${checked.reason}`)
+        }
+
         // 镜像加速：只做前缀拼接，非 http(s) 或未提供镜像时原样返回
         const requestedUrl = applyMirror(args.url, args.mirror)
         const mirrored = requestedUrl !== args.url
@@ -99,6 +107,12 @@ export function apply(ctx: Context): void {
         // 1. 探测目标 URL
         reporter.report(0, '探测中…')
         const probe = await probeUrl(requestedUrl, exec.signal)
+
+        // 探测可能拿不到文件大小（HEAD 失败 / 超时 / chunked 无 Content-Length）。
+        // dsh-tools 会把含 undefined 的结果判为非法 JSON 并抛 ToolOutputError，
+        // 因此 size 只在有值时出现（见下方各 return 的条件展开）。
+        const sizeField =
+          probe.contentLength === undefined ? {} : { size: probe.contentLength }
 
         // 是否启用断点续传：只有确认服务器支持 Range 时才续传。
         // 实测：curl -C - 在服务器不支持 Range 且已存在半截文件时会以退出码 33 失败，
@@ -128,7 +142,7 @@ export function apply(ctx: Context): void {
               success: true,
               path: outputPath,
               method: 'aria2',
-              size: probe.contentLength,
+              ...sizeField,
               fellback: false,
               reason: decision.reason,
             }
@@ -150,7 +164,7 @@ export function apply(ctx: Context): void {
                 success: true,
                 path: outputPath,
                 method: 'curl',
-                size: probe.contentLength,
+                ...sizeField,
                 fellback: true,
                 reason: `aria2 失败: ${aria2Message}`,
               }
@@ -177,7 +191,7 @@ export function apply(ctx: Context): void {
             success: true,
             path: outputPath,
             method: 'curl',
-            size: probe.contentLength,
+            ...sizeField,
             fellback: decision.fellback,
             reason: decision.reason,
           }
@@ -258,24 +272,3 @@ export function apply(ctx: Context): void {
   )
 }
 
-/**
- * 从 URL 推导本地文件名：
- * 取 pathname 最后一段，去掉 query / hash 并做 URI 解码；
- * 无法推导时回退为 'download'。
- */
-export function deriveFilenameFromUrl(rawUrl: string): string {
-  try {
-    const u = new URL(rawUrl)
-    const segments = u.pathname.split('/').filter(Boolean)
-    const last = segments[segments.length - 1]
-    if (last) {
-      const decoded = decodeURIComponent(last)
-      if (decoded && decoded !== '.' && decoded !== '..') {
-        return decoded
-      }
-    }
-    return 'download'
-  } catch {
-    return 'download'
-  }
-}

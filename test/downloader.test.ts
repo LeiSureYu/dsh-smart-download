@@ -46,7 +46,9 @@ test('buildAria2Args concurrency 参数 -> -x/-s 跟随', () => {
 })
 
 test('buildAria2Args 含目录 -> 拆分为 -d 目录 与 -o 文件名', () => {
-  const args = buildAria2Args('https://example.com/a.zip', 'out\\a.zip')
+  // 用 path.join 构造平台原生路径：Windows 是 out\a.zip，Linux/macOS 是 out/a.zip。
+  // 直接硬编码 'out\\a.zip' 在 POSIX 上会被 dirname 判为 '.'，测试会失败。
+  const args = buildAria2Args('https://example.com/a.zip', path.join('out', 'a.zip'))
   const dirIndex = args.indexOf('-d')
   assert.ok(dirIndex !== -1, '应包含 -d')
   assert.equal(args[dirIndex + 1], path.resolve('out'))

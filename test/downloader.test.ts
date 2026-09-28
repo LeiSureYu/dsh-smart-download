@@ -8,10 +8,11 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import {
   ARIA2_TARGETS,
   aria2TargetFor,
@@ -24,12 +25,13 @@ import {
 
 /* ------------------------------ 参数拼接 ------------------------------ */
 
-test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 摘要开关）', () => {
+test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 续传 + 摘要开关）', () => {
   const args = buildAria2Args('https://example.com/a.zip', 'a.zip')
   assert.deepEqual(args, [
     '-x', '8',
     '-s', '8',
     '-k', '1M',
+    '-c',
     '--file-allocation=none',
     '--console-log-level=warn',
     '--summary-interval=1',
@@ -37,6 +39,14 @@ test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 摘要开�
     '-o', 'a.zip',
     'https://example.com/a.zip',
   ])
+})
+
+test('buildAria2Args 总是带 -c（断点续传）', () => {
+  // aria2 -c 无条件安全：不支持 Range 时 aria2 会自行全量重下，不会以失败告终
+  for (const concurrency of [4, 8]) {
+    const args = buildAria2Args('https://example.com/a.zip', 'a.zip', concurrency)
+    assert.ok(args.includes('-c'), `concurrency=${concurrency} 应包含 -c`)
+  }
 })
 
 test('buildAria2Args concurrency 参数 -> -x/-s 跟随', () => {
@@ -57,7 +67,7 @@ test('buildAria2Args 含目录 -> 拆分为 -d 目录 与 -o 文件名', () => {
   assert.equal(args[args.length - 1], 'https://example.com/a.zip')
 })
 
-test('buildCurlArgs 拼接符合预期（progress-bar，无 silent）', () => {
+test('buildCurlArgs 默认不续传：progress-bar，无 silent，无 -C -', () => {
   const args = buildCurlArgs('https://example.com/b.zip', 'b.zip')
   assert.deepEqual(args, [
     '--progress-bar',
@@ -67,6 +77,26 @@ test('buildCurlArgs 拼接符合预期（progress-bar，无 silent）', () => {
     '--show-error',
     'https://example.com/b.zip',
   ])
+})
+
+test('buildCurlArgs resume=true -> 在 -L 之后插入 -C -', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip', true)
+  assert.deepEqual(args, [
+    '--progress-bar',
+    '-L',
+    '-C', '-',
+    '-o', 'b.zip',
+    '--fail',
+    '--show-error',
+    'https://example.com/b.zip',
+  ])
+})
+
+test('buildCurlArgs resume=false -> 明确不含 -C', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip', false)
+  assert.equal(args.includes('-C'), false)
+  // -o 与输出路径必须紧邻，续传开关不能插到中间
+  assert.equal(args[args.indexOf('-o') + 1], 'b.zip')
 })
 
 test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正确', () => {
@@ -183,6 +213,85 @@ test('runProcess: 运行中 abort -> 子进程被强制结束', async () => {
 test('downloadWithCurl: 用 data URI 之外的本地静态服务不可用时跳过', async () => {
   // 该用例仅验证函数存在且为函数，避免在无网络环境下误失败
   assert.equal(typeof downloadWithCurl, 'function')
+})
+
+/* ------------------------------ 断点续传：真实行为验证 ------------------------------ */
+
+/**
+ * 起一个支持 Range 的本地服务器。
+ * 注意：必须尊重 Range 的结束位置，否则 aria2 会报 "Invalid range header"（实测 exit 8）。
+ */
+async function startRangeServer(size: number, body: Buffer): Promise<{ url: string; close: () => void }> {
+  const server = http.createServer((req, res) => {
+    const range = req.headers.range
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range)
+      const start = m && m[1] ? Number(m[1]) : 0
+      if (start >= size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${size}` })
+        res.end()
+        return
+      }
+      const end = m && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${size}`,
+        'Content-Length': String(end - start + 1),
+        'Accept-Ranges': 'bytes',
+      })
+      res.end(body.subarray(start, end + 1))
+      return
+    }
+    res.writeHead(200, { 'Content-Length': String(size), 'Accept-Ranges': 'bytes' })
+    res.end(body)
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as { port: number }).port
+  return { url: `http://127.0.0.1:${port}/f.bin`, close: () => server.close() }
+}
+
+test('curl 断点续传：已有半截文件 -> 续传后内容完整正确', async () => {
+  const body = Buffer.from('x'.repeat(4096))
+  const { url, close } = await startRangeServer(body.length, body)
+  const out = path.join(os.tmpdir(), `dsh-resume-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`)
+  try {
+    // 预置一个 1000 字节的“半成品”
+    writeFileSync(out, body.subarray(0, 1000))
+    assert.equal(statSync(out).size, 1000)
+
+    await downloadWithCurl(url, out, undefined, undefined, true)
+    assert.equal(statSync(out).size, body.length, '应续传到完整长度')
+    assert.ok(readFileSync(out).equals(body), '续传后内容必须与源文件逐字节一致')
+  } finally {
+    rmSync(out, { force: true })
+    close()
+  }
+})
+
+test('curl 断点续传：文件不存在时从头下载，不报错', async () => {
+  const body = Buffer.from('y'.repeat(2048))
+  const { url, close } = await startRangeServer(body.length, body)
+  const out = path.join(os.tmpdir(), `dsh-resume-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`)
+  try {
+    await downloadWithCurl(url, out, undefined, undefined, true)
+    assert.ok(readFileSync(out).equals(body))
+  } finally {
+    rmSync(out, { force: true })
+    close()
+  }
+})
+
+test('curl 断点续传：已下载完整时重跑仍然成功且内容不变', async () => {
+  const body = Buffer.from('z'.repeat(2048))
+  const { url, close } = await startRangeServer(body.length, body)
+  const out = path.join(os.tmpdir(), `dsh-resume-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`)
+  try {
+    writeFileSync(out, body)
+    await downloadWithCurl(url, out, undefined, undefined, true)
+    assert.ok(readFileSync(out).equals(body), '不应被截断或重复追加')
+  } finally {
+    rmSync(out, { force: true })
+    close()
+  }
 })
 
 /* ------------------------------ 辅助函数 ------------------------------ */

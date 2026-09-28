@@ -17,13 +17,13 @@ import * as path from 'node:path'
 import type { ProgressRecord } from './types.js'
 
 /** 从环境变量或默认位置解析任务进度目录（轨道一） */
-function resolveTaskProgressDir(): string {
+export function resolveTaskProgressDir(): string {
   if (process.env.DSH_PROGRESS_DIR) return process.env.DSH_PROGRESS_DIR
   return path.join(process.cwd(), '.dsh-progress', 'default')
 }
 
 /** 从环境变量或默认位置解析下载进度目录（轨道二） */
-function resolveDownloadProgressDir(): string {
+export function resolveDownloadProgressDir(): string {
   if (process.env.DSH_DOWNLOAD_PROGRESS_DIR) {
     return process.env.DSH_DOWNLOAD_PROGRESS_DIR
   }

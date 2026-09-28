@@ -81,6 +81,7 @@ export function getAria2Path(): string | null {
 /**
  * 拼接 aria2 命令行参数。
  * -x/-s 使用决策得到的并发数；
+ * -c 开启断点续传（同名文件已存在时从断点继续，而不是重头再来）；
  * --summary-interval=1 每秒输出摘要，--show-console-readout=false 关闭原地刷新，
  * 便于以“每行一条”的方式解析进度。
  * 注意：aria2 的 -o 只接受相对文件名，目录必须通过 -d 指定。
@@ -96,6 +97,7 @@ export function buildAria2Args(
     '-x', String(concurrency), // 单服务器最大连接数
     '-s', String(concurrency), // 同时使用的连接数
     '-k', '1M', // 最小分片大小
+    '-c', // 断点续传：沿用已下载的 .aria2 控制文件与已存在的文件
     '--file-allocation=none', // 不预分配磁盘空间，Windows 上更快
     '--console-log-level=warn',
     '--summary-interval=1', // 每秒输出一次进度摘要
@@ -111,10 +113,22 @@ export function buildAria2Args(
 /**
  * 拼接 curl 回退命令行参数。
  * --progress-bar 强制输出百分比进度（即使 stderr 不是终端）；
+ * resume=true 时追加 -C - 开启断点续传；
  * 不使用 --silent，避免把进度条一并抑制，错误信息由 --show-error 输出。
+ *
+ * 为什么续传是条件式的（实测结论，勿改成无条件）：
+ * curl -C - 在服务器**不支持** Range 且本地已有半截文件时，会以退出码 33 直接失败
+ * （实测：1000 字节资源、已有 400 字节半包 -> exit 33，文件保持 400 字节不损坏）。
+ * 而不带 -C - 时同一个场景能正常全量重新下载成功。
+ * 因此只在探测确认支持 Range（或文件尚不存在）时才加 -C -。
+ * 支持 Range 的场景实测三种情况均正确：半包续传、已完成后重跑、无文件从头下。
  */
-export function buildCurlArgs(url: string, outputPath: string): string[] {
-  return [
+export function buildCurlArgs(
+  url: string,
+  outputPath: string,
+  resume: boolean = false,
+): string[] {
+  const args = [
     '--progress-bar',
     '-L', // 跟随重定向
     '-o', outputPath,
@@ -122,6 +136,11 @@ export function buildCurlArgs(url: string, outputPath: string): string[] {
     '--show-error', // 输出错误信息
     url,
   ]
+  if (resume) {
+    // 断点续传：自动读取已下载长度并从断点继续；文件不存在时从 0 开始
+    args.splice(2, 0, '-C', '-')
+  }
+  return args
 }
 
 /** 确保输出文件所在目录存在 */
@@ -283,9 +302,10 @@ export async function downloadWithCurl(
   outputPath: string,
   signal?: AbortSignal,
   reporter?: ProgressReporter,
+  resume: boolean = false,
 ): Promise<void> {
   await ensureOutputDir(outputPath)
-  const args = buildCurlArgs(url, outputPath)
+  const args = buildCurlArgs(url, outputPath, resume)
   await runProcess('curl', args, signal, {
     onStderr: (line) => {
       const pct = parseCurlProgress(line)

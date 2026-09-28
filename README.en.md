@@ -10,8 +10,12 @@
 [简体中文](./README.md) · **English**
 
 > Multi-threaded downloader plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai) with a bundled `aria2` — **zero configuration**: install it and it works, no separate aria2 install needed.
+> Supports **mirror acceleration** and **resumable downloads**, plus a `download_status` tool to query progress.
 
-`dsh-smart-dl` registers a `smart_download` tool with DSH. When the model needs to download a file, the plugin first probes whether the target server supports multi-threading. If it does, it calls the bundled `aria2c` for accelerated multi-connection download; otherwise it automatically falls back to the system `curl` single-threaded download, so the download completes either way.
+`dsh-smart-dl` registers two tools with DSH:
+
+- **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Supports an optional mirror prefix and resume.
+- **`download_status`** — query download progress. Returns a read-only snapshot of recent tasks (percentage, speed, ETA), useful for answering "how far along is that download?".
 
 ## Install
 
@@ -23,7 +27,7 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 **Supported profile**: `web` — the profile this plugin has been verified against (hence `--profile web` above). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
 
-> **Use `0.2.1` or newer.** Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.2.1`.
+> **Use `0.3.0` or newer.** Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.3.0`.
 >
 > `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
 
@@ -32,7 +36,13 @@ No further configuration is needed: the aria2 binaries are installed together wi
 The decision flow, in text:
 
 ```
-call smart_download(url, output?)
+call smart_download(url, output?, mirror?)
+        │
+        ▼
+[0] if mirror is given, prepend the prefix to the URL
+     · mirror prefix + full original URL
+     · skipped for non-http(s) URLs
+     · output filename still derived from the original URL
         │
         ▼
 [1] Probe the URL (5s timeout)
@@ -53,18 +63,100 @@ call smart_download(url, output?)
    ▼                 ▼
  aria2 4/8 conns   curl single-threaded (fallback)
  (per-second summary progress)
+ (resume: -c)      (resume: -C - when Range is supported)
    │ on failure
    ▼
  degrade to curl single-threaded
         │
         ▼
- return { success, path, method, size, fellback, reason? }
+ return { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
 ```
 
 Key points:
 
 - **Any probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
 - The connection count is chosen dynamically by file size (thresholds 1MB / 50MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing".
+- `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
+
+## Mirror acceleration
+
+When downloads from GitHub Releases and similar hosts are slow, pass a `mirror` prefix to `smart_download`; the plugin prepends it to the original URL:
+
+```
+smart_download(
+  url: "https://github.com/owner/repo/releases/download/v1/a.zip",
+  mirror: "https://gh-proxy.com/"
+)
+# actually requests: https://gh-proxy.com/https://github.com/owner/repo/releases/download/v1/a.zip
+```
+
+Details:
+
+- It is a plain **prefix concatenation** with no path rewriting, so it works with most public mirrors of the "prefix + full original URL" shape.
+- A **missing trailing slash is added automatically**, and a bare domain is accepted (`ghfast.top` becomes `https://ghfast.top/`).
+- Non-`http(s)` URLs skip the mirror.
+- The output filename is always derived from the **original** URL, so the mirror host never leaks into the filename.
+
+Commonly used public mirrors (pick one; availability varies by network):
+
+| Mirror prefix |
+| --- |
+| `https://gh-proxy.com/` |
+| `https://ghfast.top/` |
+| `https://ghproxy.net/` |
+
+> Mirrors are **third-party services**: your request passes through them. Do not use a mirror for files containing sensitive data.
+
+## Resumable downloads
+
+If a download is interrupted, calling `smart_download` again with the same `url` and `output` resumes from where it stopped instead of starting over:
+
+- **aria2 path**: `-c` is always enabled. Against a server without Range support aria2 simply re-downloads the whole file; it does not fail.
+- **curl path**: `-C -` is added **only when the probe confirms the server supports Range**.
+
+Why curl's resume is conditional (measured, do not make it unconditional):
+
+> `curl -C -` **fails outright with exit code 33** when the server does **not** support Range and a partial file already exists — measured: a 1000-byte resource with an existing 400-byte partial → `exit 33`, file left intact at 400 bytes, while the **same scenario without** `-C -` re-downloads the full file successfully.
+> With Range support, all three cases are measured correct: resuming a partial file, re-running after completion, and starting from scratch with no file present.
+
+## Querying progress: download_status
+
+`download_status` returns a read-only snapshot of this plugin's download tasks — use it to answer "how far along is that download?".
+
+```
+download_status()                      # list the 10 most recent tasks
+download_status(limit: 3)              # list only the 3 most recent
+download_status(taskId: "dl-xxx")      # look up one task
+```
+
+Example result:
+
+```json
+{
+  "ok": true,
+  "taskDir": "/path/.dsh-progress/default",
+  "downloadDir": "/home/u/.dsh/downloads/tasks",
+  "total": 1,
+  "tasks": [
+    {
+      "id": "dl-mulfpr76-z47a",
+      "pct": 100,
+      "msg": "download finished",
+      "status": "completed",
+      "spd": "8.2MB/s",
+      "eta": "",
+      "updatedAt": 1759000000000
+    }
+  ]
+}
+```
+
+Constraints and trade-offs:
+
+- **Purely read-only**: it writes nothing and performs no network access. It reads exactly the two progress-track directories described in "Progress reporting".
+- **Fault-tolerant first**: a missing directory, insufficient permissions, or corrupted file contents all degrade to "that task does not appear in the result" — the call still succeeds (just with a shorter list), so querying status never breaks a download.
+- Tasks are ordered by `updatedAt` **descending**, newest first. `total` is the **untruncated** count; `tasks` is truncated by `limit`.
+- `spd` / `eta` return an **empty string** when unavailable or unknown (the schema requires a string) — never `null` or `undefined`.
 
 ## Progress reporting
 
@@ -95,6 +187,9 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 | `parseCurlProgress`  | not recognized → `null`   | real samples must parse percentages rising to 100%      |
 | `ProgressReporter`   | dir unwritable → skipped  | a writable dir must contain a file with growing content |
 | `LineBuffer`         | bad split state           | chunk / `\r` / `\r\n` boundaries must split correctly   |
+| `applyMirror`        | mis-concatenated URL      | the result must parse via `new URL()` and end with the original URL |
+| `readDownloadStatus` | unreadable → empty list   | a dir containing valid task files must yield tasks with parsed fields |
+| `buildCurlArgs`      | resume flag misplaced     | `-C -` must be present iff `resume`, and `-o` must stay adjacent to the path |
 
 Every assertion is **positive**: it checks "did it actually produce output", not "did it avoid crashing". Real samples live in `test/fixtures/` (curl fixtures are `.bin` files preserving `\r`), and "the fixture must contain `\r`" is itself a forced assertion.
 
@@ -116,12 +211,13 @@ The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installin
 
 ## Permissions
 
-This plugin does exactly two things: **start downloads** and **write progress files**. Itemised below.
+This plugin does exactly three things: **start downloads**, **write progress files** and **read them back**. Itemised below.
 
 | Behaviour | Detail |
 | --- | --- |
-| Outbound network | Sends `HEAD` / `Range` probes to the target URL (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller — no other endpoints. |
-| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted, and the download commands do not enable `--allow-overwrite` / `--continue`, so an existing file of the same name is not silently overwritten. |
+| Outbound network | Sends `HEAD` / `Range` probes to the target URL (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller (or the address produced by prefixing it with the caller-supplied `mirror`) — no other endpoints. With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
+| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch; `--allow-overwrite` is not enabled, so an already-completed file of the same name is never silently discarded. |
+| Reading progress files | `download_status` only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
 | Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl` (skipped if that variable is unset). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `~/.dsh/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
 | Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, force-killed on Windows if still alive after 1s). |
 | Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR`, `USERPROFILE` / `HOME`. |
@@ -155,6 +251,15 @@ A: That means the binary lost its executable bit in the tarball. This project **
 
 **Q: Does a black console window pop up during download?**
 A: No. All child processes are started with `windowsHide: true`.
+
+**Q: How do I know the download percentage?**
+A: Call `download_status`. It returns the percentage, speed and ETA of recent tasks; pass `taskId` to look up a single task. It is purely read-only and never disturbs a download in progress.
+
+**Q: GitHub Release downloads are slow — can I use a mirror?**
+A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-proxy.com/"`. Note that mirrors are **third-party services**: do not use one for files containing sensitive data.
+
+**Q: Do I have to restart an interrupted download?**
+A: No. Call `smart_download` again with the same `url` and `output`; against a server that supports Range it resumes from where it stopped.
 
 ## Development
 

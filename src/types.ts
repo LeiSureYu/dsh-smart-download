@@ -8,6 +8,11 @@ export interface SmartDownloadArgs {
   url: string
   /** 输出文件路径，可选；缺省时根据 URL 自动推导文件名 */
   output?: string
+  /**
+   * 镜像前缀，可选；提供后把原始 URL 拼到该前缀后面再下载。
+   * 例如 `https://gh-proxy.com/` + 原始 GitHub 下载地址。
+   */
+  mirror?: string
 }
 
 /** 下载使用的底层方式 */
@@ -27,6 +32,10 @@ export interface SmartDownloadResult {
   fellback: boolean
   /** 回退或不支持多线程的原因 */
   reason?: string
+  /** 实际请求的地址（启用镜像时为「镜像前缀 + 原始 URL」，否则等于原始 URL） */
+  requestedUrl: string
+  /** 是否走了镜像加速 */
+  mirrored: boolean
 }
 
 /** URL 探测结果 */
@@ -59,6 +68,14 @@ export interface ProbeOptions {
 export interface ToolExecutionContext {
   /** 模型 / 宿主取消本次调用时触发的信号 */
   signal: AbortSignal
+}
+
+/** download_status 工具入参 */
+export interface DownloadStatusArgs {
+  /** 指定任务 ID；缺省时列出最近的任务 */
+  taskId?: string
+  /** 最多返回多少条 */
+  limit?: number
 }
 
 /** 并发档位：1（curl）/ 4 / 8（aria2） */

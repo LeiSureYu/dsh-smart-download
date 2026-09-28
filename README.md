@@ -10,8 +10,12 @@
 **简体中文** · [English](./README.en.md)
 
 > DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
+> 支持 **镜像加速**、**断点续传**，并可用 `download_status` 查询下载进度。
 
-`dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册一个 `smart_download` 工具。当模型需要下载文件时，插件会先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 进行多线程加速下载，否则自动回退到系统自带的 `curl` 单线程下载，保证在任何情况下都能完成下载。
+`dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
+
+- **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选镜像加速与断点续传。
+- **`download_status`**：查询下载进度。只读地返回最近任务的状态快照（百分比、速度、ETA），可用来回答“刚才那个下载到百分之几了”。
 
 ## 安装
 
@@ -23,7 +27,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 **支持的 profile**：`web`（上面的 `--profile web` 即为此插件验证过的 profile）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
 
-> **版本要求：请使用 `0.2.1` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.2.1`。
+> **版本要求：请使用 `0.3.0` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.3.0`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
@@ -32,7 +36,13 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 下载决策流程（文字版）：
 
 ```
-调用 smart_download(url, output?)
+调用 smart_download(url, output?, mirror?)
+        │
+        ▼
+[0] 若传入 mirror，则把原始 URL 拼到镜像前缀后
+     · 镜像前缀 + 完整原始 URL
+     · 非 http(s) URL 不走镜像
+     · 输出文件名仍按原始 URL 推导
         │
         ▼
 [1] 探测 URL（超时 5s）
@@ -53,18 +63,100 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
    ▼                 ▼
  aria2 4/8 连接     curl 单线程（回退）
  （每秒摘要进度）
+ （-c 续传）        （支持 Range 时 -C - 续传）
    │ 失败
    ▼
  降级为 curl 单线程（回退）
         │
         ▼
- 返回结果 { success, path, method, size, fellback, reason? }
+ 返回结果 { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
 ```
 
 要点：
 
 - **任何探测异常**（超时、网络错误、无法获取文件大小）都会被安全地判定为“不支持多线程”，从而走 curl 回退，不会让下载直接失败。
 - 并发数随文件大小动态选择（阈值 1MB / 50MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
+- 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像。
+
+## 镜像加速
+
+下载 GitHub Release 等境外资源较慢时，可给 `smart_download` 传入 `mirror` 前缀，插件会把原始 URL 拼到该前缀后面再下载：
+
+```
+smart_download(
+  url: "https://github.com/owner/repo/releases/download/v1/a.zip",
+  mirror: "https://gh-proxy.com/"
+)
+# 实际请求：https://gh-proxy.com/https://github.com/owner/repo/releases/download/v1/a.zip
+```
+
+细节：
+
+- 只做**前缀拼接**，不做路径改写，因此适配绝大多数「前缀 + 完整原始 URL」形式的公开镜像；
+- 前缀**缺尾斜杠会自动补上**，也可直接写裸域名（`ghfast.top` 会补成 `https://ghfast.top/`）；
+- 非 `http(s)` 的 URL 不使用镜像；
+- 输出文件名始终按**原始 URL** 推导，不会把镜像域名带进文件名。
+
+常见的公开镜像（任选其一，可用性随网络环境变化）：
+
+| 镜像前缀 |
+| --- |
+| `https://gh-proxy.com/` |
+| `https://ghfast.top/` |
+| `https://ghproxy.net/` |
+
+> 镜像是**第三方服务**：请求内容会经过该镜像服务器，请勿用它下载含敏感信息的文件。
+
+## 断点续传
+
+下载中断后再次调用 `smart_download`（同样的 `url` 与 `output`）会从断点继续，而不是从头重下：
+
+- **aria2 路径**：始终启用 `-c`。不支持 Range 的服务器 aria2 会自行全量重下，不会失败。
+- **curl 路径**：**仅在探测确认服务器支持 Range 时**才加 `-C -`。
+
+为什么 curl 的续传是条件式的（实测结论，勿改成无条件）：
+
+> `curl -C -` 在服务器**不支持** Range 且本地已存在半截文件时，会以**退出码 33 直接失败**——实测：1000 字节资源、已有 400 字节半包 → `exit 33`，文件保持 400 字节不损坏；而同一场景**不带** `-C -` 能正常全量重新下载成功。
+> 支持 Range 时三种情况均实测正确：半包续传、已下载完整后重跑、文件不存在从头下。
+
+## 查询下载进度：download_status
+
+`download_status` 只读地返回本插件下载任务的状态快照，可用来回答“刚才那个下载到百分之几了”。
+
+```
+download_status()                      # 列出最近 10 个任务
+download_status(limit: 3)              # 只列最近 3 个
+download_status(taskId: "dl-xxx")      # 只查指定任务
+```
+
+返回示例：
+
+```json
+{
+  "ok": true,
+  "taskDir": "/path/.dsh-progress/default",
+  "downloadDir": "/home/u/.dsh/downloads/tasks",
+  "total": 1,
+  "tasks": [
+    {
+      "id": "dl-mulfpr76-z47a",
+      "pct": 100,
+      "msg": "下载完成",
+      "status": "completed",
+      "spd": "8.2MB/s",
+      "eta": "",
+      "updatedAt": 1759000000000
+    }
+  ]
+}
+```
+
+约束与设计取舍：
+
+- **纯只读**：不写文件、不联网。读取的就是「进度上报」那一节里的两条轨道目录。
+- **容错优先**：目录不存在、权限不足、文件内容损坏，都退化为「该任务不出现在结果里」，整个调用依然成功返回（只是任务列表更短），不会因为查状态而让下载失败。
+- 任务按 `updatedAt` **倒序**，最新的排在最前；`total` 是**未截断**的真实总数，`tasks` 会被 `limit` 截断。
+- `spd` / `eta` 在不支持或未知时返回**空字符串**（schema 要求 string），不会返回 `null` 或 `undefined`。
 
 ## 进度上报
 
@@ -95,6 +187,9 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 | `parseCurlProgress` | 认不出 → `null`  | 真实样本必须解析出单调递增到 100% 的百分比                   |
 | `ProgressReporter`  | 目录不可写 → 跳过    | 可写目录必须存在文件且内容递增                            |
 | `LineBuffer`        | 切分状态错误        | 跨 chunk / `\r` / `\r\n` 边界必须切出正确的行         |
+| `applyMirror`       | 拼错 → URL 仍合法    | 拼接结果必须可 `new URL()` 解析，且以原始 URL 结尾        |
+| `readDownloadStatus`| 读不到 → 空列表      | 目录里有合法任务文件就必须扫出并解析出字段                 |
+| `buildCurlArgs`     | 续传开关插错位置     | `resume` 为真时 `-C -` 必须存在，为假时必须不存在，且 `-o` 与路径紧邻 |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -121,7 +216,8 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 | 行为 | 说明 |
 | --- | --- |
 | 网络出站请求 | 对目标 URL 发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。仅访问调用方传入的 URL，不访问其他地址。 |
-| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件；下载命令未启用 `--allow-overwrite` / `--continue`，因此遇到同名文件不会静默覆盖。 |
+| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未启用 `--allow-overwrite`，因此不会静默丢弃已完成的同名文件。 |
+| 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
 | 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`（若未设置该环境变量则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `~/.dsh/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
 | 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，Windows 上 1s 内未退出则强制 kill）。 |
 | 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`USERPROFILE` / `HOME`。 |
@@ -155,6 +251,15 @@ A：这是 tarball 里二进制缺少可执行位。本项目在 CI 中**于 Lin
 
 **Q：下载会弹黑色命令行窗口吗？**
 A：不会。子进程均以 `windowsHide: true` 启动。
+
+**Q：怎么知道下载到百分之几了？**
+A：调用 `download_status`，它会返回最近任务的百分比、速度与 ETA。传 `taskId` 可只查某一个任务。它是纯只读的，不会影响正在进行的下载。
+
+**Q：GitHub Release 下载太慢，能用镜像吗？**
+A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "https://gh-proxy.com/"`。请注意镜像是第三方服务，不要用���下载含敏感信息的文件。
+
+**Q：下载中断后要重新开始吗？**
+A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`，支持 Range 的服务器会从断点继续。
 
 ## 开发
 

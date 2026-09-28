@@ -35,6 +35,20 @@ export interface EvaluateResult {
 }
 
 /**
+ * 远端资源的「内容指纹」。
+ *
+ * 续传安全校验用它判断「远端资源有没有变」。只用长度是不够的：
+ * 实测（0.6.0）远端从 400 字节变成另一个 400 字节时，curl -C - 与 aria2 -c
+ * 都是退出码 0，而落盘文件保留着旧内容。
+ */
+export interface RemoteFingerprint {
+  /** ETag（含引号）；最强的内容信号 */
+  etag?: string
+  /** Last-Modified；服务器不发 ETag 时的次优信号 */
+  lastModified?: string
+}
+
+/**
  * 解析 Content-Range 头中的资源总大小。
  * 形如 "bytes 0-0/5242880" -> 5242880；"bytes 0-0/*" -> undefined。
  */
@@ -104,6 +118,8 @@ function toProbeResult(
   decision: EvaluateResult,
   contentType?: string,
   acceptRanges?: string,
+  etag?: string,
+  lastModified?: string,
 ): ProbeResult {
   return {
     supportsMultiThread: decision.supported,
@@ -111,6 +127,8 @@ function toProbeResult(
     acceptRanges,
     contentType,
     reason: decision.reason,
+    etag,
+    lastModified,
   }
 }
 
@@ -141,6 +159,8 @@ export async function probeUrl(
   const headLength = parseContentLength(head.headers.get('content-length'))
   const headAcceptRanges = head.headers.get('accept-ranges')
   const headContentType = head.headers.get('content-type') ?? undefined
+  const headEtag = head.headers.get('etag') ?? undefined
+  const headLastModified = head.headers.get('last-modified') ?? undefined
 
   // 2. HEAD 为 405 或缺少 Content-Length 时，改用 Range GET
   if (head.status === 405 || headLength === undefined) {
@@ -160,6 +180,10 @@ export async function probeUrl(
     const getLength = parseContentLength(get.headers.get('content-length'))
     const acceptRanges = get.headers.get('accept-ranges') ?? headAcceptRanges
     const contentType = get.headers.get('content-type') ?? headContentType
+    // Range GET 的指纹优先（它才是真正会被下载的那次请求的响应头），
+    // 缺失时回落到 HEAD 拿到的。
+    const etag = get.headers.get('etag') ?? headEtag
+    const lastModified = get.headers.get('last-modified') ?? headLastModified
 
     // 不消费响应体，主动取消以释放连接
     get.body?.cancel().catch(() => {})
@@ -171,7 +195,7 @@ export async function probeUrl(
       contentRange,
       threshold,
     })
-    return toProbeResult(decision, contentType, acceptRanges ?? undefined)
+    return toProbeResult(decision, contentType, acceptRanges ?? undefined, etag, lastModified)
   }
 
   // 3. HEAD 信息足够，直接判定
@@ -182,5 +206,11 @@ export async function probeUrl(
     contentRange: null,
     threshold,
   })
-  return toProbeResult(decision, headContentType, headAcceptRanges ?? undefined)
+  return toProbeResult(
+    decision,
+    headContentType,
+    headAcceptRanges ?? undefined,
+    headEtag,
+    headLastModified,
+  )
 }

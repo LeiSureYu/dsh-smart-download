@@ -25,13 +25,14 @@ import {
 
 /* ------------------------------ 参数拼接 ------------------------------ */
 
-test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 续传 + 摘要开关）', () => {
+test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 续传 + 覆盖 + 摘要开关）', () => {
   const args = buildAria2Args('https://example.com/a.zip', 'a.zip')
   assert.deepEqual(args, [
     '-x', '8',
     '-s', '8',
     '-k', '1M',
     '-c',
+    '--allow-overwrite=true',
     '--file-allocation=none',
     '--console-log-level=warn',
     '--summary-interval=1',

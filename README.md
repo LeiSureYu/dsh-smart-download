@@ -22,7 +22,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.5.0` 或更新版本。
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.6.0` 或更新版本。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -41,7 +41,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 > **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
-> **版本要求：请使用 `0.5.0` 或更高。** `0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.5.0`。
+> **版本要求：请使用 `0.6.0` 或更高。** `0.6.0` 修了续传的两个静默损坏：① 只要服务器支持 Range 就无条件续传，而 `curl -C -` 与 `aria2 -c` 都只看本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是**退出码 0 但文件是错的**；现在续传前先比对远端长度与 ETag / Last-Modified，无法证实同源就删掉半包重下。② 目标文件已存在时 aria2 既不截断也不覆盖，而是另存为 `f.1.bin`，插件返回的 `path` 却仍指向旧内容的 `f.bin`；现在统一带 `--allow-overwrite=true`。`0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.6.0`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
@@ -134,8 +134,13 @@ smart_download(
 
 下载中断后再次调用 `smart_download`（同样的 `url` 与 `output`）会从断点继续，而不是从头重下：
 
-- **aria2 路径**：始终启用 `-c`。不支持 Range 的服务器 aria2 会自行全量重下，不会失败。
-- **curl 路径**：**仅在探测确认服务器支持 Range 时**才加 `-C -`。
+- **aria2 路径**：能证实同源时启用 `-c`，否则不续传并带 `--allow-overwrite=true` 覆盖写。
+- **curl 路径**：**仅在探测确认服务器支持 Range 且能证实同源时**才加 `-C -`。
+
+为什么续传除了「支持 Range」还要多一道校验（实测结论，勿简化）：
+
+> `0.6.0` 用真实 curl 8.13.0 与随包 aria2 1.37.0 在 127.0.0.1 上实测：远端从 400 字节变成 200 字节时，`curl -C -` 与 `aria2 -c` 都是**退出码 0、落盘仍是 400 字节**；远端等长但内容换了时，两者同样是**退出码 0、文件保留旧内容**。也就是说「支持 Range」只保证能续，不保证续的是同一个文件。
+> 因此续传前会比对远端长度与 `ETag` / `Last-Modified`（指纹记在 `<output>.part.json` 旁车里，下载成功时清除、中断时保留），无法证实同源就删掉本地半包全量重下。只比长度挡得住前两行，挡不住「等长但内容变了」，这也是必须有旁车指纹的原因。
 
 为什么 curl 的续传是条件式的（实测结论，勿改成无条件）：
 
@@ -192,6 +197,8 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 每条记录都带 `state` 字段（`running` / `done` / `failed` / `cancelled`）：dsh-task-progress 的读取端只认 `state`，缺失时一律当作 `running`，因此 0.5.0 之前的进度记录即使 `pct=100`、`msg=下载完成`，面板也永远显示「下载中」。进度**按整条记录去重**（`pct + state + msg + spd + eta` 完全一致才跳过），任一项变化都会写入，因此面板能看到实时的速度与剩余时间；完成 / 失败 / 取消等终态因为 `state` 变化，必然穿透去重。aria2 解析 `--summary-interval=1` 的摘要行（含速度与 ETA），curl 解析 `--progress-bar` 的百分比。
 
+写盘自 `0.6.0` 起是**异步**的：`report()` 只把记录放进队列，由 microtask 批量写出并保序，下载主流程不再被同步 `appendFileSync` 阻塞；调用方在返回前会 `await reporter.awaitFlush()` 等待终态落盘，因此 `download_status` 与面板读到的必定是终态，而不是上一次的中间状态。
+
 ## 界面进度面板（web profile）
 
 在 `web` profile 下，插件会在界面右下角挂载一个**实时进度面板**：只要有下载在进行就自动出现，显示**输出文件名、百分比、传输速度与剩余时间**；下载完成后短暂显示「已完成」回执，然后自动消失。空闲时不占位、不显示。
@@ -217,7 +224,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 它们都不是逻辑错误，而是**对外部程序真实行为的假设错了**：逻辑都对、测试都绿、下载也成功，只是某个环节悄悄返回了默认值（“不支持” / `curl` / `null` / 跳过写入）。这类问题的危险在于退出码仍是 0，“不抛错”的测试永远抓不住。
 
-0.5.0 又抓到同一类的三个：**轨道一缺 `state`**（面板永远显示「下载中」）、**无会话时把进度写进没人读的目录**、**`DSH_HOME` 未生效导致写进陈旧的 home**。它们同样不抛错、测试也曾经全绿——只有「面板/查询是否真的显示了正确状态」这种正向断言才能发现。
+0.5.0 又抓到同一类的三个：**轨道一缺 `state`**（面板永远显示「下载中」）、**无会话时把进度写进没人读的目录**、**`DSH_HOME` 未生效导致写进陈旧的 home**。0.6.0 抓到的是最危险的一类：**续传静默损坏**（`curl -C -` / `aria2 -c` 在远端变小或内容变更时退出码 0 但文件是错的）与 **aria2 覆盖时把新内容写进 `f.1.bin` 而返回的 `path` 指向旧文件**——两者都是「报告成功、产物错误」，只有「落盘内容是否等于远端内容」这种正向断言才能发现。它们同样不抛错、测试也曾经全绿——只有「面板/查询是否真的显示了正确状态」「文件是否真的是远端那份」这种正向断言才能发现。
 
 **契约**：本插件所有“返回默认值”的路径——
 

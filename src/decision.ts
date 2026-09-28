@@ -24,12 +24,32 @@ export function decideConcurrency(size: number): ConcurrencyLevel {
 }
 
 /**
+ * 决策函数的可选环境描述。
+ *
+ * `decide()` 此前是**唯一**直接读 `process.platform` / `process.arch` 的分支
+ * （「aria2 不可用」的提示文案里带上了当前平台），这让它在别的平台上无法被
+ * 单测覆盖 —— 测试跑在哪个平台就只能断言哪个平台。0.6.0 把它抽成入参，
+ * 缺省时才回落真实环境，行为不变。
+ */
+export interface DecideEnv {
+  /** 平台标识，对应 `process.platform` */
+  platform?: string
+  /** 架构标识，对应 `process.arch` */
+  arch?: string
+}
+
+/**
  * 决策函数：除「aria2 缺失」分支的提示文案会带上当前平台外，不依赖外部状态，便于单测。
  *
  * @param probe 探测结果
  * @param aria2Available 随包 aria2c 是否可定位
+ * @param env 环境描述，缺省时取 `process.platform` / `process.arch`
  */
-export function decide(probe: ProbeResult, aria2Available: boolean): Decision {
+export function decide(
+  probe: ProbeResult,
+  aria2Available: boolean,
+  env: DecideEnv = {},
+): Decision {
   // 1. 不支持多线程 —— 直接 curl
   if (!probe.supportsMultiThread) {
     return {
@@ -63,11 +83,13 @@ export function decide(probe: ProbeResult, aria2Available: boolean): Decision {
 
   // 4. aria2 不可用 —— 回退 curl
   if (!aria2Available) {
+    const platform = env.platform ?? process.platform
+    const arch = env.arch ?? process.arch
     return {
       method: 'curl',
       concurrency: 1,
       fellback: true,
-      reason: `未找到 aria2 二进制（当前平台 ${process.platform}-${process.arch} 不受支持或子包未安装）`,
+      reason: `未找到 aria2 二进制（当前平台 ${platform}-${arch} 不受支持或子包未安装）`,
     }
   }
 

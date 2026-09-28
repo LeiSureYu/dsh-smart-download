@@ -4,6 +4,9 @@
  * - pct 去重；
  * - 目录不可写时静默容错；
  * - done / fail 终态能穿透去重。
+ *
+ * 0.6.0 起写盘改为异步（同 tick 合并 + fs.promises），因此凡是要断言磁盘内容的
+ * 用例都必须先 `await reporter.awaitFlush()`，否则读到的是落盘前的状态。
  */
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -48,9 +51,10 @@ function readJsonl(file: string): Array<Record<string, unknown>> {
   return raw.split('\n').map((line) => JSON.parse(line))
 }
 
-test('report 写入两条轨道', () => {
+test('report 写入两条轨道', async () => {
   const r = new ProgressReporter('task-1')
   r.report(42, '下载中', '5MB/s', '10s')
+  await r.awaitFlush()
 
   const jsonl = path.join(taskDir, 'task-1.jsonl')
   const json = path.join(dlDir, 'task-1.json')
@@ -72,31 +76,34 @@ test('report 写入两条轨道', () => {
   assert.equal(task.speed, '5MB/s')
 })
 
-test('pct 未变化时去重，不重复写入', () => {
+test('pct 未变化时去重，不重复写入', async () => {
   const r = new ProgressReporter('task-2')
   r.report(30, '下载中')
   r.report(30, '下载中')
   r.report(30, '下载中')
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-2.jsonl'))
   assert.equal(lines.length, 1)
 })
 
-test('pct 变化时正常追加', () => {
+test('pct 变化时正常追加', async () => {
   const r = new ProgressReporter('task-3')
   r.report(10, '下载中')
   r.report(20, '下载中')
   r.report(30, '下载中')
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-3.jsonl'))
   assert.equal(lines.length, 3)
   assert.deepEqual(lines.map((l) => l.pct), [10, 20, 30])
 })
 
-test('终态穿透去重：pct 相同但 state 变为 done 时仍落盘', () => {
+test('终态穿透去重：pct 相同但 state 变为 done 时仍落盘', async () => {
   const r = new ProgressReporter('task-4')
   r.report(100, '下载中') // 进度已到 100，但尚未宣告完成
   r.done() // 终态：state 由 running 变 done，必须穿透去重
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-4.jsonl'))
   assert.equal(lines.length, 2)
@@ -108,10 +115,11 @@ test('终态穿透去重：pct 相同但 state 变为 done 时仍落盘', () => 
   assert.equal(task.progress, 1)
 })
 
-test('fail 保留最后 pct 并写入失败消息', () => {
+test('fail 保留最后 pct 并写入失败消息', async () => {
   const r = new ProgressReporter('task-5')
   r.report(50, '下载中')
   r.fail('连接超时')
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-5.jsonl'))
   const last = lines[lines.length - 1]
@@ -119,24 +127,25 @@ test('fail 保留最后 pct 并写入失败消息', () => {
   assert.match(String(last.msg), /失败.*连接超时/)
 })
 
-test('目录不可写时不抛异常', () => {
+test('目录不可写时不抛异常', async () => {
   // 用一个普通文件占位，再在其“下”建目录，mkdir 必然失败（ENOTDIR）
   const blocker = path.join(tmpRoot, 'blocker-file')
   writeFileSync(blocker, 'x')
   process.env.DSH_PROGRESS_DIR = path.join(blocker, 'nope')
   process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(blocker, 'nope2')
 
-  assert.doesNotThrow(() => {
-    const r = new ProgressReporter('task-6')
-    r.report(50, '下载中')
-    r.done()
-    r.fail('x')
-  })
+  const r = new ProgressReporter('task-6')
+  r.report(50, '下载中')
+  r.done()
+  r.fail('x')
+  // 异步写盘的异常必须被吞掉，不能变成 unhandled rejection
+  await assert.doesNotReject(() => r.awaitFlush())
 })
 
-test('cleanup 删除进度文件', () => {
+test('cleanup 删除进度文件', async () => {
   const r = new ProgressReporter('task-7')
   r.report(50, '下载中')
+  await r.awaitFlush()
   r.cleanup()
 
   assert.ok(!existsSync(path.join(taskDir, 'task-7.jsonl')))
@@ -148,9 +157,10 @@ test('cleanup 对不存在的文件不抛异常', () => {
   assert.doesNotThrow(() => r.cleanup())
 })
 
-test('label 写入两条轨道，供 UI 展示文件名', () => {
+test('label 写入两条轨道，供 UI 展示文件名', async () => {
   const r = new ProgressReporter('task-9', 'ubuntu-24.04.iso')
   r.report(7, '下载中', '2MB/s', '1m')
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-9.jsonl'))
   assert.equal(lines[0].name, 'ubuntu-24.04.iso')
@@ -161,9 +171,10 @@ test('label 写入两条轨道，供 UI 展示文件名', () => {
   assert.equal(task.name, 'ubuntu-24.04.iso')
 })
 
-test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', () => {
+test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', async () => {
   const r = new ProgressReporter('task-10')
   r.report(7, '下载中')
+  await r.awaitFlush()
 
   const task = JSON.parse(readFileSync(path.join(dlDir, 'task-10.json'), 'utf-8'))
   assert.equal(task.name, 'task-10')
@@ -175,12 +186,13 @@ test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', () => {
 
 /* ---------------- 0.5.0：state 字段与轨道一目录解析 ---------------- */
 
-test('终态记录显式写入 state（done / failed / cancelled）', () => {
+test('终态记录显式写入 state（done / failed / cancelled）', async () => {
   const r = new ProgressReporter('task-11')
   r.report(10, '下载中')
   r.done()
   r.fail('连接超时')
   r.cancel('用户取消')
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-11.jsonl'))
   assert.deepEqual(
@@ -193,21 +205,23 @@ test('终态记录显式写入 state（done / failed / cancelled）', () => {
   assert.equal(task.status, 'cancelled', '最后一次写入的终态应生效')
 })
 
-test('cancel 写入 cancelled 状态（轨道二）', () => {
+test('cancel 写入 cancelled 状态（轨道二）', async () => {
   const r = new ProgressReporter('task-12')
   r.report(30, '下载中')
   r.cancel()
+  await r.awaitFlush()
 
   const task = JSON.parse(readFileSync(path.join(dlDir, 'task-12.json'), 'utf-8'))
   assert.equal(task.status, 'cancelled')
   assert.equal(task.progress, 0.3, '取消应保留最后一次百分比')
 })
 
-test('去重按整条记录：pct 相同但速度变化时仍写入', () => {
+test('去重按整条记录：pct 相同但速度变化时仍写入', async () => {
   const r = new ProgressReporter('task-13')
   r.report(30, '下载中', '1MB/s')
   r.report(30, '下载中', '2MB/s')
   r.report(30, '下载中', '2MB/s') // 与上一条完全相同 -> 跳过
+  await r.awaitFlush()
 
   const lines = readJsonl(path.join(taskDir, 'task-13.jsonl'))
   assert.equal(lines.length, 2)
@@ -265,12 +279,13 @@ test('resolveTaskProgressDir：无会话或非法会话 ID 时返回 null', () =
   }
 })
 
-test('无会话且无 DSH_PROGRESS_DIR 时不写轨道一，但轨道二照写', () => {
+test('无会话且无 DSH_PROGRESS_DIR 时不写轨道一，但轨道二照写', async () => {
   const saved = process.env.DSH_PROGRESS_DIR
   delete process.env.DSH_PROGRESS_DIR
   try {
     const r = new ProgressReporter('task-14')
     r.report(50, '下载中')
+    await r.awaitFlush()
     assert.ok(existsSync(path.join(dlDir, 'task-14.json')), '轨道二应照写')
     assert.ok(!existsSync(path.join(tmpRoot, 'task-14.jsonl')), '轨道一不应出现')
   } finally {
@@ -278,7 +293,7 @@ test('无会话且无 DSH_PROGRESS_DIR 时不写轨道一，但轨道二照写',
   }
 })
 
-test('有会话时轨道一写入 <cwd>/.dsh-progress/<id>/<taskId>.jsonl', () => {
+test('有会话时轨道一写入 <cwd>/.dsh-progress/<id>/<taskId>.jsonl', async () => {
   const saved = process.env.DSH_PROGRESS_DIR
   delete process.env.DSH_PROGRESS_DIR
   try {
@@ -286,6 +301,7 @@ test('有会话时轨道一写入 <cwd>/.dsh-progress/<id>/<taskId>.jsonl', () =
     try {
       const r = new ProgressReporter('task-15', 'a.zip', { id: 'sess-1', cwd })
       r.report(25, '下载中', '3MB/s')
+      await r.awaitFlush()
       const file = path.join(cwd, '.dsh-progress', 'sess-1', 'task-15.jsonl')
       assert.ok(existsSync(file), '应写进会话进度目录')
       const lines = readJsonl(file)

@@ -19,8 +19,10 @@
  *   如实称其为本插件自有格式。
  */
 import * as fs from 'node:fs'
+import * as fsp from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { ProgressRecord, ProgressState } from './types.js'
 
 /** dsh-task-progress 的目录名规则（对应其 `SESSION_SEGMENT_RE`）。 */
@@ -133,6 +135,27 @@ export class ProgressReporter {
   private lastPct = -1
   /** 上一次写入的去重键；内容完全一致时不重复落盘 */
   private lastKey = ''
+  /**
+   * 待落盘的记录队列。
+   *
+   * 为什么不再同步写盘：`report()` 挂在 aria2 每秒一次的摘要回调与 curl 的进度
+   * 行回调上，`appendFileSync` / `writeFileSync` 会把整个事件循环卡住一次磁盘
+   * I/O —— 下载越快、回调越密，卡得越久，而这些卡顿与下载本身毫无关系。
+   * 改为「微任务批量落盘」：同一 tick 内的多条记录一次写出，顺序保持不变，
+   * 写盘本身交给 `fs.promises`，不再阻塞。
+   *
+   * 注意不能像「只保留最后一条」那样合并：轨道一是 append-only 的 JSONL，
+   * 读取端（`dsh-task-progress`）按最后一行判定状态，但进度历史本身也有意义；
+   * 压掉中间记录会让「10% → 20% → 30%」变成只有 30%。
+   */
+  private pending: ProgressRecord[] = []
+  private flushScheduled = false
+  /**
+   * 终态必须落盘：调用方在 `done()` / `fail()` / `cancel()` 之后通常立刻返回，
+   * 若这条记录还留在 `pending` 里，面板会永远停在「下载中」。
+   * `awaitFlush()` 供调用点等待落盘完成。
+   */
+  private pendingWrite: Promise<void> = Promise.resolve()
 
   /**
    * @param taskId 任务 ID，用于文件名与状态查询
@@ -182,27 +205,50 @@ export class ProgressReporter {
     this.lastKey = key
     this.lastPct = rounded
 
+    const rec: ProgressRecord = {
+      v: 1,
+      task: this.taskId,
+      state: effectiveState,
+      pct: rounded,
+      msg,
+    }
+    if (this.label) rec.name = this.label
+    if (spd) rec.spd = spd
+    if (eta) rec.eta = eta
+
+    this.pending.push(rec)
+    this.scheduleFlush()
+  }
+
+  /** 安排一次异步落盘（同 tick 合并） */
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return
+    this.flushScheduled = true
+    queueMicrotask(() => {
+      this.flushScheduled = false
+      const batch = this.pending
+      this.pending = []
+      if (batch.length > 0) void this.writeNow(batch)
+    })
+  }
+
+  /** 真正落盘（异步，不阻塞事件循环），保持记录顺序 */
+  private writeNow(batch: ProgressRecord[]): Promise<void> {
+    const jobs: Array<Promise<unknown>> = []
+
     // 轨道一：JSONL append
     if (this.taskProgressFile) {
-      const rec: ProgressRecord = {
-        v: 1,
-        task: this.taskId,
-        state: effectiveState,
-        pct: rounded,
-        msg,
-      }
-      if (this.label) rec.name = this.label
-      if (spd) rec.spd = spd
-      if (eta) rec.eta = eta
-      try {
-        fs.appendFileSync(this.taskProgressFile, JSON.stringify(rec) + '\n', 'utf-8')
-      } catch {
-        /* 目录被删 / 权限变化，静默忽略 */
-      }
+      // 一次拼接后单次 append：多条记录仍按原顺序写在同一文件里
+      const chunk = batch.map((rec) => JSON.stringify(rec) + '\n').join('')
+      const file = this.taskProgressFile
+      jobs.push(fsp.appendFile(file, chunk, 'utf-8').catch(() => {}))
     }
 
     // 轨道二：JSON 覆盖写
     if (this.downloadProgressFile) {
+      // 轨道二是整体覆盖写，只有最后一条有意义
+      const rec = batch[batch.length - 1]!
+      const effectiveState = rec.state ?? 'running'
       const status: DownloadTaskFile['status'] =
         effectiveState === 'done'
           ? 'completed'
@@ -215,17 +261,40 @@ export class ProgressReporter {
         id: this.taskId,
         name: this.label ?? this.taskId,
         status,
-        progress: rounded / 100,
+        progress: rec.pct / 100,
         updatedAt: Date.now(),
       }
-      if (spd) task.speed = spd
-      if (eta) task.eta = eta
-      try {
-        fs.writeFileSync(this.downloadProgressFile, JSON.stringify(task, null, 2), 'utf-8')
-      } catch {
-        /* 忽略 */
-      }
+      if (rec.spd) task.speed = rec.spd
+      if (rec.eta) task.eta = rec.eta
+      const file = this.downloadProgressFile
+      jobs.push(fsp.writeFile(file, JSON.stringify(task, null, 2), 'utf-8').catch(() => {}))
     }
+
+    const done = Promise.all(jobs).then(
+      () => undefined,
+      () => undefined,
+    )
+    // 串行化：后一次写入必须发生在前一次之后，避免 append 顺序错乱
+    this.pendingWrite = this.pendingWrite.then(() => done)
+    return this.pendingWrite
+  }
+
+  /**
+   * 等待所有已排队的写入落盘。
+   *
+   * 终态（`done` / `fail` / `cancel`）之后调用方通常立刻 return，此时必须等一下，
+   * 否则「已完成」这条记录还在队列里，面板会永远停在「下载中」。
+   * 带 2 秒上限：磁盘异常时不至于把工具调用挂死。
+   */
+  async awaitFlush(): Promise<void> {
+    // 若还有未 flush 的 pending（微任务尚未跑），先手动补一次
+    if (this.pending.length > 0) {
+      const batch = this.pending
+      this.pending = []
+      this.flushScheduled = false
+      await this.writeNow(batch)
+    }
+    await Promise.race([this.pendingWrite, delay(2000)])
   }
 
   /** 标记完成 */

@@ -50,6 +50,16 @@ export interface ProbeResult {
   contentType?: string
   /** 不支持多线程 / 回退的原因 */
   reason?: string
+  /**
+   * `ETag` 响应头原始值（含引号）。
+   * 0.6.0 起用于续传前的一致性校验：它是「远端资源有没有变」的最强信号。
+   */
+  etag?: string
+  /**
+   * `Last-Modified` 响应头原始值。
+   * 服务器不发 ETag 时的次优内容指纹，比仅比对长度可靠得多。
+   */
+  lastModified?: string
 }
 
 /** 探测可选项 */

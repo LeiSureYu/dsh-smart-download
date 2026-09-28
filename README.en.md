@@ -26,7 +26,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - 🌐 **Mirror acceleration** — an optional `mirror` parameter routes the download through a GitHub mirror.
 - 🔍 **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
-Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.1` or newer.
+Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.2` or newer.
 
 `dsh-smart-dl` registers two tools with DSH:
 
@@ -45,7 +45,7 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 > **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
-> **Use `0.4.1` or newer.** `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.4.1`.
+> **Use `0.4.2` or newer.** `0.4.2` fixes three reproduced defects: ① when the size cannot be probed the result used to carry `size: undefined`, which the host rejects as non-lossless JSON with `ToolOutputError` (the download had in fact succeeded); ② URL path traversal (`..%2F..%2F..%2Fescaped.txt`) could write outside the working directory; ③ there was no protocol allow-list, so `file://` was accepted by `curl` and copied a local file. `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the full history in [CHANGELOG.md](./CHANGELOG.md). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.4.2`.
 >
 > `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
 
@@ -57,26 +57,30 @@ The decision flow, in text:
 call smart_download(url, output?, mirror?)
         │
         ▼
-[0] if mirror is given, prepend the prefix to the URL
+[0] validate the protocol: only http / https are accepted;
+     anything else is rejected before any request
+        │
+        ▼
+[1] if mirror is given, prepend the prefix to the URL
      · mirror prefix + full original URL
      · skipped for non-http(s) URLs
      · output filename still derived from the original URL
         │
         ▼
-[1] Probe the URL (5s timeout)
+[2] Probe the URL (5s timeout)
      · send a HEAD request first
      · if HEAD returns 405 or no Content-Length,
        retry with GET + "Range: bytes=0-0"
         │
         ▼
-[2] decide() picks a tier by file size and aria2 availability:
+[3] decide() picks a tier by file size and aria2 availability:
      · no Range support / probe failed / size unknown / <1MB -> curl
      · 1MB ~ 50MB  -> aria2 with 4 connections
      · ≥ 50MB      -> aria2 with 8 connections (conservative cap, not 16)
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 tier                     ▼ curl tier
-[3a] bundled aria2c found?          [3b] curl single-threaded
+[4a] bundled aria2c found?          [4b] curl single-threaded
    │ yes             │ no             (with progress bar)
    ▼                 ▼
  aria2 4/8 conns   curl single-threaded (fallback)
@@ -95,6 +99,12 @@ Key points:
 - **Any probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
 - The connection count is chosen dynamically by file size (thresholds 1MB / 50MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing".
 - `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
+- **Only `http` / `https` are accepted.** A URL can come from any page the model happens to read, so it is untrusted input: other protocols (`file:`, `ftp:`, …) are rejected before any probe or download starts.
+- **The derived output filename is sanitised.** When `output` is omitted the filename is derived from the URL, and the result is always a **single path segment** — `/`, `\`, `..` in the URI-decoded value are discarded, so nothing can be written outside the working directory.
+
+### Why the protocol allow-list and filename sanitisation are mandatory (reproduced; do not remove)
+
+> Reproduced on `0.4.1`: `file:///C:/Windows/win.ini` was accepted by `curl` and **successfully copied a local file** to the output path; and `http://host/..%2F..%2F..%2Fescaped.txt` decoded to `../../../escaped.txt`, so with no `output` argument the file was written **outside the current working directory** (verified written). Both are fixed in `0.4.2` — the first by the protocol allow-list, the second by "split again after decoding, keep the last segment, then sanitise".
 
 ## Mirror acceleration
 
@@ -225,6 +235,8 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 | `applyMirror`        | mis-concatenated URL      | the result must parse via `new URL()` and end with the original URL |
 | `readDownloadStatus` | unreadable → empty list   | a dir containing valid task files must yield tasks with parsed fields |
 | `buildCurlArgs`      | resume flag misplaced     | `-C -` must be present iff `resume`, and `-o` must stay adjacent to the path |
+| `checkDownloadUrl`   | protocol unchecked → local file read | `file://` / `ftp://` must be rejected; `http(s)` must be admitted and return a parsed URL |
+| `deriveFilenameFromUrl` | no sanitisation → path traversal | `..%2F..%2F..%2Fescaped.txt` must derive the single segment `escaped.txt`, and the actual write must not escape the current directory |
 
 Every assertion is **positive**: it checks "did it actually produce output", not "did it avoid crashing". Real samples live in `test/fixtures/` (curl fixtures are `.bin` files preserving `\r`), and "the fixture must contain `\r`" is itself a forced assertion.
 
@@ -250,8 +262,8 @@ This plugin does exactly three things: **start downloads**, **write progress fil
 
 | Behaviour | Detail |
 | --- | --- |
-| Outbound network | Sends `HEAD` / `Range` probes to the target URL (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller (or the address produced by prefixing it with the caller-supplied `mirror`) — no other endpoints. With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
-| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch; `--allow-overwrite` is not enabled, so an already-completed file of the same name is never silently discarded. |
+| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`). For an admitted URL it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller (or the address produced by prefixing it with the caller-supplied `mirror`) — no other endpoints. With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
+| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch; `--allow-overwrite` is not enabled, so an already-completed file of the same name is never silently discarded. |
 | Reading progress files | `download_status` only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
 | Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl` (skipped if that variable is unset). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `~/.dsh/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
 | Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, force-killed on Windows if still alive after 1s). |

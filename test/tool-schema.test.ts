@@ -4,20 +4,28 @@
  * 严格校验，覆盖两条曾经各让插件在 DSH 里激活失败一次的规则：
  * - parameters 的属性若写 `required`，只能是 `true`（可选参数须省略该字段）；
  * - object 类型的 schema 节点必须显式声明 `additionalProperties: true|false`。
+ *
+ * 桩 ctx 还需要提供 `inject`：apply() 会通过 `ctx.inject(['connection'], …)`
+ * 挂载进度面板的 Host RPC 端点（纯 CLI profile 下没有 connection 服务时该
+ * 分支静默跳过），桩里不做任何事即可。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { apply } from '../src/index.js'
 
+/** 最小桩上下文：只满足 apply() 在纯 CLI profile 下会碰到的成员。 */
+function stubCtx(register: (tool: never) => void) {
+  return {
+    tools: { register },
+    inject: () => {},
+  }
+}
+
 test('apply(): 工具 schema 通过 dsh-tools 校验并注册两个工具', () => {
   const registered: Array<{ name: string }> = []
-  const ctx = {
-    tools: {
-      register(tool: { name: string }) {
-        registered.push(tool)
-      },
-    },
-  }
+  const ctx = stubCtx((tool: { name: string }) => {
+    registered.push(tool)
+  })
 
   // 若 schema 不合法，defineTool 会在此抛 JsonSchemaError。
   apply(ctx as never)
@@ -30,13 +38,9 @@ test('apply(): 工具 schema 通过 dsh-tools 校验并注册两个工具', () =
 
 test('smart_download 的 parameters 含 url/output/mirror，且仅 url 必填', () => {
   const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
-  const ctx = {
-    tools: {
-      register(tool: { name: string; parameters: Record<string, unknown> }) {
-        registered.push(tool)
-      },
-    },
-  }
+  const ctx = stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
+    registered.push(tool)
+  })
   apply(ctx as never)
 
   const tool = registered.find((t) => t.name === 'smart_download')

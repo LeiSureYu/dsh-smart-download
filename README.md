@@ -11,6 +11,7 @@
 
 > DSH 多线程下载插件，内置 aria2，**零配置**：安装即用，无需自行安装 aria2。
 > 支持 **镜像加速**、**断点续传**，并可用 `download_status` 查询下载进度。
+> 在 `web` profile 下，下载中会在界面右下角显示**实时进度面板**（文件名 / 百分比 / 速度 / 剩余时间），完成后自动消失。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -27,7 +28,9 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 **支持的 profile**：`web`（上面的 `--profile web` 即为此插件验证过的 profile）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
 
-> **版本要求：请使用 `0.3.0` 或更高。** `0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.3.0`。
+> **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
+
+> **版本要求：请使用 `0.4.0` 或更高。** `0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.4.0`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
@@ -140,6 +143,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
   "tasks": [
     {
       "id": "dl-mulfpr76-z47a",
+      "name": "local-24MiB.bin",
       "pct": 100,
       "msg": "下载完成",
       "status": "completed",
@@ -156,6 +160,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - **纯只读**：不写文件、不联网。读取的就是「进度上报」那一节里的两条轨道目录。
 - **容错优先**：目录不存在、权限不足、文件内容损坏，都退化为「该任务不出现在结果里」，整个调用依然成功返回（只是任务列表更短），不会因为查状态而让下载失败。
 - 任务按 `updatedAt` **倒序**，最新的排在最前；`total` 是**未截断**的真实总数，`tasks` 会被 `limit` 截断。
+- `name` 是输出文件名（面板与列表显示用），未知时回退为任务 ID。
 - `spd` / `eta` 在不支持或未知时返回**空字符串**（schema 要求 string），不会返回 `null` 或 `undefined`。
 
 ## 进度上报
@@ -166,6 +171,21 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - 轨道二（dsh-download-progress 格式）：`$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `~/.dsh/downloads/tasks/<taskId>.json`，整体覆盖写。
 
 进度按百分比去重，完成 / 失败终态会穿透去重。aria2 解析 `--summary-interval=1` 的摘要行（含速度与 ETA），curl 解析 `--progress-bar` 的百分比。
+
+## 界面进度面板（web profile）
+
+在 `web` profile 下，插件会在界面右下角挂载一个**实时进度面板**：只要有下载在进行就自动出现，显示**输出文件名、百分比、传输速度与剩余时间**；下载完成后短暂显示「已完成」回执，然后自动消失。空闲时不占位、不显示。
+
+![进度面板](docs/progress-pill.png)
+
+实现要点（如遇面板不显示，可据此排查）：
+
+- **走宿主 RPC**：客户端通过 `connection.fetch.register` 注册的 `/api/smartdl.status` 拉取进度快照，与 `download_status` 工具读的是同一份进度文件。
+- **插槽**：注册到 `shell.overlay`（`kind: 'list'`，`order: 100`），因此不会覆盖宿主自身界面；无内容时渲染为 `null`。
+- **只依赖 `react`**：客户端脚本以 classic script 形式通过 `window.__ModuleLoader__.load` 注册，不做打包。
+- **陈旧任务自动忽略**：超过 10 分钟没有更新的 `running` 任务不再计入面板，避免历史残留文件让面板永久卡住。
+
+> 该面板仅 `web` profile 提供；CLI 等 profile 下插件会静默跳过客户端注册，工具与下载功能不受影响。
 
 ## 设计上的静默失败防护
 
@@ -318,6 +338,10 @@ aria2 官方仅提供 **Windows x64** 与源码包，因此另外三个平台使
 | Windows arm64 | [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64) `v1.37.0` | `5694080902fff84c8636e561c48f7a65278e8d4f05efefe953637f60a397c81f` |
 | Linux x64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a` |
 | Linux arm64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6` |
+
+## 声明
+
+本项目为**社区维护的第三方插件**，**非官方项目**，与 DeepSeek AI 及其关联公司**无隶属关系**，也未获其背书或赞助。插件名称中的 "dsh" 指代其运行所依托的 DeepSeek Harness（DSH）平台，仅用于说明兼容性。
 
 ## License
 

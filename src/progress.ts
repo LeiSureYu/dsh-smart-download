@@ -54,12 +54,18 @@ interface DownloadTaskFile {
 
 export class ProgressReporter {
   private readonly taskId: string
+  private readonly label: string | undefined
   private taskProgressFile: string | null = null
   private downloadProgressFile: string | null = null
   private lastPct = -1
 
-  constructor(taskId: string) {
+  /**
+   * @param taskId 任务 ID，用于文件名与状态查询
+   * @param label 人类可读的任务名（通常是输出文件名），会写入两条轨道供 UI 展示
+   */
+  constructor(taskId: string, label?: string) {
     this.taskId = taskId
+    this.label = label
 
     const taskDir = ensureDir(resolveTaskProgressDir())
     if (taskDir) {
@@ -96,6 +102,7 @@ export class ProgressReporter {
         pct: rounded,
         msg,
       }
+      if (this.label) rec.name = this.label
       if (spd) rec.spd = spd
       if (eta) rec.eta = eta
       try {
@@ -109,7 +116,7 @@ export class ProgressReporter {
     if (this.downloadProgressFile) {
       const task: DownloadTaskFile = {
         id: this.taskId,
-        name: this.taskId,
+        name: this.label ?? this.taskId,
         status: rounded >= 100 ? 'completed' : 'running',
         progress: rounded / 100,
         updatedAt: Date.now(),

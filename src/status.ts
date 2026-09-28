@@ -21,6 +21,11 @@ import type { ProgressRecord } from './types.js'
 export interface TaskStatus {
   /** 任务 ID */
   id: string
+  /**
+   * 人类可读的任务名（通常是输出文件名），来自进度记录的 `name` 字段。
+   * 老版本进度文件没有该字段时为 `''`，调用方需自行回退到 id。
+   */
+  name: string
   /** 进度百分比 0-100 的整数 */
   pct: number
   /** 最近一条状态说明 */
@@ -117,11 +122,13 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
       const rec = readLastJsonlLine(file)
       if (!rec) continue
       const pct = Number.isFinite(rec.pct) ? Math.max(0, Math.min(100, rec.pct)) : 0
+      const msg = str(rec.msg)
       out.set(id, {
         id,
+        name: str(rec.name),
         pct,
-        msg: str(rec.msg),
-        status: statusFrom(pct, str(rec.msg)),
+        msg,
+        status: statusFrom(pct, msg),
         spd: str(rec.spd),
         eta: str(rec.eta),
         updatedAt: mtimeMs,
@@ -147,7 +154,9 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
     const updatedRaw = Number(rec.updatedAt)
     out.set(id, {
       id,
+      name: str(rec.name),
       pct,
+      // 轨道二没有独立的状态文案，沿用旧行为用任务名兜底
       msg: str(rec.name),
       status,
       spd: str(rec.speed),
@@ -179,7 +188,11 @@ export function readDownloadStatus(
   for (const [id, task] of collectFromDir(downloadDir, '.json')) merged.set(id, task)
   for (const [id, task] of collectFromDir(taskDir, '.jsonl')) {
     const existing = merged.get(id)
-    merged.set(id, existing ? { ...existing, ...task } : task)
+    // 轨道一的 name 可能为空（老版本进度文件），此时保留轨道二给出的名字
+    merged.set(
+      id,
+      existing ? { ...existing, ...task, name: task.name || existing.name } : task,
+    )
   }
 
   let tasks = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt)

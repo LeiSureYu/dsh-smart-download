@@ -235,3 +235,52 @@ test('返回结构的 taskDir / downloadDir 指向实际扫描的目录', () => 
     assert.equal(snap.downloadDir, downloadDir)
   })
 })
+
+test('name 字段：JSONL 的 name 与 msg 各自独立', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-named', [
+      { v: 1, task: 'dl-named', pct: 12, msg: '下载中（aria2）', name: 'debian.iso' },
+    ])
+    const task = readDownloadStatus().tasks[0]
+    assert.ok(task)
+    assert.equal(task.name, 'debian.iso')
+    assert.equal(task.msg, '下载中（aria2）')
+  })
+})
+
+test('name 字段：JSON 轨道的 name 解析为任务名', () => {
+  withDirs(({ downloadDir }) => {
+    writeJson(downloadDir, 'dl-jname', {
+      id: 'dl-jname',
+      name: 'fedora.iso',
+      status: 'running',
+      progress: 0.3,
+      updatedAt: 1000,
+    })
+    const task = readDownloadStatus().tasks[0]
+    assert.ok(task)
+    assert.equal(task.name, 'fedora.iso')
+  })
+})
+
+test('name 字段：老版本进度文件缺 name 时返回空串，且不吞掉另一轨道的 name', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 只有 JSONL、且是旧格式（无 name）
+    writeJsonl(taskDir, 'dl-old', [{ v: 1, task: 'dl-old', pct: 5, msg: '下载中' }])
+    assert.equal(readDownloadStatus().tasks[0]?.name, '', '缺 name 时必须是空串而不是 undefined')
+
+    // 两条轨道都有：JSONL 缺 name，应保留 JSON 轨道的 name
+    writeJson(downloadDir, 'dl-mix', {
+      id: 'dl-mix',
+      name: 'mixed.iso',
+      status: 'running',
+      progress: 0.4,
+      updatedAt: 2000,
+    })
+    writeJsonl(taskDir, 'dl-mix', [{ v: 1, task: 'dl-mix', pct: 40, msg: '下载中（curl）' }])
+    const mixed = readDownloadStatus().tasks.find((t) => t.id === 'dl-mix')
+    assert.ok(mixed)
+    assert.equal(mixed.name, 'mixed.iso', 'JSONL 缺 name 时不应把 JSON 的 name 覆盖成空')
+    assert.equal(mixed.msg, '下载中（curl）')
+  })
+})

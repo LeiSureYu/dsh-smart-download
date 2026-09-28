@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-smart-dl",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Multi-threaded downloader plugin for DeepSeek Harness: bundles aria2, probes file size and picks aria2 multi-connection or curl fallback automatically (Windows x64/arm64, Linux x64/arm64)",
   "repository": {
     "type": "git",
@@ -17,10 +17,15 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./client": {
+      "default": "./dist/client.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "docs",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -28,6 +33,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
     }
   },
   "optionalDependencies": {
@@ -38,7 +51,27 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-client-connection": ">=0.1.7-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.7-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.7-rc.1 <0.2.0-0",
     "@deepseek-ai/dsh-tools": ">=0.1.7-rc.1 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-connection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
@@ -48,7 +81,7 @@
     "typescript": "^5.6.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-client.mjs",
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "pnpm build && pnpm test"

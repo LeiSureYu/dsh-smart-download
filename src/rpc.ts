@@ -1,0 +1,160 @@
+/**
+ * Host 侧 RPC：把下载进度快照暴露给浏览器端（进度面板 UI）。
+ *
+ * 为什么不用 `ctx.connection.rpc.handle`：web profile 里 webserver 是
+ * 同级 loader row，不是本插件 fiber 的祖先，专用 RPC channel 无法挂载。
+ * 唯一可行的挂载点是 `connection.fetch.register`（共享 `/api` 载体上的
+ * 精确 Fetch 路由）。
+ *
+ * 协议（与 dsh-client-connection 的 `createWebConnectionRpc` 对齐）：
+ *   请求  POST /api/smartdl.status
+ *         { "type": "client-request", "rpcId": "<id>", "method": "smartdl.status", "payload": {...} }
+ *   响应  200 { "type": "server-response", "rpcId": "<id>", "result": { "ok": true, "value": {...} } }
+ *         或 { ..., "result": { "ok": false, "error": { code, message, details } } }
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
+
+/** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
+const API_PATH = '/api'
+/** 本插件拥有的端点名；客户端以 `rpc.call('/api', 'smartdl.status', ...)` 调用。 */
+const STATUS_ENDPOINT = 'smartdl.status'
+
+/** `connection.fetch.register` 接受的精确路由（结构化子集，避免依赖 dsh-client-connection 类型）。 */
+interface ConnectionFetchRoute {
+  readonly path: string
+  readonly methods: readonly ('GET' | 'HEAD' | 'POST')[]
+  readonly requestBody: 'buffered' | 'streaming'
+  readonly fetch: (request: Request) => Promise<Response>
+}
+
+/** 本插件用到的 `ctx.connection` 子集。 */
+interface ConnectionHandle {
+  readonly fetch: {
+    register(route: ConnectionFetchRoute): () => Promise<void>
+  }
+}
+
+/** RPC 成功结果。 */
+interface RpcOk {
+  ok: true
+  value: unknown
+}
+
+/** RPC 失败结果。 */
+interface RpcFail {
+  ok: false
+  error: { code: 'internal'; message: string; details: Record<string, never> }
+}
+
+function ok(value: unknown): RpcOk {
+  return { ok: true, value }
+}
+
+function fail(message: string): RpcFail {
+  return { ok: false, error: { code: 'internal', message, details: {} } }
+}
+
+/** 把一次 RPC 结果序列化成 server-response 信封。 */
+function envelopeResponse(rpcId: string, result: RpcOk | RpcFail): Response {
+  return new Response(JSON.stringify({ type: 'server-response', rpcId, result }), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  })
+}
+
+/** 从请求体里取出 limit（非法值回落到默认条数）。 */
+function readLimit(payload: unknown): number {
+  if (payload === null || typeof payload !== 'object') return DEFAULT_STATUS_LIMIT
+  const raw = (payload as { limit?: unknown }).limit
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STATUS_LIMIT
+  return Math.min(50, Math.floor(n))
+}
+
+/**
+ * 注册 `/api/smartdl.status` 精确 Fetch 路由。
+ *
+ * 通过 `ctx.inject(['connection'], ...)` 挂载：只有当 profile 真的提供了
+ * connection 服务（web profile）时才注册，纯 CLI profile 下静默跳过，
+ * 不会因为缺少 connection 而让整个插件加载失败。
+ *
+ * @param ctx 插件上下文
+ */
+export function registerStatusRpc(ctx: Context): void {
+  ctx.inject(['connection'], (child) => {
+    const connection = child.get('connection') as ConnectionHandle | undefined
+    if (!connection || typeof connection.fetch?.register !== 'function') return
+
+    child.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API_PATH}/${STATUS_ENDPOINT}`,
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: async (request: Request): Promise<Response> => {
+            if (request.method !== 'POST') {
+              return new Response('not found', { status: 404 })
+            }
+            const contentType = request.headers
+              .get('content-type')
+              ?.split(';', 1)[0]
+              ?.trim()
+              .toLowerCase()
+            if (contentType !== 'application/json') {
+              return new Response('content type must be application/json', { status: 415 })
+            }
+
+            let body: unknown
+            try {
+              body = await request.json()
+            } catch {
+              return new Response('body is not JSON', { status: 400 })
+            }
+
+            const envelope = body as {
+              type?: unknown
+              rpcId?: unknown
+              method?: unknown
+              payload?: unknown
+            } | null
+            if (
+              envelope === null ||
+              typeof envelope !== 'object' ||
+              envelope.type !== 'client-request' ||
+              typeof envelope.rpcId !== 'string' ||
+              envelope.rpcId === '' ||
+              typeof envelope.method !== 'string'
+            ) {
+              return envelopeResponse('invalid-request', fail('invalid client-request message'))
+            }
+            if (envelope.method !== STATUS_ENDPOINT) {
+              return envelopeResponse(
+                envelope.rpcId,
+                fail(
+                  `method ${JSON.stringify(envelope.method)} does not match endpoint ${JSON.stringify(STATUS_ENDPOINT)}`,
+                ),
+              )
+            }
+
+            try {
+              return envelopeResponse(
+                envelope.rpcId,
+                ok(readDownloadStatus(readLimit(envelope.payload))),
+              )
+            } catch (err) {
+              return envelopeResponse(
+                envelope.rpcId,
+                fail(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          },
+        }),
+      `dsh-smart-dl: ${API_PATH}/${STATUS_ENDPOINT} Fetch route`,
+    )
+  })
+}
+

@@ -11,6 +11,7 @@
 
 > Multi-threaded downloader plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai) with a bundled `aria2` — **zero configuration**: install it and it works, no separate aria2 install needed.
 > Supports **mirror acceleration** and **resumable downloads**, plus a `download_status` tool to query progress.
+> On the `web` profile it also shows a **live progress panel** in the bottom-right corner (file name / percentage / speed / ETA) that disappears when the download finishes.
 
 `dsh-smart-dl` registers two tools with DSH:
 
@@ -27,7 +28,9 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 **Supported profile**: `web` — the profile this plugin has been verified against (hence `--profile web` above). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
 
-> **Use `0.3.0` or newer.** Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.3.0`.
+> **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
+
+> **Use `0.4.0` or newer.** `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.4.0`.
 >
 > `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
 
@@ -140,6 +143,7 @@ Example result:
   "tasks": [
     {
       "id": "dl-mulfpr76-z47a",
+      "name": "local-24MiB.bin",
       "pct": 100,
       "msg": "download finished",
       "status": "completed",
@@ -156,6 +160,7 @@ Constraints and trade-offs:
 - **Purely read-only**: it writes nothing and performs no network access. It reads exactly the two progress-track directories described in "Progress reporting".
 - **Fault-tolerant first**: a missing directory, insufficient permissions, or corrupted file contents all degrade to "that task does not appear in the result" — the call still succeeds (just with a shorter list), so querying status never breaks a download.
 - Tasks are ordered by `updatedAt` **descending**, newest first. `total` is the **untruncated** count; `tasks` is truncated by `limit`.
+- `name` is the output file name (used for display in the panel and the list); it falls back to the task ID when unknown.
 - `spd` / `eta` return an **empty string** when unavailable or unknown (the schema requires a string) — never `null` or `undefined`.
 
 ## Progress reporting
@@ -166,6 +171,21 @@ Progress is written through `ProgressReporter` on **two tracks**; if either trac
 - Track 2 (dsh-download-progress format): `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `~/.dsh/downloads/tasks/<taskId>.json`, overwritten as a whole.
 
 Progress is de-duplicated by percentage; the terminal completed / failed state bypasses the de-duplication. aria2 output is parsed from the `--summary-interval=1` summary lines (including speed and ETA); curl is parsed from `--progress-bar` percentages.
+
+## Progress panel in the UI (web profile)
+
+On the `web` profile the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; when the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all.
+
+![progress panel](docs/progress-pill.png)
+
+Implementation notes (useful for troubleshooting a panel that does not show up):
+
+- **Host RPC**: the client polls the progress snapshot through `/api/smartdl.status`, registered via `connection.fetch.register`; it reads the same progress files as the `download_status` tool.
+- **Slot**: it registers into `shell.overlay` (`kind: 'list'`, `order: 100`), so it never replaces the host's own UI, and renders `null` when there is nothing to show.
+- **`react` only**: the client script is registered as a classic script through `window.__ModuleLoader__.load`; there is no bundler.
+- **Stale tasks are ignored**: a `running` task that has not been updated for more than 10 minutes no longer counts toward the panel, so leftover files from old runs cannot pin it on screen forever.
+
+> This panel is `web`-profile only. On other profiles the client registration is silently skipped and the tools and download behaviour are unaffected.
 
 ## Guarding against silent failures
 
@@ -318,6 +338,10 @@ aria2 officially ships **Windows x64** binaries and source only, so the other th
 | Windows arm64 | [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64) `v1.37.0` | `5694080902fff84c8636e561c48f7a65278e8d4f05efefe953637f60a397c81f` |
 | Linux x64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0` (musl static) | `e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a` |
 | Linux arm64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0` (musl static) | `0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6` |
+
+## Disclaimer
+
+This is a **community-maintained third-party plugin** and an **unofficial project**. It is **not affiliated with, endorsed by, or sponsored by DeepSeek AI** or its affiliates. The "dsh" in the name refers to the DeepSeek Harness (DSH) platform this plugin runs on, and is used only to describe compatibility.
 
 ## License
 

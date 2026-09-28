@@ -140,3 +140,28 @@ test('cleanup 对不存在的文件不抛异常', () => {
   const r = new ProgressReporter('task-8')
   assert.doesNotThrow(() => r.cleanup())
 })
+
+test('label 写入两条轨道，供 UI 展示文件名', () => {
+  const r = new ProgressReporter('task-9', 'ubuntu-24.04.iso')
+  r.report(7, '下载中', '2MB/s', '1m')
+
+  const lines = readJsonl(path.join(taskDir, 'task-9.jsonl'))
+  assert.equal(lines[0].name, 'ubuntu-24.04.iso')
+  // name 与 msg 各司其职：msg 仍是状态文案，不能被文件名顶掉
+  assert.equal(lines[0].msg, '下载中')
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-9.json'), 'utf-8'))
+  assert.equal(task.name, 'ubuntu-24.04.iso')
+})
+
+test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', () => {
+  const r = new ProgressReporter('task-10')
+  r.report(7, '下载中')
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-10.json'), 'utf-8'))
+  assert.equal(task.name, 'task-10')
+
+  // JSONL 轨道没有 name 字段时不应凭空写一个 undefined
+  const lines = readJsonl(path.join(taskDir, 'task-10.jsonl'))
+  assert.equal('name' in lines[0], false)
+})

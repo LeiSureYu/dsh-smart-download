@@ -103,6 +103,12 @@ export interface ProgressRecord {
   pct: number
   /** 简短说明 */
   msg: string
+  /**
+   * 人类可读的任务名（通常是输出文件名）。
+   * 独立于 `msg`：`msg` 承载状态文案（"下载中（aria2）"），
+   * 面板要展示的是文件名，两者不能互相顶掉。
+   */
+  name?: string
   /** 速度字符串，如 "8.2MB/s" */
   spd?: string
   /** 剩余时间字符串，如 "4m51s" */

@@ -5,6 +5,8 @@
  *   回退；支持镜像加速与断点续传，并通过 ProgressReporter 双轨上报进度；
  * - download_status：只读地查询这些下载任务的进度快照。
  *
+ * 另外注册浏览器端进度面板所需的 Host RPC 端点（仅 web profile 生效）。
+ *
  * 假设：基于 DSH 0.1.0-rc.5 的 defineTool / ctx.tools.register API。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -18,6 +20,7 @@ import {
 import { decide } from './decision.js'
 import { ProgressReporter } from './progress.js'
 import { applyMirror } from './mirror.js'
+import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import type {
@@ -31,6 +34,9 @@ export const name = 'dsh-smart-dl'
 export const inject = ['tools']
 
 export function apply(ctx: Context): void {
+  // 浏览器端进度面板的数据源；纯 CLI profile 下没有 connection 服务时静默跳过。
+  registerStatusRpc(ctx)
+
   ctx.tools.register(
     defineTool({
       name: 'smart_download',
@@ -88,7 +94,7 @@ export function apply(ctx: Context): void {
         const taskId = `dl-${Date.now().toString(36)}-${Math.random()
           .toString(36)
           .slice(2, 6)}`
-        const reporter = new ProgressReporter(taskId)
+        const reporter = new ProgressReporter(taskId, outputPath)
 
         // 1. 探测目标 URL
         reporter.report(0, '探测中…')
@@ -215,6 +221,7 @@ export function apply(ctx: Context): void {
                 additionalProperties: false,
                 properties: {
                   id: { type: 'string' },
+                  name: { type: 'string' },
                   pct: { type: 'integer' },
                   msg: { type: 'string' },
                   status: { type: 'string' },
@@ -235,7 +242,7 @@ export function apply(ctx: Context): void {
                 : value.tasks
                     .map(
                       (t) =>
-                        `${t.id}: ${t.pct}% (${t.status})${t.spd ? ` ${t.spd}` : ''}${
+                        `${t.name || t.id}: ${t.pct}% (${t.status})${t.spd ? ` ${t.spd}` : ''}${
                           t.eta ? ` eta ${t.eta}` : ''
                         }`,
                     )

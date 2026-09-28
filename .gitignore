@@ -16,9 +16,15 @@ Thumbs.db
 
 # 由 CI 下载的 aria2 二进制，不入库
 packages/aria2-win32-x64/bin/aria2c.exe
+packages/aria2-win32-arm64/bin/aria2c.exe
+packages/aria2-linux-x64/bin/aria2c
+packages/aria2-linux-arm64/bin/aria2c
 # CI 临时文件
 aria2.zip
 aria2-tmp/
+aria2-*.zip
+aria2-*-tmp/
+*.tgz
 
 # 编辑器
 .idea/

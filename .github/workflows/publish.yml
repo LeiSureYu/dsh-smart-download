@@ -6,15 +6,165 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# 结构说明：
+#   binaries-windows / binaries-linux 两个 job 只负责「取二进制 + 校验哈希」；
+#   publish job 统一在 Linux 上构建、测试、打包、发布。
+#   为什么发布必须在 Linux：npm 打包会记录文件的执行位，Windows 上打包
+#   会把 Linux 二进制记成 0644（不可执行），装完直接调用会失败。
+
 jobs:
-  publish:
+  binaries-windows:
+    name: Fetch aria2 binaries (win32 x64 + arm64)
     runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download aria2 for Windows x64 (official release)
+        shell: pwsh
+        run: |
+          $version = "1.37.0"
+          # 校验「压缩包」SHA256；解压后的 aria2c.exe 哈希见子包 README
+          $expected = "67D015301EEF0B612191212D564C5BB0A14B5B9C4796B76454276A4D28D9B288"
+          $url = "https://github.com/aria2/aria2/releases/download/release-$version/aria2-$version-win-64bit-build1.zip"
+          # github.com 偶发超时，重试若干次
+          $ok = $false
+          foreach ($i in 1..6) {
+            try { Invoke-WebRequest -Uri $url -OutFile aria2-x64.zip -TimeoutSec 120; $ok = $true; break }
+            catch { Write-Host "attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds 5 }
+          }
+          if (-not $ok) { throw "下载 aria2-x64.zip 失败" }
+          $sha = (Get-FileHash aria2-x64.zip -Algorithm SHA256).Hash
+          if ($sha -ne $expected) { throw "aria2-x64.zip 校验失败：期望 $expected，实际 $sha" }
+          Expand-Archive aria2-x64.zip -DestinationPath aria2-x64-tmp
+          New-Item -ItemType Directory -Force -Path packages/aria2-win32-x64/bin | Out-Null
+          Copy-Item "aria2-x64-tmp/aria2-$version-win-64bit-build1/aria2c.exe" "packages/aria2-win32-x64/bin/aria2c.exe"
+          Write-Host "win32-x64 aria2c.exe SHA256=$((Get-FileHash 'packages/aria2-win32-x64/bin/aria2c.exe' -Algorithm SHA256).Hash) (期望 BE2099C214F63A3CB4954B09A0BECD6E2E34660B886D4C898D260FEBFE9D70C2)"
+
+      - name: Download aria2 for Windows arm64 (minnyres build)
+        shell: pwsh
+        run: |
+          # aria2 官方无 Windows arm64 二进制，使用第三方 ARM64 构建
+          # 注意：这里校验的是「压缩包」的 SHA256；解压后的 aria2c.exe 哈希见子包 README
+          $expected = "5694080902FFF84C8636E561C48F7A65278E8D4F05EFEFE953637F60A397C81F"
+          $url = "https://github.com/minnyres/aria2-windows-arm64/releases/download/v1.37.0/aria2_1.37.0_arm64.zip"
+          $ok = $false
+          foreach ($i in 1..6) {
+            try { Invoke-WebRequest -Uri $url -OutFile aria2-arm64.zip -TimeoutSec 120; $ok = $true; break }
+            catch { Write-Host "attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds 5 }
+          }
+          if (-not $ok) { throw "下载 aria2-arm64.zip 失败" }
+          $sha = (Get-FileHash aria2-arm64.zip -Algorithm SHA256).Hash
+          if ($sha -ne $expected) { throw "aria2-arm64.zip 校验失败：期望 $expected，实际 $sha" }
+          Expand-Archive aria2-arm64.zip -DestinationPath aria2-arm64-tmp
+          New-Item -ItemType Directory -Force -Path packages/aria2-win32-arm64/bin | Out-Null
+          Copy-Item "aria2-arm64-tmp/aria2c.exe" "packages/aria2-win32-arm64/bin/aria2c.exe"
+          Write-Host "win32-arm64 aria2c.exe SHA256=$((Get-FileHash 'packages/aria2-win32-arm64/bin/aria2c.exe' -Algorithm SHA256).Hash) (期望 33C775256F64123515F32A8252200EF2AB5AD72963981C694DFF5E61D650F6BE)"
+
+      - name: Stage binaries for artifact upload
+        # 必须先在 staging/ 下镜像出最终目录结构再上传：
+        # upload-artifact 以「所有 path 的最近公共祖先」作为产物根目录，
+        # 直接传两个 bin 文件会让根变成 packages/，下载后落到错误位置。
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging/packages/aria2-win32-x64/bin | Out-Null
+          New-Item -ItemType Directory -Force -Path staging/packages/aria2-win32-arm64/bin | Out-Null
+          Copy-Item packages/aria2-win32-x64/bin/aria2c.exe staging/packages/aria2-win32-x64/bin/
+          Copy-Item packages/aria2-win32-arm64/bin/aria2c.exe staging/packages/aria2-win32-arm64/bin/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-windows
+          path: staging
+          if-no-files-found: error
+
+  binaries-linux:
+    name: Fetch aria2 binaries (linux x64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download static aria2 for Linux x64 + arm64 (abcfy2 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0"
+          # github.com 偶发超时/断连，交给 curl 自动重试
+          curl_opts=(-fsSL --retry 8 --retry-all-errors --retry-delay 5
+                     --connect-timeout 20 --max-time 600)
+
+          # x64
+          curl "${curl_opts[@]}" "$base/aria2-x86_64-linux-musl_static.zip" -o aria2-lx64.zip
+          echo "e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a  aria2-lx64.zip" | sha256sum -c -
+          mkdir -p packages/aria2-linux-x64/bin
+          unzip -j -o aria2-lx64.zip aria2c -d packages/aria2-linux-x64/bin
+          chmod 755 packages/aria2-linux-x64/bin/aria2c
+
+          # arm64
+          curl "${curl_opts[@]}" "$base/aria2-aarch64-linux-musl_static.zip" -o aria2-larm64.zip
+          echo "0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6  aria2-larm64.zip" | sha256sum -c -
+          mkdir -p packages/aria2-linux-arm64/bin
+          unzip -j -o aria2-larm64.zip aria2c -d packages/aria2-linux-arm64/bin
+          chmod 755 packages/aria2-linux-arm64/bin/aria2c
+
+          file packages/aria2-linux-x64/bin/aria2c packages/aria2-linux-arm64/bin/aria2c
+          ls -l packages/aria2-linux-x64/bin/aria2c packages/aria2-linux-arm64/bin/aria2c
+
+      - name: Stage binaries for artifact upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging/packages/aria2-linux-x64/bin staging/packages/aria2-linux-arm64/bin
+          cp packages/aria2-linux-x64/bin/aria2c staging/packages/aria2-linux-x64/bin/
+          cp packages/aria2-linux-arm64/bin/aria2c staging/packages/aria2-linux-arm64/bin/
+          chmod 755 staging/packages/aria2-linux-*/bin/aria2c
+          find staging -type f -exec ls -l {} +
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-linux
+          path: staging
+          if-no-files-found: error
+
+  publish:
+    name: Build, test and publish
+    needs: [binaries-windows, binaries-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write # OIDC：npm trusted publishing 必需，不再需要任何长期 token
+      id-token: write # OIDC：npm trusted publishing 必需
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore binaries from both runners
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: staging
+
+      - name: Merge staged binaries into packages/
+        # 两个 artifact 的根目录都是 staging/，merge 后形如
+        #   staging/packages/<子包>/bin/aria2c[.exe]
+        # 这里把它们合并回仓库的 packages/ 目录
+        shell: bash
+        run: |
+          set -euo pipefail
+          find staging -type f | sort
+          cp -r staging/packages/. packages/
+          rm -rf staging
+          echo "--- merged ---"
+          find packages -type f -name 'aria2c*' | sort
+
+      - name: Re-apply exec bit on Linux binaries
+        # upload-artifact 不保留文件权限，必须在这里重新 chmod
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 755 packages/aria2-linux-x64/bin/aria2c packages/aria2-linux-arm64/bin/aria2c
+          ls -l packages/aria2-*/bin/*
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -33,18 +183,8 @@ jobs:
           npm install -g npm@latest
           npm --version
 
-      - name: Download aria2 binary for Windows x64
-        shell: pwsh
-        run: |
-          $version = "1.37.0"
-          $url = "https://github.com/aria2/aria2/releases/download/release-$version/aria2-$version-win-64bit-build1.zip"
-          Invoke-WebRequest -Uri $url -OutFile aria2.zip
-          Expand-Archive aria2.zip -DestinationPath aria2-tmp
-          New-Item -ItemType Directory -Force -Path packages/aria2-win32-x64/bin | Out-Null
-          Copy-Item "aria2-tmp/aria2-$version-win-64bit-build1/aria2c.exe" "packages/aria2-win32-x64/bin/aria2c.exe"
-
       - name: Install dependencies
-        # aria2 子包为 optionalDependencies，此刻尚未发布，解析失败会被 pnpm 跳过，不阻断安装
+        # aria2 子包为 optionalDependencies，尚未发布的会被 pnpm 跳过，不阻断安装
         run: pnpm install --no-frozen-lockfile
 
       - name: Build
@@ -53,25 +193,124 @@ jobs:
       - name: Test
         run: pnpm test
 
-      # 认证走 npm trusted publishing（OIDC），不需要 NPM_TOKEN。
-      # npm 网页侧前置条件（每个「包」单独配置，且必须勾选允许直接 npm publish）：
-      #   @leisureyu/dsh-smart-dl        → Settings → Trusted Publisher
-      #   @leisureyu/dsh-aria2-win32-x64 → Settings → Trusted Publisher
+      # 认证策略：
+      #   1. 先尝试 npm trusted publishing（OIDC），不需要任何长期 token；
+      #   2. 失败则回退到仓库密钥 NPM_TOKEN —— 新包「首次」发布无法用 OIDC 引导
+      #      （npm/cli#8544 仍未修复），必须用 token。
+      # npm 网页侧前置条件（每个包单独配置 Trusted Publisher，且必须勾选允许直接 npm publish）：
+      #   @leisureyu/dsh-smart-dl / -aria2-win32-x64 / -aria2-win32-arm64 /
+      #   -aria2-linux-x64 / -aria2-linux-arm64
       #   Organization or user: LeiSureYu ；Repository: dsh-smart-download ；Workflow: publish.yml
-      - name: Publish subpackage
-        # 子包（aria2 二进制）只在版本真正变化时才需要发布；已存在则跳过，
-        # 否则会因 "Cannot publish over previously published version" 让整条流水线失败。
-        working-directory: packages/aria2-win32-x64
+      - name: Publish binary subpackages
         shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          name=$(node -p "require('./package.json').name")
-          ver=$(node -p "require('./package.json').version")
-          if npm view "$name@$ver" version >/dev/null 2>&1; then
-            echo "skip: $name@$ver already published"
-          else
-            npm publish --access public
-          fi
+          set -uo pipefail
+
+          PACK_DIR="$PWD/.pack-tmp"
+          mkdir -p "$PACK_DIR"
+
+          # 发布一个已打好的 tarball：先 OIDC，失败再退回 token
+          publish_tarball() {
+            local name="$1" ver="$2" tgz="$3"
+            local token="${NPM_TOKEN:-}"
+
+            echo "::group::publish $name@$ver"
+            echo "publishing $name@$ver via OIDC (trusted publishing)…"
+            if ( unset NODE_AUTH_TOKEN; npm publish "$tgz" --access public ); then
+              echo "::endgroup::"
+              return 0
+            fi
+
+            echo "OIDC 发布失败，改用 NPM_TOKEN 重试（新包首次发布必须用 token）…"
+            if [ -z "$token" ]; then
+              echo "::error::未配置 NPM_TOKEN，无法引导发布 $name"
+              echo "::endgroup::"
+              return 1
+            fi
+            NODE_AUTH_TOKEN="$token" npm publish "$tgz" --access public
+            echo "::endgroup::"
+          }
+
+          # 发布一个子包目录：已发布则跳过；打包后校验 Linux 二进制可执行位
+          publish_pkg_dir() {
+            local dir="$1"
+            local name ver tgz
+            name=$(node -p "require('./$dir/package.json').name")
+            ver=$(node -p "require('./$dir/package.json').version")
+
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "skip: $name@$ver already published"
+              return 0
+            fi
+
+            tgz=$(cd "$dir" && npm pack --silent --pack-destination "$PACK_DIR")
+            echo "packed $dir -> $PACK_DIR/$tgz"
+
+            # 先把清单读进变量，再用 here-string 匹配。
+            # 不要写成 `tar -tvzf ... | grep -q ...`：grep -q 命中即退出，
+            # 会让 tar 收到 SIGPIPE(141)，在 `set -o pipefail` 下被判为失败。
+            listing=$(tar -tvzf "$PACK_DIR/$tgz")
+            echo "$listing"
+
+            # 正向断言：Linux 子包里的 bin/aria2c 必须带可执行位，
+            # 否则装完无法调用（这是「在 Windows 上打包」的静默失败形态）
+            if [[ "$name" == *linux* ]]; then
+              if ! grep -qE '^-rwxr-xr-x .*bin/aria2c$' <<<"$listing"; then
+                echo "::error::$name 的 tarball 中 bin/aria2c 缺少可执行位（0755）"
+                return 1
+              fi
+            else
+              if ! grep -qE 'bin/aria2c\.exe$' <<<"$listing"; then
+                echo "::error::$name 的 tarball 中缺少 bin/aria2c.exe"
+                return 1
+              fi
+            fi
+
+            publish_tarball "$name" "$ver" "$PACK_DIR/$tgz"
+          }
+
+          # 顺序很重要：先全部子包，再主包（主包 optionalDependencies 依赖子包）
+          for dir in \
+            packages/aria2-win32-x64 \
+            packages/aria2-win32-arm64 \
+            packages/aria2-linux-x64 \
+            packages/aria2-linux-arm64
+          do
+            publish_pkg_dir "$dir" || exit 1
+          done
 
       - name: Publish main package
-        # 必须在子包发布成功后再发布主包，因为主包依赖该子包
-        run: npm publish --access public
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          PACK_DIR="$PWD/.pack-tmp"
+          mkdir -p "$PACK_DIR"
+
+          name=$(node -p "require('./package.json').name")
+          ver=$(node -p "require('./package.json').version")
+
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "skip: $name@$ver already published"
+            exit 0
+          fi
+
+          tgz=$(npm pack --silent --pack-destination "$PACK_DIR")
+          echo "packed main package -> $PACK_DIR/$tgz"
+
+          token="${NPM_TOKEN:-}"
+          echo "publishing $name@$ver via OIDC (trusted publishing)…"
+          if ( unset NODE_AUTH_TOKEN; npm publish "$PACK_DIR/$tgz" --access public ); then
+            exit 0
+          fi
+
+          echo "OIDC 发布失败，改用 NPM_TOKEN 重试…"
+          if [ -z "$token" ]; then
+            echo "::error::未配置 NPM_TOKEN，无法发布 $name"
+            exit 1
+          fi
+          NODE_AUTH_TOKEN="$token" npm publish "$PACK_DIR/$tgz" --access public

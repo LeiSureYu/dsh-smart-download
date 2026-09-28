@@ -26,7 +26,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - 🌐 **镜像加速** —— 可选 `mirror` 参数，走 GitHub 镜像站加速下载。
 - 🔍 **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.4.0` 或更新版本。
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.4.1` 或更新版本。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -45,7 +45,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 > **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
-> **版本要求：请使用 `0.4.0` 或更高。** `0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.4.0`。
+> **版本要求：请使用 `0.4.1` 或更高。** `0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.4.1`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 

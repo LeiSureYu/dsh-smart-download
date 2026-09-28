@@ -26,7 +26,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - 🌐 **Mirror acceleration** — an optional `mirror` parameter routes the download through a GitHub mirror.
 - 🔍 **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
-Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.0` or newer.
+Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.1` or newer.
 
 `dsh-smart-dl` registers two tools with DSH:
 
@@ -45,7 +45,7 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 > **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
-> **Use `0.4.0` or newer.** `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.4.0`.
+> **Use `0.4.1` or newer.** `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.4.1`.
 >
 > `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
 

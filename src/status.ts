@@ -2,9 +2,11 @@
  * download_status：读取本插件写下的进度文件，给出任务快照。
  *
  * 只读两条既有轨道（与 ProgressReporter 写的目录完全一致）：
- * - 轨道一：$DSH_PROGRESS_DIR/<taskId>.jsonl（dsh-task-progress 格式，append-only）
- * - 轨道二：$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json 或 ~/.dsh/downloads/tasks/<taskId>.json
- *           （dsh-download-progress 格式，整体覆盖写）
+ * - 轨道一：$DSH_PROGRESS_DIR/<taskId>.jsonl，缺省
+ *           <session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl
+ *           （dsh-task-progress 格式，append-only）
+ * - 轨道二：$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json 或
+ *           <DSH_HOME>/downloads/tasks/<taskId>.json（本插件自有格式，整体覆盖写）
  *
  * 设计约束：
  * - 纯只读，绝不写文件、绝不联网；
@@ -14,7 +16,11 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { resolveDownloadProgressDir, resolveTaskProgressDir } from './progress.js'
+import {
+  resolveDownloadProgressDir,
+  resolveTaskProgressDir,
+} from './progress.js'
+import type { ProgressSession } from './progress.js'
 import type { ProgressRecord } from './types.js'
 
 /** 单个任务的进度快照 */
@@ -30,8 +36,8 @@ export interface TaskStatus {
   pct: number
   /** 最近一条状态说明 */
   msg: string
-  /** 任务状态 */
-  status: 'running' | 'completed' | 'failed'
+  /** 任务状态；`cancelled` 只在进度记录显式声明 `state: 'cancelled'` 时出现 */
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
   /** 速度字符串，如 "8.2MB/s" */
   spd: string
   /** 剩余时间字符串，如 "4m51s" */
@@ -44,7 +50,7 @@ export interface TaskStatus {
 export interface DownloadStatusSnapshot {
   /** 是否读取成功（目录不可读时为 false，tasks 为空数组） */
   ok: boolean
-  /** 轨道一目录（JSONL） */
+  /** 轨道一目录（JSONL）；无法定位时为 `''`（工具 schema 要求 string） */
   taskDir: string
   /** 轨道二目录（JSON） */
   downloadDir: string
@@ -88,8 +94,19 @@ function readLastJsonlLine(file: string): ProgressRecord | null {
   return null
 }
 
-/** 从进度说明推断任务状态 */
-function statusFrom(pct: number, msg: string): TaskStatus['status'] {
+/**
+ * 判定任务状态。
+ *
+ * 优先读进度记录里显式的 `state` 字段（dsh-task-progress 的协议字段，
+ * `running` / `done` / `failed` / `cancelled`）；老版本进度文件没有该字段，
+ * 此时回退到按文案与百分比推断，保证向后兼容。
+ */
+function statusFrom(pct: number, msg: string, state?: unknown): TaskStatus['status'] {
+  if (state === 'done') return 'completed'
+  if (state === 'failed') return 'failed'
+  if (state === 'cancelled') return 'cancelled'
+  if (state === 'running') return 'running'
+  // 无 state（0.5.0 之前的进度文件）：按文案与百分比兜底
   if (msg.includes('失败')) return 'failed'
   if (msg.includes('完成') || pct >= 100) return 'completed'
   return 'running'
@@ -128,7 +145,7 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
         name: str(rec.name),
         pct,
         msg,
-        status: statusFrom(pct, msg),
+        status: statusFrom(pct, msg, rec.state),
         spd: str(rec.spd),
         eta: str(rec.eta),
         updatedAt: mtimeMs,
@@ -150,7 +167,9 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
       : 0
     const statusRaw = rec.status
     const status: TaskStatus['status'] =
-      statusRaw === 'completed' || statusRaw === 'failed' ? statusRaw : 'running'
+      statusRaw === 'completed' || statusRaw === 'failed' || statusRaw === 'cancelled'
+        ? statusRaw
+        : 'running'
     const updatedRaw = Number(rec.updatedAt)
     out.set(id, {
       id,
@@ -175,24 +194,28 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
  *
  * @param limit 最多返回多少个任务，默认 10
  * @param taskId 指定任务 ID 时只返回该任务
+ * @param session 当前会话；用于定位轨道一的目录（缺省时轨道一目录为 null）
  */
 export function readDownloadStatus(
   limit: number = DEFAULT_STATUS_LIMIT,
   taskId?: string,
+  session?: ProgressSession,
 ): DownloadStatusSnapshot {
-  const taskDir = resolveTaskProgressDir()
+  const taskDir = resolveTaskProgressDir(session)
   const downloadDir = resolveDownloadProgressDir()
 
   const merged = new Map<string, TaskStatus>()
   // 先铺轨道二（JSON，含明确的 status/updatedAt），再用轨道一（JSONL，含 msg/spd/eta）覆盖补充
   for (const [id, task] of collectFromDir(downloadDir, '.json')) merged.set(id, task)
-  for (const [id, task] of collectFromDir(taskDir, '.jsonl')) {
-    const existing = merged.get(id)
-    // 轨道一的 name 可能为空（老版本进度文件），此时保留轨道二给出的名字
-    merged.set(
-      id,
-      existing ? { ...existing, ...task, name: task.name || existing.name } : task,
-    )
+  if (taskDir) {
+    for (const [id, task] of collectFromDir(taskDir, '.jsonl')) {
+      const existing = merged.get(id)
+      // 轨道一的 name 可能为空（老版本进度文件），此时保留轨道二给出的名字
+      merged.set(
+        id,
+        existing ? { ...existing, ...task, name: task.name || existing.name } : task,
+      )
+    }
   }
 
   let tasks = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt)
@@ -202,5 +225,7 @@ export function readDownloadStatus(
   const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_STATUS_LIMIT
   tasks = tasks.slice(0, cap)
 
-  return { ok: true, taskDir, downloadDir, total, tasks }
+  // taskDir 可能是 null（没有会话上下文且未设 DSH_PROGRESS_DIR）；schema 要求
+  // string，因此统一收敛成空串，避免 download_status 因类型不合法而报错。
+  return { ok: true, taskDir: taskDir ?? '', downloadDir, total, tasks }
 }

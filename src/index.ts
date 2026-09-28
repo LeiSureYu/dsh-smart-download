@@ -19,6 +19,7 @@ import {
 } from './downloader.js'
 import { decide } from './decision.js'
 import { ProgressReporter } from './progress.js'
+import type { ProgressSession } from './progress.js'
 import { applyMirror } from './mirror.js'
 import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
 import { registerStatusRpc } from './rpc.js'
@@ -102,7 +103,12 @@ export function apply(ctx: Context): void {
         const taskId = `dl-${Date.now().toString(36)}-${Math.random()
           .toString(36)
           .slice(2, 6)}`
-        const reporter = new ProgressReporter(taskId, outputPath)
+        // 会话上下文：轨道一（dsh-task-progress）的目录是
+        // <session.cwd>/.dsh-progress/<session.id>/，读取端按 session 过滤，
+        // 拿不到 session 时不写轨道一（写错地方等于没写）。
+        const header = exec.agent?.session?.header
+        const session: ProgressSession = { id: header?.id, cwd: header?.cwd }
+        const reporter = new ProgressReporter(taskId, outputPath, session)
 
         // 1. 探测目标 URL
         reporter.report(0, '探测中…')
@@ -264,9 +270,16 @@ export function apply(ctx: Context): void {
           },
         ],
       },
-      async execute(args: DownloadStatusArgs): Promise<DownloadStatusSnapshot> {
-        // 纯只读：不写文件、不联网
-        return readDownloadStatus(args.limit, args.taskId)
+      async execute(
+        args: DownloadStatusArgs,
+        exec: ToolExecutionContext,
+      ): Promise<DownloadStatusSnapshot> {
+        // 纯只读：不写文件、不联网。
+        // 带上会话上下文，才能扫到本次会话写在 <cwd>/.dsh-progress/<id>/ 的轨道一；
+        // 拿不到会话时退化为只扫轨道二（与 0.5.0 之前的行为一致）。
+        const header = exec.agent?.session?.header
+        const session: ProgressSession = { id: header?.id, cwd: header?.cwd }
+        return readDownloadStatus(args.limit, args.taskId, session)
       },
     }),
   )

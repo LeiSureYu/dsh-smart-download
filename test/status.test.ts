@@ -284,3 +284,118 @@ test('name 字段：老版本进度文件缺 name 时返回空串，且不吞掉
     assert.equal(mixed.msg, '下载中（curl）')
   })
 })
+
+/* ---------------- 0.5.0：state 字段优先于文案推断 ---------------- */
+
+test('state 优先于文案：state=running 即使文案写「完成」也是 running', () => {
+  withDirs(({ taskDir }) => {
+    // 0.5.0 之前的面板 bug 正是这种记录：pct=100 + 「下载完成」但没有 state
+    writeJsonl(taskDir, 'dl-running', [
+      { v: 1, task: 'dl-running', state: 'running', pct: 100, msg: '下载完成' },
+    ])
+    const task = readDownloadStatus().tasks[0]
+    assert.ok(task)
+    assert.equal(task.status, 'running', 'state 存在时必须完全以 state 为准')
+  })
+})
+
+test('state 优先于文案：state=done 即使 pct 很低、文案写「下载中」也是 completed', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-done', [
+      { v: 1, task: 'dl-done', state: 'done', pct: 10, msg: '下载中' },
+    ])
+    assert.equal(readDownloadStatus().tasks[0]?.status, 'completed')
+  })
+})
+
+test('state=cancelled 映射为 cancelled', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-cancel', [{ v: 1, task: 'dl-cancel', state: 'cancelled', pct: 42 }])
+    assert.equal(readDownloadStatus().tasks[0]?.status, 'cancelled')
+  })
+})
+
+test('state=failed 映射为 failed（不依赖文案）', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-stfail', [{ v: 1, task: 'dl-stfail', state: 'failed', pct: 3 }])
+    assert.equal(readDownloadStatus().tasks[0]?.status, 'failed')
+  })
+})
+
+test('老进度文件无 state 时回退到文案推断（向后兼容）', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-legacy-done', [{ v: 1, task: 'dl-legacy-done', pct: 100, msg: '下载完成' }])
+    writeJsonl(taskDir, 'dl-legacy-run', [{ v: 1, task: 'dl-legacy-run', pct: 20, msg: '下载中' }])
+    const byId = new Map(readDownloadStatus().tasks.map((t) => [t.id, t.status]))
+    assert.equal(byId.get('dl-legacy-done'), 'completed')
+    assert.equal(byId.get('dl-legacy-run'), 'running')
+  })
+})
+
+test('轨道二 status=cancelled 被识别（不再退化为 running）', () => {
+  withDirs(({ downloadDir }) => {
+    writeJson(downloadDir, 'dl-jcancel', {
+      id: 'dl-jcancel',
+      name: 'c.zip',
+      status: 'cancelled',
+      progress: 0.2,
+      updatedAt: 3000,
+    })
+    assert.equal(readDownloadStatus().tasks[0]?.status, 'cancelled')
+  })
+})
+
+/* ---------------- 0.5.0：按会话定位轨道一 ---------------- */
+
+test('传 session 时扫描 <cwd>/.dsh-progress/<id>/', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = tempDir()
+  const cwd = tempDir()
+  try {
+    const sessionDir = path.join(cwd, '.dsh-progress', 'sess-xyz')
+    mkdirSync(sessionDir, { recursive: true })
+    writeJsonl(sessionDir, 'dl-sess', [
+      { v: 1, task: 'dl-sess', state: 'done', pct: 100, msg: '下载完成', name: 's.iso' },
+    ])
+
+    const snap = readDownloadStatus(10, undefined, { id: 'sess-xyz', cwd })
+    assert.equal(snap.taskDir, sessionDir, 'taskDir 应指向会话目录')
+    assert.equal(snap.total, 1)
+    assert.equal(snap.tasks[0]?.status, 'completed')
+    assert.equal(snap.tasks[0]?.name, 's.iso')
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = saved
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(cwd, { recursive: true, force: true })
+  }
+})
+
+test('无 DSH_PROGRESS_DIR 且无 session 时 taskDir 为空串，轨道二仍可读', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  const downloadDir = tempDir()
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    writeJson(downloadDir, 'dl-only2', {
+      id: 'dl-only2',
+      name: 'x.zip',
+      status: 'running',
+      progress: 0.1,
+      updatedAt: 4000,
+    })
+    const snap = readDownloadStatus()
+    assert.equal(snap.taskDir, '', 'schema 要求 string，无法定位时为 ""')
+    assert.equal(snap.total, 1, '轨道二不依赖会话，仍应读到')
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = saved
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(downloadDir, { recursive: true, force: true })
+  }
+})

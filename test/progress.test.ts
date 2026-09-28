@@ -16,7 +16,12 @@ import {
 } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ProgressReporter } from '../src/progress.js'
+import {
+  ProgressReporter,
+  resolveDshHome,
+  resolveDownloadProgressDir,
+  resolveTaskProgressDir,
+} from '../src/progress.js'
 
 let tmpRoot = ''
 let taskDir = ''
@@ -88,13 +93,15 @@ test('pct 变化时正常追加', () => {
   assert.deepEqual(lines.map((l) => l.pct), [10, 20, 30])
 })
 
-test('done 穿透去重并标记 completed', () => {
+test('终态穿透去重：pct 相同但 state 变为 done 时仍落盘', () => {
   const r = new ProgressReporter('task-4')
-  r.report(100, '下载完成') // 第一次到 100
-  r.report(100, '下载完成') // 终态，应穿透去重
+  r.report(100, '下载中') // 进度已到 100，但尚未宣告完成
+  r.done() // 终态：state 由 running 变 done，必须穿透去重
 
   const lines = readJsonl(path.join(taskDir, 'task-4.jsonl'))
   assert.equal(lines.length, 2)
+  assert.equal(lines[0].state, 'running')
+  assert.equal(lines[1].state, 'done')
 
   const task = JSON.parse(readFileSync(path.join(dlDir, 'task-4.json'), 'utf-8'))
   assert.equal(task.status, 'completed')
@@ -164,4 +171,183 @@ test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', () => {
   // JSONL 轨道没有 name 字段时不应凭空写一个 undefined
   const lines = readJsonl(path.join(taskDir, 'task-10.jsonl'))
   assert.equal('name' in lines[0], false)
+})
+
+/* ---------------- 0.5.0：state 字段与轨道一目录解析 ---------------- */
+
+test('终态记录显式写入 state（done / failed / cancelled）', () => {
+  const r = new ProgressReporter('task-11')
+  r.report(10, '下载中')
+  r.done()
+  r.fail('连接超时')
+  r.cancel('用户取消')
+
+  const lines = readJsonl(path.join(taskDir, 'task-11.jsonl'))
+  assert.deepEqual(
+    lines.map((l) => l.state),
+    ['running', 'done', 'failed', 'cancelled'],
+  )
+
+  // 轨道二的状态映射：done -> completed
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-11.json'), 'utf-8'))
+  assert.equal(task.status, 'cancelled', '最后一次写入的终态应生效')
+})
+
+test('cancel 写入 cancelled 状态（轨道二）', () => {
+  const r = new ProgressReporter('task-12')
+  r.report(30, '下载中')
+  r.cancel()
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-12.json'), 'utf-8'))
+  assert.equal(task.status, 'cancelled')
+  assert.equal(task.progress, 0.3, '取消应保留最后一次百分比')
+})
+
+test('去重按整条记录：pct 相同但速度变化时仍写入', () => {
+  const r = new ProgressReporter('task-13')
+  r.report(30, '下载中', '1MB/s')
+  r.report(30, '下载中', '2MB/s')
+  r.report(30, '下载中', '2MB/s') // 与上一条完全相同 -> 跳过
+
+  const lines = readJsonl(path.join(taskDir, 'task-13.jsonl'))
+  assert.equal(lines.length, 2)
+  assert.deepEqual(
+    lines.map((l) => l.spd),
+    ['1MB/s', '2MB/s'],
+  )
+})
+
+test('resolveTaskProgressDir：DSH_PROGRESS_DIR 优先于会话', () => {
+  const dir = resolveTaskProgressDir({ id: 'sess-1', cwd: 'C:\\whatever' })
+  assert.equal(dir, taskDir)
+})
+
+test('resolveTaskProgressDir：无 env 时用 <cwd>/.dsh-progress/<id>', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'dsh-cwd-'))
+    try {
+      const dir = resolveTaskProgressDir({ id: 'sess-abc', cwd })
+      assert.equal(dir, path.join(cwd, '.dsh-progress', 'sess-abc'))
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
+})
+
+test('resolveTaskProgressDir：无会话或非法会话 ID 时返回 null', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    assert.equal(resolveTaskProgressDir(), null, '无会话 -> null')
+    assert.equal(resolveTaskProgressDir({ cwd: 'C:\\x' }), null, '缺 id -> null')
+    assert.equal(resolveTaskProgressDir({ id: 'sess' }), null, '缺 cwd -> null')
+    assert.equal(
+      resolveTaskProgressDir({ id: '../escape', cwd: 'C:\\x' }),
+      null,
+      '含分隔符的 id -> null',
+    )
+    assert.equal(
+      resolveTaskProgressDir({ id: '-leading', cwd: 'C:\\x' }),
+      null,
+      '以 - 开头的 id -> null',
+    )
+    assert.equal(
+      resolveTaskProgressDir({ id: 'a'.repeat(81), cwd: 'C:\\x' }),
+      null,
+      '超长 id -> null',
+    )
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
+})
+
+test('无会话且无 DSH_PROGRESS_DIR 时不写轨道一，但轨道二照写', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    const r = new ProgressReporter('task-14')
+    r.report(50, '下载中')
+    assert.ok(existsSync(path.join(dlDir, 'task-14.json')), '轨道二应照写')
+    assert.ok(!existsSync(path.join(tmpRoot, 'task-14.jsonl')), '轨道一不应出现')
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
+})
+
+test('有会话时轨道一写入 <cwd>/.dsh-progress/<id>/<taskId>.jsonl', () => {
+  const saved = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  try {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'dsh-sess-'))
+    try {
+      const r = new ProgressReporter('task-15', 'a.zip', { id: 'sess-1', cwd })
+      r.report(25, '下载中', '3MB/s')
+      const file = path.join(cwd, '.dsh-progress', 'sess-1', 'task-15.jsonl')
+      assert.ok(existsSync(file), '应写进会话进度目录')
+      const lines = readJsonl(file)
+      assert.equal(lines[0].pct, 25)
+      assert.equal(lines[0].state, 'running')
+      assert.equal(lines[0].name, 'a.zip')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  } finally {
+    if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
+  }
+})
+
+test('resolveDshHome：DSH_HOME 优先，空 / 纯空白视为未设置', () => {
+  const saved = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = 'C:\\custom-dsh-home'
+    assert.equal(resolveDshHome(), path.resolve('C:\\custom-dsh-home'))
+
+    process.env.DSH_HOME = ''
+    assert.equal(resolveDshHome(), path.join(os.homedir(), '.dsh'), '空串应回落默认')
+
+    process.env.DSH_HOME = '   '
+    assert.equal(resolveDshHome(), path.join(os.homedir(), '.dsh'), '纯空白应回落默认')
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  }
+})
+
+test('resolveDshHome：~ 与 ~/x 会被展开', () => {
+  const saved = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = '~'
+    assert.equal(resolveDshHome(), path.resolve(os.homedir()))
+
+    process.env.DSH_HOME = '~/nested'
+    assert.equal(resolveDshHome(), path.resolve(path.join(os.homedir(), 'nested')))
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  }
+})
+
+test('resolveDownloadProgressDir：走 DSH_HOME 而不是 USERPROFILE/HOME', () => {
+  const savedDsh = process.env.DSH_HOME
+  const savedDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  try {
+    process.env.DSH_HOME = 'C:\\custom-dsh-home'
+    assert.equal(
+      resolveDownloadProgressDir(),
+      path.join(path.resolve('C:\\custom-dsh-home'), 'downloads', 'tasks'),
+    )
+  } finally {
+    if (savedDsh === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedDsh
+    if (savedDir !== undefined) process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDir
+  }
+})
+
+test('resolveDownloadProgressDir：DSH_DOWNLOAD_PROGRESS_DIR 优先', () => {
+  assert.equal(resolveDownloadProgressDir(), dlDir)
 })

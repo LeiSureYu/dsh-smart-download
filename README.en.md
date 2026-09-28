@@ -16,15 +16,12 @@
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
-
-**What you get:**
-
-- ⚡ **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
-- 📦 **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
-- 👀 **Visible progress** — on the `web` profile a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
-- 🔁 **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
-- 🌐 **Mirror acceleration** — an optional `mirror` parameter routes the download through a GitHub mirror.
-- 🔍 **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
+- **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
+- **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
+- **Visible progress** — on the `web` profile a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
+- **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
+- **Mirror acceleration** — an optional `mirror` parameter routes the download through a GitHub mirror.
+- **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
 Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.4.2` or newer.
 

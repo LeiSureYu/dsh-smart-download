@@ -192,6 +192,12 @@ export async function probeUrl(
   const headLastModified = head.headers.get('last-modified') ?? undefined
   const headContentEncoding = readContentEncoding(head)
 
+  // 不消费响应体，主动取消以释放连接。
+  // HEAD 通常没有 body（Node 的 undici 会给出 null），但现实里有服务器/代理
+  // 在 HEAD 上返回 body —— 不取消就会一直占着这条连接。与下面 Range GET
+  // 分支保持一致，两条分支都必须释放。
+  head.body?.cancel().catch(() => {})
+
   // 2. HEAD 为 405 或缺少 Content-Length 时，改用 Range GET
   if (head.status === 405 || headLength === undefined) {
     let get: Response

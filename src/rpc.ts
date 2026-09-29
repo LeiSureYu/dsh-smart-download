@@ -13,7 +13,7 @@
  *         或 { ..., "result": { "ok": false, "error": { code, message, details } } }
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
+import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import type { ProgressSession } from './progress.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
@@ -90,7 +90,9 @@ function readPayload(payload: unknown): StatusQuery {
   const body = payload as { limit?: unknown; session?: unknown }
   const n = Number(body.limit)
   const limit =
-    Number.isFinite(n) && n > 0 ? Math.min(50, Math.floor(n)) : DEFAULT_STATUS_LIMIT
+    Number.isFinite(n) && n > 0
+      ? Math.min(MAX_STATUS_LIMIT, Math.floor(n))
+      : DEFAULT_STATUS_LIMIT
 
   const rawSession = body.session
   if (rawSession === null || typeof rawSession !== 'object') return { limit }

@@ -196,7 +196,13 @@ export class LineBuffer {
  * - windowsHide：隐藏黑色命令行窗口；
  * - 收集 stderr，非零退出时随错误抛出；
  * - 通过 handlers 逐行回调 stdout / stderr，用于解析进度；
- * - AbortSignal 触发时先 SIGTERM，Windows 上若 1s 内未退出则强制 kill。
+ * - AbortSignal 触发时先 SIGTERM，1s 内未退出则 SIGKILL 兜底。
+ *
+ * 为什么 SIGKILL 兜底**不能**只在 Windows 上启用（1.0.0 修正）：
+ * 0.9.0 之前的前置条件是 `process.platform === 'win32'`。而「SIGTERM 被忽略」
+ * 这件事不分平台 —— POSIX 上进程同样可以装一个 SIGTERM handler 然后继续跑。
+ * 一旦如此，取消下载就永远等不到 close 事件，`smart_download` 会挂在那里不返回，
+ * 用户按了取消却看不出任何变化。兜底必须对所有平台生效。
  */
 export function runProcess(
   command: string,
@@ -238,19 +244,18 @@ export function runProcess(
       } catch {
         // 忽略 kill 异常，继续尝试强制结束
       }
-      // Windows 上 SIGTERM 可能不被响应，1 秒后强制结束
-      if (process.platform === 'win32') {
-        const timer = setTimeout(() => {
-          if (!exited) {
-            try {
-              child.kill('SIGKILL')
-            } catch {
-              // 忽略
-            }
+      // SIGTERM 可能不被响应（Windows 原生没有信号语义，POSIX 上进程也可以
+      // 忽略它），1 秒后强制结束。所有平台都挂这个兜底，避免取消后永久挂住。
+      const timer = setTimeout(() => {
+        if (!exited) {
+          try {
+            child.kill('SIGKILL')
+          } catch {
+            // 忽略
           }
-        }, 1000)
-        timer.unref?.()
-      }
+        }
+      }, 1000)
+      timer.unref?.()
     }
 
     if (signal) {

@@ -63,6 +63,16 @@ export interface DownloadStatusSnapshot {
 /** 默认返回条数 */
 export const DEFAULT_STATUS_LIMIT = 10
 
+/**
+ * 上限条数。
+ *
+ * 与 `DEFAULT_STATUS_LIMIT` 放在一起，是因为两者原本分散在两个文件里
+ * （默认值在 `status.ts`，「夹到 50」硬编码在 `rpc.ts` 的 `readPayload`），
+ * 改了一个忘了另一个就会出现「RPC 认为上限是 50、工具认为不是」的偏差。
+ * 两个调用方（`readPayload` 与 `readDownloadStatus`）现在共用这一个常量。
+ */
+export const MAX_STATUS_LIMIT = 50
+
 /** 兜底字符串：schema 要求 string 类型，缺省时不能写 undefined */
 const EMPTY = ''
 
@@ -222,7 +232,10 @@ export function readDownloadStatus(
   if (taskId) tasks = tasks.filter((t) => t.id === taskId)
 
   const total = tasks.length
-  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_STATUS_LIMIT
+  const cap =
+    Number.isFinite(limit) && limit > 0
+      ? Math.min(MAX_STATUS_LIMIT, Math.floor(limit))
+      : DEFAULT_STATUS_LIMIT
   tasks = tasks.slice(0, cap)
 
   // taskDir 可能是 null（没有会话上下文且未设 DSH_PROGRESS_DIR）；schema 要求

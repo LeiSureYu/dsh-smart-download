@@ -22,7 +22,8 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.7.0` 或更新版本。
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**，这四组合是完整支持（随包 aria2 多线程）。
+macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说明](./docs/COMPATIBILITY.md)，那里也写清了为什么没硬做。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -41,9 +42,11 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 > **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
-> **版本要求：请使用 `0.7.0` 或更高。** `0.7.0` 新增了**落盘完整性校验**：`curl` / `aria2` 退出码 0 只代表它自己认为完成了，实测服务器用 chunked 只发 1MB 就断开时，随包 aria2 是**退出码 0、摘要显示 `OK`、落盘却只有 1MB**（声明 4MB），`curl` 同样 exit 0；现在会比对落盘字节数与远端声明长度，不一致就报错。同时把大文件并发阈值从 50MB 下调到 8MB（实测 8MB 文件 8 连接比 4 连接快近一倍）。`0.6.0` 修了续传的两个静默损坏：① 只要服务器支持 Range 就无条件续传，而 `curl -C -` 与 `aria2 -c` 都只看本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是**退出码 0 但文件是错的**；现在续传前先比对远端长度与 ETag / Last-Modified，无法证实同源就删掉半包重下。② 目标文件已存在时 aria2 既不截断也不覆盖，而是另存为 `f.1.bin`，插件返回的 `path` 却仍指向旧内容的 `f.bin`；现在统一带 `--allow-overwrite=true`。`0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.6.0`。
+> **1.0.0 是正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
 >
-> `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
+> **版本要求：请使用 `1.0.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+>
+> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.0.0` 即可。
 
 ## 工作原理
 
@@ -89,7 +92,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
    清除 .part.json    抛错，保留旁车
    返回 success
 
-  返回结果 { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
+  返回结果 { success, path, method, size, fellback, reason?, verifySkipped?, requestedUrl, mirrored }
 ```
 
 要点：
@@ -126,7 +129,7 @@ smart_download(
 
 - 只做**前缀拼接**，不做路径改写，因此适配绝大多数「前缀 + 完整原始 URL」形式的公开镜像；
 - 前缀**缺尾斜杠会自动补上**，也可直接写裸域名（`ghfast.top` 会补成 `https://ghfast.top/`）；
-- 非 `http(s)` 的 URL 不使用镜像；
+- 非 `http(s)` 的 URL 不使用镜像；**镜像前缀本身也必须过白名单** —— 非 `http(s)` 的前缀（`file://`、`javascript://`、`data://` 等）一律不生效、原样走原始 URL。字符串拼接后整串的 scheme 由前缀决定，不判前缀就等于给 `file://` 开了后门（1.0.0 修正，实测见 [SECURITY.md](./docs/SECURITY.md)）；
 - 输出文件名始终按**原始 URL** 推导，不会把镜像域名带进文件名。
 
 常见的公开镜像（任选其一，可用性随网络环境变化）：
@@ -251,6 +254,21 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 > 文档里的 `6/16` / `16/26` 来自手搓的 `NODE_V8_COVERAGE` 统计，该方式在 Windows + tsx 下会因
 > 源码映射错位而虚增函数个数，已作废；本版本起一律以自带覆盖率为准。
 
+**1.0.0 把「静默降级」本身当成要修的对象**，抓到三类：
+
+1. **校验跳过与校验通过同形**：`verifySize` 在「远端没声明长度」「服务器返回压缩编码」两种情形下返回的
+   与「真的比过且一致」一模一样。一次**没有做过任何校验**的下载，在返回值里看起来和校验通过完全一样。
+   现在跳过是独立分支，带机器可读的 `reason` 与用户可见的 `verifySkipped` 文案。
+2. **取消伪装成失败**：`reporter.cancel()` 在生产代码里从未被调用过，用户按取消看到的是「下载失败」。
+   现在取消路径（`exec.signal.aborted`）会记 `cancelled`。
+3. **`mirror` 绕过协议白名单**：`mirror` 是**字符串拼接**，拼接后整串的 scheme 由前缀决定，
+   于是 `file:///C:/Windows/win.ini?x=` 这种前缀能把第一层防护整个绕过去（实测：`curl` 退出码 0，
+   把本地 `win.ini` 复制了出来）。现在前缀本身也要过白名单。
+
+另有两个「不抛错但明显不对」的问题一并修掉：`awaitFlush` 的超时计时器没有 `unref`，
+CLI 下每次下载结束都要多卡约 2 秒才退出；以及 aria2 失败回退 curl 时，进度文案写的是 aria2 的错误、
+抛出的却是 curl 的错误，排查时对不上。逐条复现步骤与改法见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+
 **契约**：本插件所有“返回默认值”的路径——
 
 | 环节                  | 静默失败形态        | 必须断言的正向信号                                  |
@@ -261,7 +279,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | `parseCurlProgress` | 认不出 → `null`  | 真实样本必须解析出单调递增到 100% 的百分比                   |
 | `ProgressReporter`  | 目录不可写 → 跳过    | 可写目录必须存在文件且内容递增                            |
 | `LineBuffer`        | 切分状态错误        | 跨 chunk / `\r` / `\r\n` 边界必须切出正确的行         |
-| `applyMirror`       | 拼错 → URL 仍合法    | 拼接结果必须可 `new URL()` 解析，且以原始 URL 结尾        |
+| `applyMirror`       | 拼错 → URL 仍合法；**非 http(s) 前缀 → 绕过白名单** | 拼接结果必须可 `new URL()` 解析，且以原始 URL 结尾；`file://` / `javascript://` / `data://` 前缀必须**不生效**并原样返回原始 URL |
 | `readDownloadStatus`| 读不到 → 空列表      | 目录里有合法任务文件就必须扫出并解析出字段                 |
 | `buildCurlArgs`     | 续传开关插错位置     | `resume` 为真时 `-C -` 必须存在，为假时必须不存在，且 `-o` 与路径紧邻 |
 | `checkDownloadUrl`  | 不校验协议 → 读本地文件 | `file://` / `ftp://` 必须被拒绝，`http(s)` 必须被放行并返回解析后的 URL |
@@ -270,7 +288,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | `resolveTaskProgressDir` | 无会话 → 写进没人读的目录 | 无 `DSH_PROGRESS_DIR` 且无会话时必须返回 `null`（即不写轨道一），有会话时必须是 `<cwd>/.dsh-progress/<id>` |
 | `resolveDshHome`    | 不读 `DSH_HOME` → 写进陈旧 home | `DSH_HOME` 必须生效，空 / 纯空白必须回落 `~/.dsh` |
 | `statusFrom`        | 只认文案 → 状态判错 | 记录带 `state` 时必须以 `state` 为准（`state: 'running'` + 文案「下载完成」仍是 running） |
-| `verifySize`        | 退出码 0 但字节数不对 → 当成成功 | 字节数一致必须返回 `ok`；**chunked 截断**（aria2/curl 均 exit 0）必须被判为失败；「探测长度未知」与「服务器返回压缩编码」必须**跳过**而非误判 |
+| `verifySize`        | 退出码 0 但字节数不对 → 当成成功 | 字节数一致必须返回 `ok`；**chunked 截断**（aria2/curl 均 exit 0）必须被判为失败；「探测长度未知」与「服务器返回压缩编码」必须返回**独立的 `skipped`**（带机器可读 `reason`）而不是与 `ok` 同形 |
 | `probeUrl` 的 `accept-encoding` | 默认带 `gzip, deflate` → 拿到压缩长度 | 服务器必须收到 `identity`，且必须取回**未压缩**长度（5000 而非 41） |
 | `registerStatusRpc` 的 handler | 非法请求 → 回默认值 / 静默放行 | 无 `connection` 时必须**恰好注册 0 条路由**；信封非法必须回 `rpcId='invalid-request'` 的 `ok:false`；非法 `limit` 必须回落到 `DEFAULT_STATUS_LIMIT`（10，而非 0 / `Infinity`）；业务异常必须仍是 200 + `ok:false`（不裸奔 500） |
 
@@ -327,9 +345,12 @@ aliyun 镜像对 aria2 的 UA 直接返回 403。）
 | Windows | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-win32-arm64` |
 | Linux   | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-linux-x64`   |
 | Linux   | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-linux-arm64` |
-| macOS   | x64 / arm64 | ❌ 暂不支持     | —                              |
+| macOS   | x64 / arm64 | ⚠️ 能用但不加速 | —                              |
 
-二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
+二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装，
+`getAria2Path()` 解析不到时返回 `null`、由 `decide()` 回退 `curl`。**「插件可用」与「多线程可用」
+是两件事** —— 不支持的平台不会装出一个坏掉的插件，只会装出一个单线程下载器。
+macOS 为什么没做、需要补什么，见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
 
 ## 权限说明
 
@@ -337,11 +358,11 @@ aliyun 镜像对 aria2 的 UA 直接返回 403。）
 
 | 行为 | 说明 |
 | --- | --- |
-| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）。对通过校验的 URL 发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。仅访问调用方传入的 URL，不访问其他地址。 |
-| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未启用 `--allow-overwrite`，因此不会静默丢弃已完成的同名文件。 |
+| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。 |
+| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未传 `output` 之外的路径不改动。aria2 一律带 `--allow-overwrite=true`（**必须**）：aria2 默认遇到同名文件既不截断也不覆盖，而是另存为 `f.1.bin`，而插件返回的 `path` 仍指向旧文件 —— 前一个版本的静默路径错位就是这么来的。 |
 | 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
 | 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
-| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，Windows 上 1s 内未退出则强制 kill）。 |
+| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
 | 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`）。 |
 
 **不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
@@ -351,8 +372,8 @@ aliyun 镜像对 aria2 的 UA 直接返回 403。）
 | 项目 | 要求 |
 | --- | --- |
 | Node.js | `>=22.0.0`（用到 `AbortSignal.any` / `AbortSignal.timeout`） |
-| `@deepseek-ai/cordis` | `^4.0.0`（peerDependency） |
-| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` 或 `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明） |
+| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` 或 `>=4.0.1-rc.1 <5.0.0-0`（peerDependency；可选） |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明，DSH 每开一个新预发布分支都要同步追加） |
 | npm 包管理器 | npm / pnpm 均可；需支持 `optionalDependencies` 的 `os` / `cpu` 过滤 |
 
 macOS 未列入支持平台：**不是兼容性问题，而是缺少对应的 aria2 二进制子包**。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
@@ -383,9 +404,26 @@ A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "h
 **Q：下载中断后要重新开始吗？**
 A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`，支持 Range 的服务器会从断点继续。
 
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [README](./README.md) / [English](./README.en.md) | 安装、用法、权限说明 |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 内部结构：一次调用经过哪些步骤、模块职责、进度数据流 |
+| [SECURITY.md](./docs/SECURITY.md) | 威胁模型与四层防护，每层对应的实测复现 |
+| [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 为什么搁置 |
+| [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | 症状 → 原因 → 处理 |
+| [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 代码审查：必修 / 建议 / 已知折衷 |
+| [CHANGELOG.md](./CHANGELOG.md) | 逐版本变更记录 |
+
 ## 开发
 
 环境要求：Node.js **22+**、pnpm **9+**。
+
+当前基线：**254 例用例（252 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.50%**。
+覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
+同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)）。
+2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
 
 ```bash
 # 安装依赖
@@ -398,11 +436,12 @@ pnpm build
 pnpm test
 
 # 运行测试并输出覆盖率（Node 自带，勿用手搓 NODE_V8_COVERAGE：
-# 它在 Windows + tsx 下源码映射错位，会虚增函数个数）
+# 它在 Windows + tsx 下源码映射错位，会虚增函数个数。
+# 另：必须在 LF 工作区跑，行尾不同会让未覆盖行号整体漂移）
 node --test --import tsx --experimental-test-coverage "test/**/*.test.ts"
 
-# 仅类型检查
-pnpm typecheck
+# 仅类型检查（产物 src/ 与 test/ 分两个 tsconfig）
+pnpm check
 ```
 
 本地开发时，各平台的二进制需要手动放置（这些二进制不入库），下载地址与目标路径：

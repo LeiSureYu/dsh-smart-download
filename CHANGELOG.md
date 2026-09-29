@@ -11,6 +11,122 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-29
+
+首个正式版。0.9.0 到 1.0.0 之间做了一次完整的代码审查，结果整理在
+[docs/REVIEW-1.0.md](./docs/REVIEW-1.0.md)：9 条必修、6 条留作后续的建议、5 条明确保留的折衷。
+每条必修都是先写出会失败的用例，改完代码，用例才转绿。
+
+### 修复 / Fixed
+
+- **`mirror` 参数能整个绕过协议白名单**（可利用）：`src/index.ts` 只对 `args.url` 做
+  `checkDownloadUrl`，`mirror` 原样进 `applyMirror` 做字符串拼接。`mirror` 是**前缀**，
+  拼接后整串的 scheme 由前缀决定 —— `mirror = "file:///C:/Windows/win.ini?x="` 接上任何合法
+  http 地址，后半个地址会退化成查询串，整串仍是一个合法的 `file:` URL。实测交给
+  `curl -L --fail` 退出码 0，把本机 `win.ini`（92 字节）复制到了目标路径，和 0.4.2 修掉的
+  那个缺陷是同一个形态，只是入口换成了 `mirror`。现在 `applyMirror` 在拼接前先判前缀本身
+  是否 http(s)，不是就不生效、原样返回原始 URL；`test/mirror.test.ts` 新增两条正向用例。
+  **`mirror` could bypass the protocol allowlist entirely**: only `url` was checked; a
+  `file://` prefix made the concatenated string a valid `file:` URL (the http address degraded
+  into a query string). Reproduced with `curl`: exit 0, local `win.ini` copied to the target.
+  `applyMirror` now validates the prefix itself and returns the original URL unchanged.
+
+- **`awaitFlush` 的超时计时器不 unref，CLI 每次下载多卡约 2 秒**：`node:timers/promises` 的
+  `setTimeout` 建的计时器不会 unref，即使写盘早已完成、`Promise.race` 立刻返回，那个没到点的
+  计时器仍把事件循环留住。实测进程退出时间 2003ms → 改用原生 `setTimeout` + `unref()` 后
+  6ms。新增 `timeoutAfter(ms)`，`finally` 里无条件 `cancel()`，返回后不留句柄
+  （`test/progress.test.ts` 断言 `getActiveResourcesInfo()` 的 `Timeout` 数回到基线）。
+  **The flush timeout timer was not unref-ed**, holding the event loop for the full 2 s after
+  every CLI download (measured 2003 ms → 6 ms). Now a native `setTimeout` + `unref()` with an
+  unconditional `cancel()`.
+
+- **`awaitFlush` 超时是静默的**：超时后直接 return，既没有日志也没有异常，用户侧只表现为
+  「面板卡在旧进度」，无从排查。现在超时走 `process.emitWarning`，带任务 ID 与
+  `code: 'DSH_SMARTDL_PROGRESS_FLUSH_TIMEOUT'`。仍然不阻断调用 —— 磁盘满时让工具调用挂死更糟。
+  **Flush timeouts were silent.** They now emit a searchable warning instead of returning quietly.
+
+- **「校验跳过」与「校验通过」在返回值上无法区分**：`verifySize` 在「远端未声明长度」和
+  「服务器返回压缩编码」两种情形下都返回 `{ kind: 'ok' }`，与「真的比过字节数且一致」完全同形 ——
+  「压根没测」和「测过且一致」长得一模一样。现在 `VerifyOutcome` 拆出独立的
+  `{ kind: 'skipped'; reason; encoding? }`，新增 `VerifySkipReason` 与固定文案常量
+  `VERIFY_SKIP_LENGTH_UNKNOWN` / `VERIFY_SKIP_CONTENT_ENCODED`（定成常量而非就地拼串，
+  使「跳过路径只能输出这两个值」成为可断言事实），`SmartDownloadResult` 新增 `verifySkipped`，
+  并写进工具返回与 render 文案。
+  **"Verification skipped" and "verified OK" were indistinguishable** in the return value. There
+  is now a distinct `skipped` outcome, fixed reason constants and a `verifySkipped` field.
+
+- **取消（`cancelled`）状态在生产代码里不可达**：`ProgressReporter.cancel()` 在 `src/` 里零调用，
+  而测试、TROUBLESHOOTING、`client.js` 都在处理 `cancelled`。用户按取消，面板上看到的却是
+  「失败」—— 明明是他自己的操作。三处 catch 改成「`exec.signal.aborted` → `cancel()`，
+  否则 `fail(...)`」，顺带修掉「signal 已 abort 还要徒劳回退 curl 多跑一趟」。
+  **The `cancelled` state was unreachable in production code**; cancelling showed up as a
+  failure. Three catch sites now branch on `exec.signal.aborted`.
+
+- **aria2 失败回退 curl 时，进度文案写的是 aria2 的错误**：curl 也失败时
+  `reporter.fail(aria2Message)` 用的是 aria2 的原因，抛出的却是 `curlErr`，进度里和异常里对不上。
+  现在传 `curlMessage`；aria2 的原因已经作为返回结果的 `reason`（`aria2 失败: ...`）记录在案。
+  **Wrong message on the curl fallback path**: the progress text named aria2's error while the
+  thrown error was curl's.
+
+- **`SIGKILL` 兜底只在 Windows 生效**：取消路径的前置条件是 `process.platform === 'win32'`，
+  但「忽略 SIGTERM」不分平台 —— POSIX 进程同样可以装一个 handler 然后继续跑，此时取消下载
+  永远等不到 `close` 事件，`smart_download` 永久挂住。现在所有平台都挂 1s 兜底
+  （计时器已 unref，无泄漏）。
+  **The `SIGKILL` fallback was Windows-only**; a POSIX process ignoring `SIGTERM` could hang the
+  call forever. It now applies on every platform.
+
+- **HEAD 探测的响应体未取消**：HEAD 分支不消费也不取消响应体。Node 的 undici 对没有 body 的
+  HEAD 会给出 `null`，但现实里有服务器/代理在 HEAD 上返回 body —— 不取消就一直占着连接，
+  与下面的 Range GET 分支不一致。现在 `head.body?.cancel().catch(() => {})`。
+  **The HEAD probe never released its response body**, unlike the Range GET branch.
+
+- **`MAX_STATUS_LIMIT` 硬编码在两个文件里**：默认值在 `status.ts`，「夹到 50」硬编码在
+  `rpc.ts`，而 `readDownloadStatus` 自己又不夹，改一个忘一个就会出现「RPC 认为上限 50、
+  工具认为没有上限」的偏差。现在 `status.ts` 导出 `MAX_STATUS_LIMIT = 50`，两个调用方共用。
+  **`MAX_STATUS_LIMIT` was hard-coded in two places**; both callers now share one exported
+  constant.
+
+### 新增 / Added
+
+- **测试 244 → 254 例**，新增用例全部是正向断言，覆盖上面每条修复的回归：
+  `applyMirror` 的前缀白名单、`awaitFlush` 的句柄清理与超时告警、两种校验跳过各自的
+  `reason` 与 `describeSkip` 文案、`cancelled` 与 `fail` 的分流、curl 失败时的文案归属、
+  跨平台的 `SIGKILL` 兜底、`MAX_STATUS_LIMIT` 的夹取；并补上此前**完全没被走到**的
+  aria2 成功路径与「aria2 失败 → 回退 curl 成功」两条主路径（用真实随包 aria2 + 本地
+  http server，无 aria2 的平台跳过）。行覆盖 **99.81%** / 分支 **92.50%**。
+  覆盖率的完整说明（必须在 LF 工作区测量、未覆盖行的逐条归因、LF/CRLF 对照数据）
+  见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。余下 2 个跳过用例是平台限制，CI 的
+  Ubuntu job 会真跑。
+  **Test count 244 → 254**, all new cases written as positive assertions; the aria2 success
+  and aria2-to-curl fallback paths now have real coverage. Line **99.81%** / branch **92.50%**.
+
+- **`pnpm check` 与 `tsconfig.test.json`**：此前测试文件从未被任何 tsc 检查过，
+  写错一个类型也只有跑到那条用例才会炸。现在 `check = typecheck + typecheck:test`，
+  本地与 CI 共用同一条命令。
+  **`pnpm check` and a separate test tsconfig**: test files were never type-checked before.
+
+- **CI 增加 `check` job**：PR 与 `main` push 上跑类型检查 / 构建 / 测试；二进制下载与发布
+  只在 tag push 或手动触发时执行（PR 上下 4 份二进制既慢又与改动无关）。发布链路的
+  `permissions` / OIDC 回退逻辑未动。
+  **New CI `check` job** for PRs and `main`; binaries and publishing stay tag/dispatch-only.
+
+### 文档 / Docs
+
+- 新增 **[docs/REVIEW-1.0.md](./docs/REVIEW-1.0.md)**：1.0 定稿前的整体审查记录 —— 验证基线、
+  分模块覆盖率与未覆盖行的逐条解释、9 条必修（现象 / 根因 / 改法 / 回归用例）、
+  6 条后续建议、5 条已知折衷、复现命令。
+- 新增 **docs/SECURITY.md 的 mirror 边界**：协议白名单必须覆盖 `mirror` 参数，
+  附修复前的 curl 实测（`file://` 前缀 + 合法 http 地址 → 92 字节 `win.ini` 落盘）。
+- 新增 **CONTRIBUTING.md / SECURITY.md（根）/ issue 与 PR 模板**：把「任何回退/跳过/默认值
+  路径必须有正向断言」「覆盖率只认 Node 自带报告」「不要硬做平台」三条要求写成明文，
+  新贡献者先看到规则再改代码。
+- README（中英双语）同步：版本要求段改写为 1.0.0 正式版说明并链到 REVIEW-1.0.md、
+  返回结构补 `verifySkipped`、镜像是「前缀也要过白名单」、静默失败防护章节补 1.0.0 三类、
+  契约表与平台表更新、新增文档索引表。
+  另修正一处事实错误：README 原文说「未启用 `--allow-overwrite`」，实际是一律带
+  `--allow-overwrite=true`（**必须**，aria2 默认遇到同名文件另存为 `f.1.bin`，
+  而返回的 `path` 仍指向旧文件）。
+
 ## [0.9.0] - 2026-09-29
 
 ### 修复 / Fixed
@@ -446,7 +562,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...v0.7.0

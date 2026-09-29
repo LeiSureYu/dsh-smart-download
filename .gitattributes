@@ -1,0 +1,12 @@
+# 仓库内文本文件统一使用 LF。
+#
+# 原因：`node --test --experimental-test-coverage` 配合 tsx 时按 source map
+# 归属行号。工作区若为 CRLF，行号会整体漂移，导致「未覆盖行」指向错误位置、
+# 覆盖率数字不可复现。详见 docs/REVIEW-1.0.md 的覆盖率章节。
+* text=auto eol=lf
+
+# 测试 fixture 是字节契约（curl 样本必须保留 \r），禁止任何行尾转换。
+test/fixtures/** -text
+
+# 图片按二进制处理。
+*.png binary

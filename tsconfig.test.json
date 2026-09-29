@@ -1,0 +1,16 @@
+{
+  // 测试与脚本的类型检查配置（1.0.0 新增）。
+  //
+  // 为什么不复用 tsconfig.json：那份配置的 rootDir 是 src、include 只有
+  // src/**/*，测试文件从来不参与 tsc。于是「生产代码改了签名、测试还按旧签名
+  // 调用」这类错误只能等运行时才炸，而 tsx 不做类型检查，CI 也不会拦住。
+  // 这份配置把 test/ 与 scripts/ 一起纳入，rootDir 放宽到仓库根，只做检查
+  // （noEmit），不影响 build 的产物布局。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*", "scripts/**/*"]
+}

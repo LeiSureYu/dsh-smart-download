@@ -10,7 +10,11 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from '../src/status.js'
+import {
+  DEFAULT_STATUS_LIMIT,
+  MAX_STATUS_LIMIT,
+  readDownloadStatus,
+} from '../src/status.js'
 
 /** 建一个临时目录，注册清理 */
 function tempDir(): string {
@@ -179,6 +183,18 @@ test('非法 limit（0 / 负数 / NaN）-> 退回默认值，不返回空', () =
       assert.equal(snap.tasks.length, DEFAULT_STATUS_LIMIT, `limit=${bad} 应退回默认`)
       assert.equal(snap.total, DEFAULT_STATUS_LIMIT + 2)
     }
+  })
+})
+
+test('limit 超过上限被夹到 MAX_STATUS_LIMIT（工具与 RPC 共用同一常量）', () => {
+  withDirs(({ taskDir }) => {
+    for (let i = 0; i < MAX_STATUS_LIMIT + 3; i++) {
+      writeJsonl(taskDir, `dl-${i}`, [{ v: 1, task: `dl-${i}`, pct: i, msg: '下载中' }])
+    }
+    const snap = readDownloadStatus(MAX_STATUS_LIMIT + 100)
+    // 正向断言：夹到具体值，且 total 仍是真实总数
+    assert.equal(snap.tasks.length, MAX_STATUS_LIMIT)
+    assert.equal(snap.total, MAX_STATUS_LIMIT + 3)
   })
 })
 

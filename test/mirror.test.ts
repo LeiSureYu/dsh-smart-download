@@ -62,6 +62,32 @@ test('applyMirror: 非 http(s) URL 不走镜像（避免拼出无意义地址）
   assert.equal(applyMirror('file:///tmp/a.zip', 'https://gh-proxy.com/'), 'file:///tmp/a.zip')
   assert.equal(applyMirror('ftp://h/a.zip', 'https://gh-proxy.com/'), 'ftp://h/a.zip')
 })
+/**
+ * 1.0.0 修正：镜像前缀本身也必须过协议白名单。
+ *
+ * 0.9.0 只校验了 `args.url`，`mirror` 原样拼接。而拼接是**字符串拼接**：
+ * `mirror = "file:///C:/Windows/win.ini?x="` 加上 URL 之后，整串仍然是一个合法的
+ * `file:` URL —— 后半个 http(s) 地址退化成查询串。实测把这条结果交给 curl：
+ *
+ *   curl -L --fail "file:///C:/Windows/win.ini?x=https://github.com/a/b.zip"
+ *   -> exit 0，目标文件里恰好是 win.ini 的内容（92 字节）
+ *
+ * 也就是说第一层防护（协议白名单）被 mirror 参数整个绕过，又回到了「本地文件被读走」
+ * 那条实测缺陷。因此这里断言：不是 http(s) 的镜像前缀一律不生效。
+ */
+test('applyMirror: 镜像前缀不是 http(s) -> 不生效，原样返回（防白名单绕过）', () => {
+  assert.equal(applyMirror(SAMPLE_URL, 'file:///C:/Windows/win.ini?x='), SAMPLE_URL)
+  assert.equal(applyMirror(SAMPLE_URL, 'file:///etc/passwd#'), SAMPLE_URL)
+  assert.equal(applyMirror(SAMPLE_URL, 'javascript://alert(1)//'), SAMPLE_URL)
+  assert.equal(applyMirror(SAMPLE_URL, 'data://text/plain,x'), SAMPLE_URL)
+})
+
+test('normalizeMirror: 非 http(s) scheme 原样保留，交由 applyMirror 拒绝', () => {
+  // 归一化只负责「补 scheme / 补尾斜杠」，不做安全判定；
+  // 判定集中在 applyMirror，避免两个函数各有一套规则。
+  // 尾斜杠会被补上（归一化的既定行为），但 scheme 仍是 file:，applyMirror 会拒绝
+  assert.equal(normalizeMirror('file:///C:/Windows/win.ini?x='), 'file:///C:/Windows/win.ini?x=/')
+})
 
 /* ------------------------------ 归一化 ------------------------------ */
 

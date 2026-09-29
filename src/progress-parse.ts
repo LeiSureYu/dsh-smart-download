@@ -20,7 +20,7 @@ export interface ParsedSummary {
 }
 
 const SUMMARY_RE =
-  /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:\d+\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?Bs?)(?:\s+ETA:(\S+?))?\]\s*$/i
+  /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:\d+\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?B(?:\/s|s)?)(?:\s+ETA:(\S+?))?\]\s*$/i
 
 /**
  * 按 \r\n / \r / \n 切分原始文本。
@@ -34,7 +34,7 @@ export function splitIntoLines(raw: string): string[] {
 function normalizeSpeed(raw: string): string {
   let speed = raw.replace(/\s+/g, '')
   if (speed.endsWith('/s')) return speed
-  // 形如 "115.7KiBs" 的写法，去掉末尾 s 后补 "/s"
+  // 形如 "115.7KiBs"（旧 readout）或 "10MiB" 的写法：先去末尾 s，再补 "/s"
   if (speed.endsWith('s')) speed = speed.slice(0, -1)
   return `${speed}/s`
 }

@@ -11,14 +11,60 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-29
+
+### 修复 / Fixed
+
+- **`src/progress-parse.ts` 认不出 aria2 1.38+ 的速度字段**：摘要行的正则原来只匹配
+  `[KMGTPE]?i?Bs?` 这种形状，遇到 `DL:1.0MiB/s` 会整行匹配失败、被当成非摘要丢弃，于是面板在
+  这类 aria2 上永远看不到速度。正则改为 `[KMGTPE]?i?B(?:\/s|s)?`，`/s` 与 `s` 两种写法都能吃到，
+  且不会把已经带 `/s` 的字段重复补一个 `/s`。
+  **`aria2` speed field was unparsable from 1.38 on**: the summary-line regex only matched
+  `[KMGTPE]?i?Bs?`, so `DL:1.0MiB/s` failed to match, the whole line was dropped as a non-summary,
+  and the panel never showed a speed on those builds. It now accepts both `s` and `/s` without
+  double-appending.
+
+### 新增 / Added
+
+- **补齐剩余低覆盖模块的测试**（`test/runprocess.test.ts` 新增，`downloader` / `progress-parse` /
+  `url` / `tool-schema` 四个测试文件扩充），用例数 220 → **244**。新增用例全部是正向断言：
+  `checkDownloadUrl` 解析失败必须回落到把原始输入原样写进 reason、协议被拒时 reason 必须含
+  `不支持的协议`；`deriveFilenameFromUrl` 遇到非法百分号编码必须回落成**原始片段**（断言具体
+  值，而不是「没崩」）；`truncatePreservingExtension` 扩展名过长与无扩展名两条硬截断路径；两条
+  render 文案用例（含「有 fellback 无 reason 时不得拼出空的 `(fallback: )`」）；aria2 / curl /
+  reporter 接线用例。
+  **Filled in the remaining low-coverage modules** (new `test/runprocess.test.ts`; expanded
+  `downloader` / `progress-parse` / `url` / `tool-schema`), taking the case count from 220 to
+  **244**, all with positive assertions.
+
+- **`test/runprocess.test.ts` 里有一个 Linux / macOS 专属的信号用例**（断言子进程被 `SIGTERM`
+  终止后 `closeSignal` 正确上报），Windows 上跳过。本地 Windows 跑是 6 通过 / 1 跳过，CI 的 Ubuntu
+  job 会真跑。
+  **One signal case in `test/runprocess.test.ts` is Linux/macOS-only** (it asserts `closeSignal`
+  after a child is killed with `SIGTERM`) and is skipped on Windows; the Ubuntu CI job runs it for real.
+
+### 文档 / Docs
+
+- README（中英双语）把 0.8.0 段落里 `6/16` / `16/26` 的旧数字改成实测的 **2/7**（剔除专属测试
+  文件后的行覆盖 **62.37%**）→ **9/9**（行覆盖 **99.46%**），并在「开发」小节补上覆盖率的正确跑法。
+  **覆盖率数字的来源统一为 Node 自带的 `--experimental-test-coverage`**：旧的 `6/16` / `16/26` 与
+  CHANGELOG 里 `resume.ts 20/30`、`downloader.ts 53/80`、`progress.ts 57/109` 一样，都来自手搓的
+  `NODE_V8_COVERAGE` 统计，该方式在 Windows + tsx 下源码映射错位、会虚增函数个数，已作废。
+  Updated the bilingual README's 0.8.0 paragraph from the stale `6/16` / `16/26` to the measured
+  **2/7** (62.37% lines, with the dedicated test file excluded) → **9/9** (99.46% lines), and added
+  the correct coverage command to the Development section. **All coverage numbers now come from
+  Node's built-in `--experimental-test-coverage`**; the older figures were produced by a hand-rolled
+  `NODE_V8_COVERAGE` tally that misaligns source maps on Windows + tsx and is retired.
+
 ## [0.8.0] - 2026-09-29
 
 ### 新增 / Added
 
 - **补齐 Host 侧 RPC 端点（`src/rpc.ts`）的测试覆盖**：`/api/smartdl.status` 是浏览器进度面板与
   `download_status` 工具共用的唯一 Host 端点，也是此前全项目覆盖率最低的模块（函数覆盖实测
-  **6/16**，`ok` / `fail` / `envelopeResponse` / `readPayload` 与整个 handler 主体 `count=0`，
-  一次都没被执行过）。新增 `test/rpc.test.ts`（21 例）后升至 **16/26**，上述函数全部 `count>0`。
+  **2/7**、行覆盖 **62.37%**，`ok` / `fail` / `envelopeResponse` / `readPayload` 与整个 handler
+  主体 `count=0`，一次都没被执行过）。新增 `test/rpc.test.ts`（21 例）后升至 **9/9**、行覆盖
+  **99.46%**，上述函数全部 `count>0`。
   覆盖的正是这个模块「静默失败」的三类高发路径，且**每条跳过 / 回落路径都断言了它回落到的具体值**：
 
   | 路径 | 之前从未被验证的行为 | 新增的正向断言 |
@@ -45,12 +91,17 @@
 ### 文档 / Docs
 
 - README（中英双语）在「防护网」表格中补充 `rpc.ts` 一行，并在测试小节记录 0.8.0 的用例数
-  （**220 通过 / 0 失败**，0.7.0 为 199）。同时把 rpc.ts 与其余低覆盖模块（`resume.ts` 20/30、
-  `downloader.ts` 53/80、`progress.ts` 57/109）的现状如实记入，作为后续迭代的输入。
+  （**220 通过 / 0 失败**，0.7.0 为 199）。同时把 rpc.ts 与其余低覆盖模块的现状如实记入，作为后续
+  迭代的输入。
   Added an `rpc.ts` row to the bilingual README guard-rail table, and recorded 0.8.0's test count
   (**220 passing / 0 failing**, up from 199 on 0.7.0). The coverage status of `rpc.ts` and the other
-  low-coverage modules (`resume.ts` 20/30, `downloader.ts` 53/80, `progress.ts` 57/109) is recorded
-  as-is, as input for the next iteration.
+  low-coverage modules is recorded as-is, as input for the next iteration.
+
+> 本条里 rpc.ts 与其余模块的覆盖率数字当时取自手搓的 `NODE_V8_COVERAGE` 统计，数值有误；0.9.0 已
+> 换成 Node 自带的 `--experimental-test-coverage` 并更正，详见下方 `[0.9.0]` 条目。
+> The coverage numbers for `rpc.ts` and the other modules quoted here came from a hand-rolled
+> `NODE_V8_COVERAGE` tally and were wrong; 0.9.0 replaced them with the built-in
+> `--experimental-test-coverage` results — see the `[0.9.0]` entry below.
 
 ## [0.7.0] - 2026-09-29
 
@@ -390,7 +441,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...v0.6.0

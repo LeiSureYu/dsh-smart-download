@@ -238,12 +238,18 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 
 **0.8.0 patched a hole in the guard rails themselves**: `/api/smartdl.status` (the single host endpoint
 shared by the web progress panel and `download_status`) was the least-covered module in the project —
-measured function coverage of just **6/16**, with `ok`, `fail`, `envelopeResponse`, `readPayload` and
-the whole handler body at `count=0`, never executed even once. In other words, its guards against
-"silently falling back on an invalid request" and "not leaking a bare 500 on a business exception"
-existed in code but had never been proven by any test — exactly the part most easily broken by a later
-refactor. 0.8.0 adds 21 positive-assertion cases (coverage up to **16/26**), and every skip / fallback
-path asserts the **concrete value** it fell back to rather than merely "does not throw".
+excluding its dedicated test file, measured function coverage of just **2/7** and line coverage
+**62.37%**, with `ok`, `fail`, `envelopeResponse`, `readPayload` and the whole handler body at
+`count=0`, never executed even once. In other words, its guards against "silently falling back on an
+invalid request" and "not leaking a bare 500 on a business exception" existed in code but had never
+been proven by any test — exactly the part most easily broken by a later refactor. 0.8.0 adds
+`test/rpc.test.ts` (21 cases), bringing it to **9/9** and **99.46%** line coverage, and every skip /
+fallback path asserts the **concrete value** it fell back to rather than merely "does not throw".
+
+> All coverage numbers come from Node's built-in `--experimental-test-coverage` (see the "Development"
+> section below). The `6/16` / `16/26` figures printed in the 0.8.0 docs came from a hand-rolled
+> `NODE_V8_COVERAGE` tally, which inflates the function count on Windows + tsx because of source-map
+> misalignment. That method is retired; from this version on the built-in coverage is the only source.
 
 **Contract**: every path in this plugin that "returns a default value" —
 
@@ -379,6 +385,11 @@ pnpm build
 
 # run tests (node:test, no real network needed)
 pnpm test
+
+# run tests with coverage (Node's built-in reporter; do not hand-roll
+# NODE_V8_COVERAGE — it misaligns source maps on Windows + tsx and inflates
+# the function counts)
+node --test --import tsx --experimental-test-coverage "test/**/*.test.ts"
 
 # typecheck only
 pnpm typecheck

@@ -22,11 +22,39 @@ import * as fs from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 import type { ProgressRecord, ProgressState } from './types.js'
 
 /** dsh-task-progress 的目录名规则（对应其 `SESSION_SEGMENT_RE`）。 */
 const SESSION_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
+
+/**
+ * 建一个「会在 ms 后自行结束」的计时器，返回它的 promise 与取消函数。
+ *
+ * 为什么不用 `node:timers/promises` 的 `setTimeout`（1.0.0 修正）：
+ * 它建的计时器**不会 unref**。用它做 `awaitFlush` 的超时哨兵时，即使写盘早就
+ * 完成、`Promise.race` 立刻返回，那个还没到点的计时器仍然挂在事件循环上 ——
+ * 实测（`node -e` 打印 exit 时间）进程会一直活到超时结束：
+ *
+ *   race resolved in 0 ms, winner is timeout? false
+ *   process exit after 2003 ms
+ *
+ * 也就是说 CLI 下每次下载结束都要多卡约 2 秒才退出。这里改成原生 `setTimeout`
+ * 并 `unref()`：等待期间不阻止进程退出；正常路径上再用 `cancel()` 把句柄清掉，
+ * 返回后不留残留计时器（`test/progress.test.ts` 断言句柄数回到基线）。
+ */
+function timeoutAfter(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let timer: NodeJS.Timeout | undefined
+  const promise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+  return {
+    promise,
+    cancel: () => {
+      if (timer) clearTimeout(timer)
+    },
+  }
+}
 
 /** 当前会话的定位信息，来自 `exec.agent.session.header`。 */
 export interface ProgressSession {
@@ -285,8 +313,19 @@ export class ProgressReporter {
    * 终态（`done` / `fail` / `cancel`）之后调用方通常立刻 return，此时必须等一下，
    * 否则「已完成」这条记录还在队列里，面板会永远停在「下载中」。
    * 带 2 秒上限：磁盘异常时不至于把工具调用挂死。
+   *
+   * 超时计时器必须 unref 且可取消（1.0.0 修正）：0.9.0 之后用的
+   * `node:timers/promises` 超时哨兵不会 unref，导致每次等待都要把事件循环多留住
+   * 整个超时时长（CLI 下约 2 秒才退出）。现在见 `timeoutAfter()`。
+   *
+   * 超时不许静默（1.0.0 修正）：0.9.0 之前这里超时后直接返回，既没有日志也没有
+   * 异常 —— 「进度没写进去」这件事在用户侧只表现为面板卡住，排查不到原因。
+   * 现在超时会发出 `process.emitWarning`：仍不阻断调用（磁盘满时让工具调用挂死
+   * 更糟），但留下一条可搜索的线索。
+   *
+   * @param timeoutMs 上限毫秒数，默认 2000；只有测试需要改，正常调用不传
    */
-  async awaitFlush(): Promise<void> {
+  async awaitFlush(timeoutMs = 2000): Promise<void> {
     // 若还有未 flush 的 pending（微任务尚未跑），先手动补一次
     if (this.pending.length > 0) {
       const batch = this.pending
@@ -294,7 +333,23 @@ export class ProgressReporter {
       this.flushScheduled = false
       await this.writeNow(batch)
     }
-    await Promise.race([this.pendingWrite, delay(2000)])
+    // 用哨兵对象而非 Promise.race 的返回值判断是谁先完成：超时必须能被识别出来。
+    const TIMEOUT = Symbol('timeout')
+    const timeout = timeoutAfter(timeoutMs)
+    let winner: symbol | void
+    try {
+      winner = await Promise.race([this.pendingWrite, timeout.promise.then(() => TIMEOUT)])
+    } finally {
+      // 正常路径（写盘先完成）与超时路径都要清掉句柄，返回后不留计时器。
+      timeout.cancel()
+    }
+    if (winner === TIMEOUT) {
+      process.emitWarning(
+        `dsh-smart-dl 进度写盘超过 ${timeoutMs}ms 未完成（任务 ${this.taskId}），` +
+          '面板与 download_status 可能看不到最新状态',
+        { code: 'DSH_SMARTDL_PROGRESS_FLUSH_TIMEOUT' },
+      )
+    }
   }
 
   /** 标记完成 */

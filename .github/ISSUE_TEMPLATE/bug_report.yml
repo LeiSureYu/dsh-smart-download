@@ -1,0 +1,98 @@
+name: Bug report
+description: Something did not work as documented (download failed, wrong file, panel stuck, ...)
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: please check [TROUBLESHOOTING.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md).
+
+        For security issues (sandbox escape, writing outside `output`, mirror bypass) do **not**
+        open a public issue — use the private security advisory instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: From `package.json`, the npm page, or the CHANGELOG's top entry.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - Windows arm64
+        - Linux x64
+        - Linux arm64
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "v22.14.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dsh_profile
+    attributes:
+      label: dsh profile
+      options:
+        - web
+        - cli
+        - other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: The actual behaviour, including the exact `smart_download` call (url / output) if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Return value / logs
+      description: |
+        Paste the `smart_download` result object if you have it. Pay attention to
+        `reason`, `verify` / `verifySkipped`, and `state` — these fields say which path was taken.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Smallest sequence that shows the bug. "It failed once" is not enough to act on.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked TROUBLESHOOTING.md and did not find a match.
+          required: true
+        - label: This is not a security issue (those go to the private advisory).
+          required: true

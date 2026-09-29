@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/LeiSureYu/dsh-smart-download/security/advisories/new
+    about: Report privately. Do not disclose exploit details in a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md
+    about: Symptom to cause to fix, before you file a bug.
+  - name: Q and A / usage questions
+    url: https://github.com/LeiSureYu/dsh-smart-download/discussions
+    about: Ask about installation, mirrors or configuration here.

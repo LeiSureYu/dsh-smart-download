@@ -147,6 +147,37 @@ test('runProcess: close 先于 abort 完成时不误报取消', async () => {
   await delay(50)
 })
 
+/**
+ * SIGKILL 兜底必须对所有平台生效（1.0.0 修正）。
+ *
+ * 0.9.0 之前这段兜底被 `if (process.platform === 'win32')` 圈住，理由是
+ * 「Windows 上 SIGTERM 可能不被响应」。但忽略 SIGTERM 这件事 POSIX 上同样能做
+ * （装一个空的 SIGTERM handler 即可），一旦如此，取消下载就永远等不到 close，
+ * `smart_download` 卡死在那里不返回。
+ *
+ * 这条用例跑一个**显式忽略 SIGTERM** 的子进程，abort 之后必须仍在约 1s 后的
+ * SIGKILL 下结束。修好之前它在 Linux 上会一直挂着（由 Node 的测试超时兜底）。
+ * Windows 上构造不出「忽略终止」的场景（child.kill 走的是 TerminateProcess），
+ * 因此跳过。
+ */
+test('runProcess: 子进程忽略 SIGTERM 时仍会被 SIGKILL 兜底结束', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows 上 child.kill 直接终止进程，构造不出「忽略终止」的子进程')
+    return
+  }
+  const controller = new AbortController()
+  const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 200)"
+  const started = Date.now()
+  const running = runProcess(process.execPath, ['-e', script], controller.signal)
+  // 等子进程把 handler 装上再取消，否则 SIGTERM 会在装 handler 之前就杀掉它
+  await delay(300)
+  controller.abort()
+  await assert.rejects(running, /下载已取消/)
+  const elapsed = Date.now() - started
+  // 正向断言：必须在兜底窗口内真的结束（1s 兜底 + 容差），而不是永久挂住
+  assert.ok(elapsed < 5000, `忽略 SIGTERM 的子进程应在兜底后结束，实际耗时 ${elapsed}ms`)
+})
+
 /** 轮询等待一个「内容是数字」的文件出现，返回该数字（Windows / Linux 通用） */
 async function waitForNumberFile(file: string, timeoutMs: number): Promise<number> {
   const { existsSync, readFileSync } = await import('node:fs')

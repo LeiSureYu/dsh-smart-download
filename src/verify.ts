@@ -19,6 +19,13 @@
  *    （探测侧已强制 `identity`，这一条是对无视该请求头的服务器的兜底。）
  * 3. 本地文件读不到 → 失败（退出码 0 却没文件，本身就是异常）；
  * 4. 字节数不等 → 失败，明确报错，绝不返回 success。
+ *
+ * 「跳过」为什么必须与「一致」分开（1.0.0 修正）：
+ * 0.9.0 之前两者共用 `{ kind: 'ok' }`，调用方无法区分「真的比过字节数」与
+ * 「压根没比」。这正是本项目反复出问题的静默失败形态 —— 一个未经测量的下载
+ * 看起来和校验通过的下载一模一样。现在跳过是独立分支，带上机器可读的原因
+ * （`reason`）与给人看的一句话（`detail`），调用方必须把它写进用户可见的
+ * 进度文案里，不允许悄悄放行。
  */
 import type { ProbeResult } from './types.js'
 
@@ -39,12 +46,41 @@ export function normalizeContentEncoding(header: string | null | undefined): str
   return tokens.join(', ')
 }
 
+/**
+ * 跳过校验的原因（机器可读）。
+ * - `remote-length-unknown`：远端没有声明长度，没有基准可比；
+ * - `content-encoded`：远端声明了压缩编码，压缩后长度与落盘字节数不可比。
+ */
+export type VerifySkipReason = 'remote-length-unknown' | 'content-encoded'
+
 /** 校验结论 */
 export type VerifyOutcome =
-  /** 字节数一致，或本次不具备校验条件（跳过） */
-  | { kind: 'ok'; actual?: number }
+  /** 字节数一致：`actual` 与 `expected` 必然都存在且相等 */
+  | { kind: 'ok'; actual: number; expected: number }
+  /**
+   * 本次不具备校验条件，未做任何比较。
+   * 不是「通过」，也不是「失败」，调用方必须把 `detail` 显式告知用户。
+   */
+  | { kind: 'skipped'; reason: VerifySkipReason; encoding?: string }
   /** 字节数不一致 / 文件缺失，必须判为失败 */
   | { kind: 'mismatch'; expected: number; actual: number | null }
+
+/**
+ * 跳过校验时回给调用方的一句话（固定文案）。
+ *
+ * 定成常量而不是就地拼字符串，是为了让「跳过路径只能输出这两个值」成为可断言
+ * 的事实：`smart_download` 的 `verifySkipped` 字段与 render 文案都从这里取，
+ * 测试断言的也是这两个字面量，改动会被用例拦下。
+ */
+export const VERIFY_SKIP_LENGTH_UNKNOWN = '未做字节数校验：远端未声明文件长度'
+export const VERIFY_SKIP_CONTENT_ENCODED = '未做字节数校验：远端声明了压缩编码'
+
+/** 把跳过原因映射成回给调用方的固定文案 */
+export function describeSkip(outcome: Extract<VerifyOutcome, { kind: 'skipped' }>): string {
+  return outcome.reason === 'content-encoded'
+    ? VERIFY_SKIP_CONTENT_ENCODED
+    : VERIFY_SKIP_LENGTH_UNKNOWN
+}
 
 /**
  * 纯函数：比较实际落盘字节数与远端声明长度。
@@ -60,17 +96,25 @@ export function verifySize(
   contentEncoding?: string,
 ): VerifyOutcome {
   // 1. 远端长度未知：无法校验
-  if (expected === undefined) return { kind: 'ok' }
+  if (expected === undefined) {
+    return {
+      kind: 'skipped',
+      reason: 'remote-length-unknown',
+    }
+  }
 
   // 2. 实际返回了压缩编码：探测长度与落盘字节数不可比，跳过而不是误判
-  if (normalizeContentEncoding(contentEncoding)) return { kind: 'ok' }
+  const encoding = normalizeContentEncoding(contentEncoding)
+  if (encoding) {
+    return { kind: 'skipped', reason: 'content-encoded', encoding }
+  }
 
   // 3. 文件缺失
   if (actual === null) return { kind: 'mismatch', expected, actual: null }
 
   // 4. 字节数比对
   if (actual !== expected) return { kind: 'mismatch', expected, actual }
-  return { kind: 'ok', actual }
+  return { kind: 'ok', actual, expected }
 }
 
 /** 从探测结果里取出校验所需的期望值与编码信息 */

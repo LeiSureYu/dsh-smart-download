@@ -167,6 +167,13 @@ test('chunked 无 Content-Length：结果不含 undefined 的 size，且通过 d
     assert.equal(result.method, 'curl')
     // 关键断言：不能出现值为 undefined 的 size 键
     assert.equal(Object.hasOwn(result, 'size'), false, 'size 键不应出现')
+    // 跳过校验必须是**显式**告知：远端没声明长度，本次没有做字节数比对。
+    // 0.9.0 之前这种情况与「校验通过」在返回值里长得一模一样。
+    assert.equal(
+      result.verifySkipped,
+      '未做字节数校验：远端未声明文件长度',
+      '拿不到远端长度时必须显式说明未做校验',
+    )
     assert.equal(snapshotJsonValue(result) === undefined, false, '结果必须是 lossless JSON')
     assert.ok(existsSync(out), '文件应落盘')
   })
@@ -187,6 +194,8 @@ test('已知 Content-Length 且支持 Range：返回 size 且走 curl（无 aria
 
     assert.equal(result.success, true)
     assert.equal(result.size, body.length)
+    // 字节数真的比过且一致：不得出现 verifySkipped
+    assert.equal(result.verifySkipped, undefined, '校验通过时不应有 verifySkipped')
     assert.equal(snapshotJsonValue(result) === undefined, false)
     assert.equal(readFileSync(out).length, body.length)
   })
@@ -552,6 +561,12 @@ test('完整性校验：服务器无视 identity 返回 gzip -> 跳过校验，�
     // 关键断言：期望值 41 ≠ 落盘 3000，若没跳过校验就会误报失败
     assert.equal(result.success, true, '压缩编码不可比时应跳过校验而不是误报')
     assert.equal(readFileSync(out).length, body.length, '未压缩的 3000 字节应完整落盘')
+    // 跳过必须显式可见，否则用户看到的就是一次「成功」而不知道没验完整性
+    assert.equal(
+      result.verifySkipped,
+      '未做字节数校验：远端声明了压缩编码',
+      '压缩编码不可比时必须显式说明未做校验',
+    )
   })
 })
 
@@ -564,6 +579,139 @@ test('完整性校验：服务器无视 identity 返回 gzip -> 跳过校验，�
  * 本机没装 aria2 子包时这条用例会跳过（决策走 curl），这是可接受的：
  * 校验逻辑本身已由前面的 curl 用例与 verify.test.ts 覆盖。
  */
+/**
+ * aria2 **成功**路径（1.0.0 补测）。
+ *
+ * 此前全量用例只走到 aria2 的失败分支：被 chunked 截断那条最终在 assertIntegrity
+ * 抛错，aria2 自己的 \`return { ... method: 'aria2' }\` 从未被执行过 —— 也就是说
+ * 「aria2 下好了一个完整文件、返回 method: 'aria2'」这条主路径没有任何用例。
+ * 这里用本地 http server 发一个 2MB、支持 Range 的资源，真实拉起随包 aria2。
+ *
+ * 本机没装 aria2 子包时跳过（与上一条同样的理由）。
+ */
+test('aria2 成功路径：完整文件 -> method=aria2、fellback=false、字节数与 size 一致', async (t) => {
+  const aria2Available = (() => {
+    try {
+      return getAria2Path() !== null
+    } catch {
+      return false
+    }
+  })()
+  if (!aria2Available) {
+    t.skip('本机无 aria2 子包，跳过 aria2 专属成功路径用例')
+    return
+  }
+
+  // 2MB > 1MB 阈值，确保决策走 aria2
+  const SIZE = 2 * 1024 * 1024
+  const body = Buffer.alloc(SIZE, 0x50)
+  await withServer((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': String(SIZE), 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    const range = req.headers.range
+    if (range) {
+      const m = /bytes=(\d+)-(\d*)/.exec(String(range))
+      if (m) {
+        const start = Number(m[1])
+        const end = m[2] ? Number(m[2]) : SIZE - 1
+        res.writeHead(206, {
+          'content-length': String(end - start + 1),
+          'content-range': `bytes ${start}-${end}/${SIZE}`,
+          'accept-ranges': 'bytes',
+        })
+        res.end(body.subarray(start, end + 1))
+        return
+      }
+    }
+    res.writeHead(200, { 'content-length': String(SIZE), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'aria2-ok.bin')
+    const result = await run({ url: `${base}/aria2-ok.bin`, output: out })
+
+    // 正向断言到具体值：真的走了 aria2，且没有回退
+    assert.equal(result.success, true)
+    assert.equal(result.method, 'aria2', '完整大文件且 aria2 可用时应走 aria2 主路径')
+    assert.equal(result.fellback, false)
+    assert.equal(result.size, SIZE)
+    // 字节数比过且一致：不得出现 verifySkipped
+    assert.equal(result.verifySkipped, undefined, '校验通过时不应有 verifySkipped')
+    assert.equal(readFileSync(out).length, SIZE, '落盘字节数必须与远端声明一致')
+    assert.equal(existsSync(`${out}.part.json`), false, '成功后应清掉旁车')
+  })
+})
+
+/**
+ * aria2 失败 → 回退 curl → **成功**（1.0.0 补测）。
+ *
+ * 决策层判定「支持 Range、文件够大、aria2 可用」时走 aria2；但 aria2 本身
+ * 可能失败（服务器对它返回错误）。此时必须回退 curl 且把 fellback 标为 true、
+ * reason 写成 aria2 的失败原因 —— 这条回退成功路径此前也没有用例。
+ *
+ * 用 User-Agent 分流：aria2 会带 \`aria2/1.37.0\`，被 500 拒掉；curl 正常拿到文件。
+ */
+test('aria2 失败回退 curl 成功：method=curl、fellback=true、reason 带 aria2 原因', async (t) => {
+  const aria2Available = (() => {
+    try {
+      return getAria2Path() !== null
+    } catch {
+      return false
+    }
+  })()
+  if (!aria2Available) {
+    t.skip('本机无 aria2 子包，跳过 aria2 回退用例')
+    return
+  }
+
+  const SIZE = 2 * 1024 * 1024
+  const body = Buffer.alloc(SIZE, 0x51)
+  await withServer((req, res) => {
+    // 只针对 aria2 的请求返回 500，逼它失败；curl 走正常路径
+    const ua = String(req.headers['user-agent'] ?? '')
+    if (/aria2/i.test(ua)) {
+      res.writeHead(500, { 'content-length': '4' })
+      res.end('nope')
+      return
+    }
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': String(SIZE), 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    const range = req.headers.range
+    if (range) {
+      const m = /bytes=(\d+)-(\d*)/.exec(String(range))
+      if (m) {
+        const start = Number(m[1])
+        const end = m[2] ? Number(m[2]) : SIZE - 1
+        res.writeHead(206, {
+          'content-length': String(end - start + 1),
+          'content-range': `bytes ${start}-${end}/${SIZE}`,
+          'accept-ranges': 'bytes',
+        })
+        res.end(body.subarray(start, end + 1))
+        return
+      }
+    }
+    res.writeHead(200, { 'content-length': String(SIZE), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'aria2-fb.bin')
+    const result = await run({ url: `${base}/aria2-fb.bin`, output: out })
+
+    assert.equal(result.success, true)
+    assert.equal(result.method, 'curl', 'aria2 失败后必须回退 curl')
+    assert.equal(result.fellback, true, '回退路径必须显式标记 fellback')
+    assert.match(String(result.reason), /aria2 失败/, 'reason 必须写明是 aria2 失败导致回退')
+    assert.equal(readFileSync(out).length, SIZE, '回退后仍应落盘完整文件')
+    // 关掉服务器的错误响应后不残留旁车
+    assert.equal(existsSync(`${out}.part.json`), false, '成功后应清掉旁车')
+  })
+})
+
 test('完整性校验：aria2 被 chunked 截断 -> 退出码 0 但必须判为失败', async (t) => {
   const aria2Available = (() => {
     try {

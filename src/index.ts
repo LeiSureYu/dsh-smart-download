@@ -25,7 +25,7 @@ import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
 import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js'
-import { describeMismatch, verifySize } from './verify.js'
+import { describeMismatch, describeSkip, verifySize } from './verify.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import type {
   DownloadStatusArgs,
@@ -73,6 +73,7 @@ export function apply(ctx: Context): void {
             size: { type: 'number' },
             fellback: { type: 'boolean' },
             reason: { type: 'string' },
+            verifySkipped: { type: 'string' },
             requestedUrl: { type: 'string' },
             mirrored: { type: 'boolean' },
           },
@@ -82,7 +83,9 @@ export function apply(ctx: Context): void {
             type: 'text',
             text: `Download ${value.success ? 'succeeded' : 'failed'} via ${value.method}${
               value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''
-            }${value.mirrored ? ' (via mirror)' : ''}`,
+            }${value.mirrored ? ' (via mirror)' : ''}${
+              value.verifySkipped ? ` (${value.verifySkipped})` : ''
+            }`,
           },
         ],
       },
@@ -125,13 +128,27 @@ export function apply(ctx: Context): void {
         // 完整性校验：下载工具退出码 0 只代表「它认为完成了」，不代表字节数对
         // （服务器提前断开、镜像返回 200 的错误页、磁盘写满…都不会有非零退出码）。
         // 校验失败一律抛错，并且**不**清除旁车指纹 —— 保留它，下次才有得比。
-        const assertIntegrity = async (): Promise<void> => {
+        //
+        // 返回值是「跳过校验」的说明文案（没有跳过时为空串）：
+        // 0.9.0 之前跳过与通过共用 `{ kind: 'ok' }`，调用方无从区分，于是
+        // 「压根没测」的下载和「测过且一致」的下载长得一模一样。现在跳过会
+        // 作为 `verifySkipped` 出现在工具返回与 render 文案里，模型与用户都
+        // 能看到「这次没有做字节数校验」。
+        const assertIntegrity = async (): Promise<string> => {
           const outcome = verifySize(
             localFileSize(outputPath),
             probe.contentLength,
             probe.contentEncoding,
           )
-          if (outcome.kind === 'ok') return
+          if (outcome.kind === 'ok') return ''
+          if (outcome.kind === 'skipped') {
+            // 正向记录：跳过不是静默。终态文案必须写明「没做字节数校验」，
+            // 否则它在进度面板与 download_status 里会与「校验通过」长得一样。
+            const note = describeSkip(outcome)
+            reporter.done(`下载完成（${note}）`)
+            await reporter.awaitFlush()
+            return note
+          }
           const message = describeMismatch(outcome)
           reporter.fail(message)
           await reporter.awaitFlush()
@@ -174,7 +191,7 @@ export function apply(ctx: Context): void {
             // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
             // 否则 download_status / 轨道一读取方会看到上一次的中间状态。
             await reporter.awaitFlush()
-            await assertIntegrity()
+            const verifySkipped = await assertIntegrity()
             clearMarker(outputPath)
             return {
               ...base,
@@ -184,9 +201,19 @@ export function apply(ctx: Context): void {
               ...sizeField,
               fellback: false,
               reason: decision.reason,
+              ...(verifySkipped ? { verifySkipped } : {}),
             }
           } catch (err) {
             const aria2Message = err instanceof Error ? err.message : String(err)
+            // 取消与失败必须分开上报（1.0.0 修正）：二者在面板与
+            // download_status 里是两个不同状态，混成一个会让用户以为「下载坏了」，
+            // 而实际上是他自己按了取消。另外 signal 已经 abort 时再回退 curl
+            // 只会立刻再失败一次，白白多跑一趟子进程。
+            if (exec.signal.aborted) {
+              reporter.cancel()
+              await reporter.awaitFlush()
+              throw err
+            }
             // aria2 失败，降级到 curl
             reporter.report(0, 'aria2 失败，回退 curl…')
             try {
@@ -199,7 +226,7 @@ export function apply(ctx: Context): void {
               )
               reporter.done('下载完成（curl 回退）')
               await reporter.awaitFlush()
-              await assertIntegrity()
+              const verifySkipped = await assertIntegrity()
               clearMarker(outputPath)
               return {
                 ...base,
@@ -209,9 +236,19 @@ export function apply(ctx: Context): void {
                 ...sizeField,
                 fellback: true,
                 reason: `aria2 失败: ${aria2Message}`,
+                ...(verifySkipped ? { verifySkipped } : {}),
               }
             } catch (curlErr) {
-              reporter.fail(aria2Message)
+              // 失败文案必须是**真正**抛出的那个错误：curl 也失败时，用户要看到
+              // 的是 curl 的失败原因；aria2 的原因已经在上面作为回退理由记录了。
+              // 0.9.0 之前这里传的是 aria2Message，进度里写着 aria2 的错，抛出的
+              // 却是 curlErr —— 排查时会对不上。
+              const curlMessage = curlErr instanceof Error ? curlErr.message : String(curlErr)
+              if (exec.signal.aborted) {
+                reporter.cancel()
+              } else {
+                reporter.fail(curlMessage)
+              }
               await reporter.awaitFlush()
               throw curlErr
             }
@@ -230,7 +267,7 @@ export function apply(ctx: Context): void {
           )
           reporter.done()
           await reporter.awaitFlush()
-          await assertIntegrity()
+          const verifySkipped = await assertIntegrity()
           clearMarker(outputPath)
           return {
             ...base,
@@ -240,9 +277,14 @@ export function apply(ctx: Context): void {
             ...sizeField,
             fellback: decision.fellback,
             reason: decision.reason,
+            ...(verifySkipped ? { verifySkipped } : {}),
           }
         } catch (err) {
-          reporter.fail(err instanceof Error ? err.message : String(err))
+          if (exec.signal.aborted) {
+            reporter.cancel()
+          } else {
+            reporter.fail(err instanceof Error ? err.message : String(err))
+          }
           await reporter.awaitFlush()
           throw err
         }

@@ -97,6 +97,38 @@ test('smart_download.render：成功 / 回退 / 镜像三种修饰都出现在�
   )
 })
 
+test('smart_download.render：跳过完整性校验时必须出现在文案里（不得静默）', () => {
+  const render = loadRender('smart_download')
+  const text = (value: unknown): string =>
+    render({} as never, value as never)
+      .map((part) => part.text)
+      .join('')
+
+  // 跳过校验的说明必须可见：用户看到的不能只是「成功」，
+  // 否则「没验过完整性」与「验过且一致」在回执上无法区分。
+  assert.equal(
+    text({
+      success: true,
+      method: 'curl',
+      verifySkipped: '未做字节数校验：远端未声明文件长度',
+    }),
+    'Download succeeded via curl (未做字节数校验：远端未声明文件长度)',
+  )
+  // 与回退原因同时出现时两者都要在，不能互相顶掉
+  assert.equal(
+    text({
+      success: true,
+      method: 'curl',
+      fellback: true,
+      reason: '文件过小',
+      verifySkipped: '未做字节数校验：远端声明了压缩编码',
+    }),
+    'Download succeeded via curl (fallback: 文件过小) (未做字节数校验：远端声明了压缩编码)',
+  )
+  // 没有跳过时不得凭空拼出一个空括号
+  assert.equal(text({ success: true, method: 'aria2' }), 'Download succeeded via aria2')
+})
+
 test('download_status.render：无任务给固定文案，有任务逐行列出（速度 / ETA 可选）', () => {
   const render = loadRender('download_status')
   const text = (value: unknown): string =>

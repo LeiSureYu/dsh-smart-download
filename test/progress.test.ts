@@ -236,6 +236,63 @@ test('resolveTaskProgressDir：DSH_PROGRESS_DIR 优先于会话', () => {
   assert.equal(dir, taskDir)
 })
 
+/**
+ * 写盘超时必须留下可观测的线索（1.0.0 修正）。
+ *
+ * 0.9.0 之前 `awaitFlush()` 的 2 秒上限超时后**静默**返回：磁盘异常时，
+ * 「进度没写进去」在用户侧只表现为面板卡住，没有任何可排查的东西。现在会发
+ * `process.emitWarning`（仍不阻断调用）。
+ *
+ * 用 `awaitFlush(30)` 把窗口压到 30ms 来测同类路径 —— 生产默认值 2s 不变，
+ * 注入点只改等待时长，不改行为。
+ */
+test('awaitFlush 超时发出 process.emitWarning（不再静默）', async () => {
+  const r = new ProgressReporter('task-timeout')
+  // 构造一个「永远写不完」的待写队列：直接替换内部的 pendingWrite。
+  // 命名以 _ 开头的私有字段在测试里显式可见，是为了让这条用例不依赖真实磁盘
+  // 卡顿（那玩意儿没法在单测里稳定复现）。
+  const internals = r as unknown as { pendingWrite: Promise<void> }
+  internals.pendingWrite = new Promise<void>(() => {})
+
+  const warnings: string[] = []
+  const onWarning = (w: Error): void => {
+    warnings.push(`${(w as Error & { code?: string }).code ?? ''}:${w.message}`)
+  }
+  process.on('warning', onWarning)
+  try {
+    await r.awaitFlush(30)
+    // process.emitWarning 是异步派发的（下一个 tick 才到 'warning' 监听器），
+    // 因此必须让出一次事件循环再断言，否则会假阴性。
+    await new Promise((resolve) => setImmediate(resolve))
+  } finally {
+    process.off('warning', onWarning)
+  }
+
+  assert.equal(warnings.length, 1, `应恰好发出 1 条 warning，实际 ${warnings.length}`)
+  assert.match(warnings[0] ?? '', /DSH_SMARTDL_PROGRESS_FLUSH_TIMEOUT/)
+  assert.match(warnings[0] ?? '', /task-timeout/)
+})
+/**
+ * awaitFlush 的超时计时器必须带 unref（1.0.0 修正）。
+ *
+ * 0.9.0 之前用的是 `node:timers/promises` 的 `setTimeout` —— 它**不会** unref，
+ * 实测把 Node 事件循环多留住整个超时时长（脚本末尾打印 `process exit after 2016 ms`）：
+ * CLI 下每次下载结束都要多等约 2 秒才退出，DSH 宿主里同样白占一个 2 秒的计时器。
+ * 这条用例把上面的实测钉死：awaitFlush 返回后不允许再残留 Timeout 句柄。
+ */
+test('awaitFlush 返回后不残留 Timeout 句柄（超时计时器已清理）', async () => {
+  const r = new ProgressReporter('task-unref')
+  r.report(50, '下载中')
+  await r.awaitFlush() // 先让首轮写盘落地，后面的计数不受它影响
+
+  const countTimeouts = (): number =>
+    process.getActiveResourcesInfo().filter((t) => t === 'Timeout').length
+  const before = countTimeouts()
+  await r.awaitFlush(60)
+  const after = countTimeouts()
+  assert.equal(after, before, `awaitFlush 返回后 Timeout 句柄数应回到 ${before}，实际 ${after}`)
+})
+
 test('resolveTaskProgressDir：无 env 时用 <cwd>/.dsh-progress/<id>', () => {
   const saved = process.env.DSH_PROGRESS_DIR
   delete process.env.DSH_PROGRESS_DIR

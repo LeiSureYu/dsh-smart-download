@@ -6,13 +6,22 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { describeMismatch, expectedFromProbe, normalizeContentEncoding, verifySize } from '../src/verify.js'
+import {
+  describeMismatch,
+  describeSkip,
+  expectedFromProbe,
+  normalizeContentEncoding,
+  verifySize,
+} from '../src/verify.js'
 import type { ProbeResult } from '../src/types.js'
 
 test('verifySize: 字节数一致 -> ok 且带回实际大小', () => {
   const r = verifySize(5000, 5000)
   assert.equal(r.kind, 'ok')
+  // 正向断言：一致时 actual 与 expected 都必须存在且相等，
+  // 调用方据此才能说「这次真的比过字节数」，而不是靠「没有 mismatch」推断。
   assert.equal(r.kind === 'ok' ? r.actual : undefined, 5000)
+  assert.equal(r.kind === 'ok' ? r.expected : undefined, 5000)
 })
 
 test('verifySize: 字节数偏小 -> mismatch（退出码 0 但文件是坏的）', () => {
@@ -39,19 +48,27 @@ test('verifySize: 文件不存在（null）-> mismatch', () => {
   assert.equal(r.kind === 'mismatch' ? r.actual : undefined, null)
 })
 
-test('verifySize: 远端长度未知 -> 跳过（没有基准，不能乱判）', () => {
+test('verifySize: 远端长度未知 -> skipped 而非 ok（没有基准，不能乱判）', () => {
   const r = verifySize(1234, undefined)
-  assert.equal(r.kind, 'ok')
-  // 正向断言：跳过时不带 actual，调用方不会误以为校验过
-  assert.equal(r.kind === 'ok' ? r.actual : undefined, undefined)
+  // 关键：必须是独立的 skipped 分支。0.9.0 之前这里返回 ok，调用方分不出
+  // 「比过且一致」与「压根没比」，静默失败就此藏进来。
+  assert.equal(r.kind, 'skipped')
+  assert.equal(r.kind === 'skipped' ? r.reason : undefined, 'remote-length-unknown')
+  assert.equal(
+    r.kind === 'skipped' ? describeSkip(r) : undefined,
+    '未做字节数校验：远端未声明文件长度',
+  )
 })
 
-test('verifySize: 服务器无视 identity 仍返回压缩编码 -> 跳过（否则 100% 误报）', () => {
+test('verifySize: 服务器无视 identity 仍返回压缩编码 -> skipped（否则 100% 误报）', () => {
   // 0.7.0 实测：fetch 默认 accept-encoding 时 5000B 的 body 会报 41B，
   // 而 curl / aria2 落盘的是未压缩的 5000B。此时 41 ≠ 5000 是正常现象。
   for (const enc of ['gzip', 'br', 'deflate', 'GZIP']) {
     const r = verifySize(5000, 41, enc)
-    assert.equal(r.kind, 'ok', `${enc} 应跳过校验`)
+    assert.equal(r.kind, 'skipped', `${enc} 应跳过校验`)
+    assert.equal(r.kind === 'skipped' ? r.reason : undefined, 'content-encoded')
+    // 具体编码名必须被带出来（归一化成小写），否则排查时不知道是哪个编码
+    assert.equal(r.kind === 'skipped' ? r.encoding : undefined, enc.toLowerCase())
   }
 })
 
@@ -78,7 +95,21 @@ test('normalizeContentEncoding: 空 / identity / 大小写归一', () => {
 })
 
 test('verifySize: 混合编码含真实压缩 -> 跳过', () => {
-  assert.equal(verifySize(5000, 41, 'gzip, identity').kind, 'ok')
+  const r = verifySize(5000, 41, 'gzip, identity')
+  assert.equal(r.kind, 'skipped')
+  assert.equal(r.kind === 'skipped' ? r.reason : undefined, 'content-encoded')
+  assert.equal(r.kind === 'skipped' ? r.encoding : undefined, 'gzip')
+})
+
+test('describeSkip: 两种跳过原因各有固定文案（不是就地拼串）', () => {
+  assert.equal(
+    describeSkip({ kind: 'skipped', reason: 'remote-length-unknown' }),
+    '未做字节数校验：远端未声明文件长度',
+  )
+  assert.equal(
+    describeSkip({ kind: 'skipped', reason: 'content-encoded', encoding: 'br' }),
+    '未做字节数校验：远端声明了压缩编码',
+  )
 })
 
 test('expectedFromProbe: 取出期望长度与编码', () => {

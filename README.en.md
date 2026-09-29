@@ -22,7 +22,9 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
-Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.7.0` or newer.
+All four of **Windows x64 / arm64** and **Linux x64 / arm64** are fully supported (bundled aria2,
+multi-connection). macOS installs and works, but always downloads over single-threaded `curl` —
+see [COMPATIBILITY.md](./docs/COMPATIBILITY.md) for why, and for why no macOS build was hacked together.
 
 `dsh-smart-dl` registers two tools with DSH:
 
@@ -41,9 +43,11 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 > **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
-> **Use `0.7.0` or newer.** `0.7.0` adds **post-download integrity verification**: an exit code of 0 only means the tool thinks it finished. Measured with the bundled aria2, when the server streams chunked and closes after 1MB, aria2 exits **0** and prints `OK` while only 1MB lands (4MB declared); curl exits 0 too. The plugin now compares bytes on disk against the declared remote length and reports an error on mismatch. It also lowers the large-file concurrency threshold from 50MB to 8MB (a measured 8MB file is nearly twice as fast with 8 connections as with 4). `0.6.0` fixes two silent corruptions in resume: ① resuming was unconditional whenever the server advertised Range support, but both `curl -C -` and `aria2 -c` only look at the local file length — measured: when the remote shrinks, or keeps the same length with different content, **both exit 0 with the wrong bytes on disk**. Resume now compares the remote length and `ETag` / `Last-Modified` first and re-downloads from scratch when the partial file cannot be proven to come from the same resource. ② when the target already existed, aria2 neither truncated nor overwrote it; it saved the new content as `f.1.bin` while the plugin still returned `path` pointing at the stale `f.bin`. aria2 now always gets `--allow-overwrite=true`. `0.5.0` fixes three silent failures in the progress tracks: ① track-1 records carried no `state` field, and dsh-task-progress only looks at `state`, so the panel showed "downloading" forever even at `pct=100`; ② with no session context the progress was written into a `default` directory nobody reads; ③ `DSH_HOME` was ignored, so progress landed in a stale home. Progress is now written per session into `<session.cwd>/.dsh-progress/<session.id>/`, track 1 is skipped entirely without a session, and a `cancelled` state was added. `0.4.2` fixes three reproduced defects: ① when the size cannot be probed the result used to carry `size: undefined`, which the host rejects as non-lossless JSON with `ToolOutputError` (the download had in fact succeeded); ② URL path traversal (`..%2F..%2F..%2Fescaped.txt`) could write outside the working directory; ③ there was no protocol allow-list, so `file://` was accepted by `curl` and copied a local file. `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the full history in [CHANGELOG.md](./CHANGELOG.md). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.6.0`.
+> **1.0.0 is the stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
 >
-> `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
+> **Use `1.0.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md). an exit code of 0 only means the tool thinks it finished. Measured with the bundled aria2, when the server streams chunked and closes after 1MB, aria2 exits **0** and prints `OK` while only 1MB lands (4MB declared); curl exits 0 too. The plugin now compares bytes on disk against the declared remote length and reports an error on mismatch. It also lowers the large-file concurrency threshold from 50MB to 8MB (a measured 8MB file is nearly twice as fast with 8 connections as with 4). `0.6.0` fixes two silent corruptions in resume: ① resuming was unconditional whenever the server advertised Range support, but both `curl -C -` and `aria2 -c` only look at the local file length — measured: when the remote shrinks, or keeps the same length with different content, **both exit 0 with the wrong bytes on disk**. Resume now compares the remote length and `ETag` / `Last-Modified` first and re-downloads from scratch when the partial file cannot be proven to come from the same resource. ② when the target already existed, aria2 neither truncated nor overwrote it; it saved the new content as `f.1.bin` while the plugin still returned `path` pointing at the stale `f.bin`. aria2 now always gets `--allow-overwrite=true`. `0.5.0` fixes three silent failures in the progress tracks: ① track-1 records carried no `state` field, and dsh-task-progress only looks at `state`, so the panel showed "downloading" forever even at `pct=100`; ② with no session context the progress was written into a `default` directory nobody reads; ③ `DSH_HOME` was ignored, so progress landed in a stale home. Progress is now written per session into `<session.cwd>/.dsh-progress/<session.id>/`, track 1 is skipped entirely without a session, and a `cancelled` state was added. `0.4.2` fixes three reproduced defects: ① when the size cannot be probed the result used to carry `size: undefined`, which the host rejects as non-lossless JSON with `ToolOutputError` (the download had in fact succeeded); ② URL path traversal (`..%2F..%2F..%2Fescaped.txt`) could write outside the working directory; ③ there was no protocol allow-list, so `file://` was accepted by `curl` and copied a local file. `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the full history in [CHANGELOG.md](./CHANGELOG.md). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.6.0`.
+>
+> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.0.0`.
 
 ## How it works
 
@@ -125,7 +129,7 @@ Details:
 
 - It is a plain **prefix concatenation** with no path rewriting, so it works with most public mirrors of the "prefix + full original URL" shape.
 - A **missing trailing slash is added automatically**, and a bare domain is accepted (`ghfast.top` becomes `https://ghfast.top/`).
-- Non-`http(s)` URLs skip the mirror.
+- Non-`http(s)` URLs skip the mirror, and **the mirror prefix itself must pass the same allow-list** — a non-`http(s)` prefix (`file://`, `javascript://`, `data://`…) never takes effect and the original URL is used unchanged. The prefix decides the scheme of the concatenated string, so not checking it would open a `file://` back door (fixed in 1.0.0; reproduction in [SECURITY.md](./docs/SECURITY.md)).
 - The output filename is always derived from the **original** URL, so the mirror host never leaks into the filename.
 
 Commonly used public mirrors (pick one; availability varies by network):
@@ -261,7 +265,7 @@ fallback path asserts the **concrete value** it fell back to rather than merely 
 | `parseCurlProgress`  | not recognized → `null`   | real samples must parse percentages rising to 100%      |
 | `ProgressReporter`   | dir unwritable → skipped  | a writable dir must contain a file with growing content |
 | `LineBuffer`         | bad split state           | chunk / `\r` / `\r\n` boundaries must split correctly   |
-| `applyMirror`        | mis-concatenated URL      | the result must parse via `new URL()` and end with the original URL |
+| `applyMirror`        | mis-concatenated URL; **non-http(s) prefix → allow-list bypass** | the result must parse via `new URL()` and end with the original URL; a `file://` / `javascript://` / `data://` prefix must **not take effect** and the original URL must be returned unchanged |
 | `readDownloadStatus` | unreadable → empty list   | a dir containing valid task files must yield tasks with parsed fields |
 | `buildCurlArgs`      | resume flag misplaced     | `-C -` must be present iff `resume`, and `-o` must stay adjacent to the path |
 | `checkDownloadUrl`   | protocol unchecked → local file read | `file://` / `ftp://` must be rejected; `http(s)` must be admitted and return a parsed URL |
@@ -270,7 +274,7 @@ fallback path asserts the **concrete value** it fell back to rather than merely 
 | `resolveTaskProgressDir` | no session → writes to a directory nobody reads | must return `null` (i.e. skip track 1) when neither `DSH_PROGRESS_DIR` nor a session is present, and `<cwd>/.dsh-progress/<id>` when a session is present |
 | `resolveDshHome`     | ignores `DSH_HOME` → writes to a stale home | `DSH_HOME` must take effect; empty / whitespace-only must fall back to `~/.dsh` |
 | `statusFrom`         | message-only inference → wrong status | when a record carries `state`, it must win (`state: 'running'` plus the message "下载完成" is still running) |
-| `verifySize`         | exit code 0 with wrong byte count → treated as success | matching bytes must return `ok`; a **chunked truncation** (both aria2 and curl exit 0) must be reported as a failure; "declared length unknown" and "server returned a compressed encoding" must be **skipped**, not misreported |
+| `verifySize`         | exit code 0 with wrong byte count → treated as success | matching bytes must return `ok`; a **chunked truncation** (both aria2 and curl exit 0) must be reported as a failure; "declared length unknown" and "server returned a compressed encoding" must return a **distinct `skipped`** (with a machine-readable `reason`), never the same shape as `ok` |
 | `probeUrl` `accept-encoding` | default `gzip, deflate` → compressed length | the server must receive `identity`, and the probe must return the **uncompressed** length (5000, not 41) |
 | `registerStatusRpc` handler | invalid request → default value / silent pass-through | with no `connection` it must register **exactly 0 routes**; an invalid envelope must answer `ok:false` with `rpcId='invalid-request'`; an invalid `limit` must fall back to `DEFAULT_STATUS_LIMIT` (10, not 0 / `Infinity`); a business-layer exception must still be 200 + `ok:false` (never a bare 500) |
 
@@ -316,9 +320,13 @@ The 8-connection cap stays: at 32/64MB, x=16 really is twice as fast again (23�
 | Windows  | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-win32-arm64`   |
 | Linux    | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-linux-x64`     |
 | Linux    | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-linux-arm64`   |
-| macOS    | x64 / arm64 | ❌ Not yet          | —                                    |
+| macOS    | x64 / arm64 | ⚠️ Works, no speed-up | —                                    |
 
-The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching platforms.
+The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching
+platforms; `getAria2Path()` then resolves to `null` and `decide()` falls back to `curl`. **"The plugin
+works" and "multi-connection works" are two different things** — an unsupported platform does not install
+a broken plugin, it installs a single-threaded downloader. Why macOS is not done, and what it would take,
+is in [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
 
 ## Permissions
 
@@ -326,11 +334,11 @@ This plugin does exactly three things: **start downloads**, **write progress fil
 
 | Behaviour | Detail |
 | --- | --- |
-| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`). For an admitted URL it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It only contacts the URL passed by the caller (or the address produced by prefixing it with the caller-supplied `mirror`) — no other endpoints. With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
-| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch; `--allow-overwrite` is not enabled, so an already-completed file of the same name is never silently discarded. |
-| Reading progress files | `download_status` only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
+| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
+| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
+| Reading progress files | `download_status` (and `/api/smartdl.status`) only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
 | Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl`; when that variable is unset, `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (skipped entirely without a session context). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
-| Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, force-killed on Windows if still alive after 1s). |
+| Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, `SIGKILL` if still alive after 1s — that fallback is armed on **every** platform, since a POSIX process can ignore SIGTERM just as well). A cancellation is recorded as the `cancelled` state, distinct from a failure. |
 | Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly). |
 
 What it **does not** need: it does not read your DSH session contents, does not touch credentials or keys, does not modify DSH configuration (the `cordis.patch.yml` is applied by DSH itself at install time), and ships no telemetry or network reporting.
@@ -340,8 +348,8 @@ What it **does not** need: it does not read your DSH session contents, does not 
 | Item | Requirement |
 | --- | --- |
 | Node.js | `>=22.0.0` (uses `AbortSignal.any` / `AbortSignal.timeout`) |
-| `@deepseek-ai/cordis` | `^4.0.0` (peerDependency) |
-| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` or `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple) |
+| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` or `>=4.0.1-rc.1 <5.0.0-0` (peerDependency; optional) |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple — a new DSH prerelease branch means appending a clause) |
 | Package manager | npm or pnpm; must honour `os` / `cpu` filtering of `optionalDependencies` |
 
 macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage for it**. On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
@@ -372,9 +380,28 @@ A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-pr
 **Q: Do I have to restart an interrupted download?**
 A: No. Call `smart_download` again with the same `url` and `output`; against a server that supports Range it resumes from where it stopped.
 
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [README](./README.md) / [English](./README.en.md) | Install, usage, permissions |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Internals: what one call goes through, module responsibilities, progress data flow |
+| [SECURITY.md](./docs/SECURITY.md) | Threat model and the four layers of defence, each with a runnable reproduction |
+| [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why macOS is shelved |
+| [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Symptom -> cause -> fix |
+| [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 code review: must-fix / suggestions / known trade-offs |
+| [CHANGELOG.md](./CHANGELOG.md) | Per-version change log |
+
 ## Development
 
 Requirements: Node.js **22+**, pnpm **9+**.
+
+Current baseline: **254 cases (252 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
+Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
+offsets, so the same code on CRLF reports different numbers and different uncovered line
+numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).
+The 2 skipped cases are platform-limited (they only reproduce on Linux); the Ubuntu CI job runs them for real.
+See [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
 
 ```bash
 # install dependencies
@@ -388,11 +415,12 @@ pnpm test
 
 # run tests with coverage (Node's built-in reporter; do not hand-roll
 # NODE_V8_COVERAGE — it misaligns source maps on Windows + tsx and inflates
-# the function counts)
+# the function counts. Also run in an LF working tree: line endings shift
+# the uncovered line numbers)
 node --test --import tsx --experimental-test-coverage "test/**/*.test.ts"
 
-# typecheck only
-pnpm typecheck
+# typecheck only (src/ and test/ use separate tsconfigs)
+pnpm check
 ```
 
 For local development the per-platform binaries must be placed manually (they are not committed). Download URLs and target paths:

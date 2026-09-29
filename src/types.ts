@@ -32,6 +32,14 @@ export interface SmartDownloadResult {
   fellback: boolean
   /** 回退或不支持多线程的原因 */
   reason?: string
+  /**
+   * 本次**没有**做落盘字节数校验的说明（跳过校验时出现）。
+   *
+   * 为什么单独开一个字段而不是复用 `reason`：`reason` 讲的是「为什么选了这种
+   * 下载方式」，这里讲的是「为什么这次没验完整性」，两件事会被同时看到时就
+   * 互相顶掉了。跳过校验的两种情形见 `src/verify.ts` 的 `VerifySkipReason`。
+   */
+  verifySkipped?: string
   /** 实际请求的地址（启用镜像时为「镜像前缀 + 原始 URL」，否则等于原始 URL） */
   requestedUrl: string
   /** 是否走了镜像加速 */

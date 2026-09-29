@@ -236,6 +236,15 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 
 **0.7.0 caught "the tool reports success but the byte count is wrong"**: when the server uses chunked encoding and closes cleanly after 1MB, the bundled aria2 1.37.0 exits with code **0** and prints `OK` in its Download Results, yet only 1MB landed on disk (4MB was declared). `curl` exits 0 in the same scenario. No non-zero exit code exists to detect it; only comparing bytes on disk after the download finds it. See the next section.
 
+**0.8.0 patched a hole in the guard rails themselves**: `/api/smartdl.status` (the single host endpoint
+shared by the web progress panel and `download_status`) was the least-covered module in the project —
+measured function coverage of just **6/16**, with `ok`, `fail`, `envelopeResponse`, `readPayload` and
+the whole handler body at `count=0`, never executed even once. In other words, its guards against
+"silently falling back on an invalid request" and "not leaking a bare 500 on a business exception"
+existed in code but had never been proven by any test — exactly the part most easily broken by a later
+refactor. 0.8.0 adds 21 positive-assertion cases (coverage up to **16/26**), and every skip / fallback
+path asserts the **concrete value** it fell back to rather than merely "does not throw".
+
 **Contract**: every path in this plugin that "returns a default value" —
 
 | Stage                | Silent failure form       | Positive signal that must be asserted                  |
@@ -257,6 +266,7 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 | `statusFrom`         | message-only inference → wrong status | when a record carries `state`, it must win (`state: 'running'` plus the message "下载完成" is still running) |
 | `verifySize`         | exit code 0 with wrong byte count → treated as success | matching bytes must return `ok`; a **chunked truncation** (both aria2 and curl exit 0) must be reported as a failure; "declared length unknown" and "server returned a compressed encoding" must be **skipped**, not misreported |
 | `probeUrl` `accept-encoding` | default `gzip, deflate` → compressed length | the server must receive `identity`, and the probe must return the **uncompressed** length (5000, not 41) |
+| `registerStatusRpc` handler | invalid request → default value / silent pass-through | with no `connection` it must register **exactly 0 routes**; an invalid envelope must answer `ok:false` with `rpcId='invalid-request'`; an invalid `limit` must fall back to `DEFAULT_STATUS_LIMIT` (10, not 0 / `Infinity`); a business-layer exception must still be 200 + `ok:false` (never a bare 500) |
 
 Every assertion is **positive**: it checks "did it actually produce output", not "did it avoid crashing". Real samples live in `test/fixtures/` (curl fixtures are `.bin` files preserving `\r`), and "the fixture must contain `\r`" is itself a forced assertion.
 

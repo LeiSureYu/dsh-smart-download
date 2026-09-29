@@ -239,6 +239,13 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 退出码是 **0**、摘要里写着 `OK`，落盘文件却只有 1MB（声明 4MB）；`curl` 在同一场景下同样是 exit 0。
 没有任何非零退出码可供判断，只有落盘后比对字节数才能发现。详见下节。
 
+**0.8.0 补的是「防护网自己漏了一个角」**：`/api/smartdl.status`（浏览器进度面板与 `download_status`
+共用的唯一 Host 端点）此前是全项目覆盖率最低的模块——函数覆盖实测只有 **6/16**，`ok` / `fail` /
+`envelopeResponse` / `readPayload` 与整个 handler 主体 `count=0`，一次都没被执行过。换句话说，
+这类「非法请求静默回落、业务异常不裸奔 500」的防护**写在代码里但从未被任何测试证明过**，
+属于最容易被后续重构悄悄改坏的部分。0.8.0 为它补了 21 例正向断言（覆盖率升到 **16/26**），
+每条跳过 / 回落路径都断言了它回落到的**具体值**，而不是「不抛错」。
+
 **契约**：本插件所有“返回默认值”的路径——
 
 | 环节                  | 静默失败形态        | 必须断言的正向信号                                  |
@@ -260,6 +267,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | `statusFrom`        | 只认文案 → 状态判错 | 记录带 `state` 时必须以 `state` 为准（`state: 'running'` + 文案「下载完成」仍是 running） |
 | `verifySize`        | 退出码 0 但字节数不对 → 当成成功 | 字节数一致必须返回 `ok`；**chunked 截断**（aria2/curl 均 exit 0）必须被判为失败；「探测长度未知」与「服务器返回压缩编码」必须**跳过**而非误判 |
 | `probeUrl` 的 `accept-encoding` | 默认带 `gzip, deflate` → 拿到压缩长度 | 服务器必须收到 `identity`，且必须取回**未压缩**长度（5000 而非 41） |
+| `registerStatusRpc` 的 handler | 非法请求 → 回默认值 / 静默放行 | 无 `connection` 时必须**恰好注册 0 条路由**；信封非法必须回 `rpcId='invalid-request'` 的 `ok:false`；非法 `limit` 必须回落到 `DEFAULT_STATUS_LIMIT`（10，而非 0 / `Infinity`）；业务异常必须仍是 200 + `ok:false`（不裸奔 500） |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 

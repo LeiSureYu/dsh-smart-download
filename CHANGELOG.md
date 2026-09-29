@@ -37,11 +37,16 @@
   `downloader` / `progress-parse` / `url` / `tool-schema`), taking the case count from 220 to
   **244**, all with positive assertions.
 
-- **`test/runprocess.test.ts` 里有一个 Linux / macOS 专属的信号用例**（断言子进程被 `SIGTERM`
-  终止后 `closeSignal` 正确上报），Windows 上跳过。本地 Windows 跑是 6 通过 / 1 跳过，CI 的 Ubuntu
-  job 会真跑。
-  **One signal case in `test/runprocess.test.ts` is Linux/macOS-only** (it asserts `closeSignal`
-  after a child is killed with `SIGTERM`) and is skipped on Windows; the Ubuntu CI job runs it for real.
+- **`test/runprocess.test.ts` 里有一个 Linux 专属的信号用例**（断言子进程被 `SIGKILL` 终止后
+  `closeSignal` 正确上报）——实测只在 Linux 复现：Windows 上 `child.kill` / `process.kill` /
+  `taskkill /F` / 子进程自杀四种杀法拿到的 `closeSignal` 恒为 null，所以非 Linux 一律跳过。
+  本地 Windows 跑是 6 通过 / 1 跳过，已在 WSL Ubuntu 上真跑验证（该用例通过），CI 的 Ubuntu job
+  也会真跑。
+  **One signal case in `test/runprocess.test.ts` is Linux-only** (it asserts `closeSignal` after a
+  child is killed with `SIGKILL`) — it is only reproducible on Linux; on Windows all four kill
+  methods (`child.kill` / `process.kill` / `taskkill /F` / self-kill) leave `closeSignal` as null, so
+  it is skipped elsewhere. Locally on Windows it is 6 pass / 1 skip, and it was verified to pass for
+  real under WSL Ubuntu (the Ubuntu CI job runs it too).
 
 ### 文档 / Docs
 

@@ -11,14 +11,17 @@
 
 > **给 DSH 装上一个内置 aria2 的下载器。** 一条命令装好，不用自己配环境：大文件自动多线程加速，服务器不支持就自动回退，中途断了还能续传。
 
-![web profile 下的实时进度面板](docs/progress-pill.png)
+![实时进度面板](docs/progress-pill.png)
 
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
+
+桌面版（DeepSeek Harness 0.2.0 起）装同一个包：用桌面版自带的 CLI，或侧边栏的 Plugins 页面。
+
 - **自动多线程加速** —— 下载前先探测目标服务器，支持多连接就调用内置 `aria2c` 并发下载，不支持则自动回退到系统 `curl`，两种情况都能下完。
 - **零配置** —— aria2 二进制随插件一起安装（npm `optionalDependencies`），无需自行下载或配置 PATH。
-- **进度看得见** —— `web` profile 下界面右下角有实时进度面板（文件名 / 百分比 / 速度 / 剩余时间），下载完成后自动消失。
+- **进度看得见** —— 带 Web 界面的 profile（`web` / 桌面版）右下角有实时进度面板（文件名 / 百分比 / 速度 / 剩余时间），下载完成后自动消失。
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
@@ -38,15 +41,25 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
 
-**支持的 profile**：`web`（上面的 `--profile web` 即为此插件验证过的 profile）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
+**支持的 profile**：`web` 与 `desktop`（0.2.0 起的桌面版）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
 
-> **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
+**桌面版请用桌面版自带的 CLI 安装**，不要用系统里另外装的 `dsh`（桌面版的 profile 由 Electron 应用独占管理）：
 
-> **1.0.0 是正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+```powershell
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @leisureyu/dsh-smart-dl
+```
+
+也可以在桌面版侧边栏的 Plugins 页面里添加。
+
+> **进度面板只在带 Web 界面的 profile 生效**（`web` 与桌面版的 `desktop`）。纯 CLI 等 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
+
+> **1.1.0 为 DSH 0.2.0 适配。** 0.2.0 起安装前会核对 `peerDependencies`：`0.4.0` 及更早版本声明的范围不含 `0.2.0`，装上后整个 bundle 会被跳过，插件完全不加载。如果你装的是 `0.4.0` 或更早，升级即可；`0.4.1` 起已覆盖 0.2.0。详见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
 >
-> **版本要求：请使用 `1.0.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+> **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
 >
-> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.0.0` 即可。
+> **版本要求：请使用 `1.1.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+>
+> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.1.0` 即可。
 
 ## 工作原理
 
@@ -204,16 +217,16 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 下载过程中通过 `ProgressReporter` **双轨**写入进度，任一轨道不可写都静默容错，不影响下载：
 
-- 轨道一（dsh-task-progress 格式）：`$DSH_PROGRESS_DIR/<taskId>.jsonl`，每行一条 JSON，append-only；未设置该环境变量时，缺省为 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（会话 ID 与工作目录来自 `exec.agent.session.header`）。**拿不到会话上下文时不写轨道一**——dsh-task-progress 的读取端按 session 过滤，写进错误的目录等于没写；
+- 轨道一（dsh-task-progress 格式）：`$DSH_PROGRESS_DIR/<taskId>.jsonl`，每行一条 JSON，append-only。**DSH 0.2.0 起官方不再内置这个读取端**，只有第三方插件 [`dsh-task-progress`](https://www.npmjs.com/package/dsh-task-progress) 会读；轨道二与内置面板不受影响。未设置该环境变量时，缺省为 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（会话 ID 与工作目录来自 `exec.agent.session.header`）。**拿不到会话上下文时不写轨道一**——dsh-task-progress 的读取端按 session 过滤，写进错误的目录等于没写；
 - 轨道二（本插件自有格式）：`$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`（`DSH_HOME` 缺省为 `~/.dsh`），整体覆盖写。
 
 每条记录都带 `state` 字段（`running` / `done` / `failed` / `cancelled`）：dsh-task-progress 的读取端只认 `state`，缺失时一律当作 `running`，因此 0.5.0 之前的进度记录即使 `pct=100`、`msg=下载完成`，面板也永远显示「下载中」。进度**按整条记录去重**（`pct + state + msg + spd + eta` 完全一致才跳过），任一项变化都会写入，因此面板能看到实时的速度与剩余时间；完成 / 失败 / 取消等终态因为 `state` 变化，必然穿透去重。aria2 解析 `--summary-interval=1` 的摘要行（含速度与 ETA），curl 解析 `--progress-bar` 的百分比。
 
 写盘自 `0.6.0` 起是**异步**的：`report()` 只把记录放进队列，由 microtask 批量写出并保序，下载主流程不再被同步 `appendFileSync` 阻塞；调用方在返回前会 `await reporter.awaitFlush()` 等待终态落盘，因此 `download_status` 与面板读到的必定是终态，而不是上一次的中间状态。
 
-## 界面进度面板（web profile）
+## 界面进度面板（web / desktop）
 
-在 `web` profile 下，插件会在界面右下角挂载一个**实时进度面板**：只要有下载在进行就自动出现，显示**输出文件名、百分比、传输速度与剩余时间**；下载完成后短暂显示「已完成」回执，然后自动消失。空闲时不占位、不显示。
+在带 Web 界面的 profile（`web`，以及桌面版的 `desktop`）下，插件会在界面右下角挂载一个**实时进度面板**：只要有下载在进行就自动出现，显示**输出文件名、百分比、传输速度与剩余时间**；下载完成后短暂显示「已完成」回执，然后自动消失。空闲时不占位、不显示。
 
 ![进度面板](docs/progress-pill.png)
 
@@ -224,7 +237,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - **只依赖 `react`**：客户端脚本以 classic script 形式通过 `window.__ModuleLoader__.load` 注册，不做打包。
 - **陈旧任务自动忽略**：超过 10 分钟没有更新的 `running` 任务不再计入面板，避免历史残留文件让面板永久卡住。
 
-> 该面板仅 `web` profile 提供；CLI 等 profile 下插件会静默跳过客户端注册，工具与下载功能不受影响。
+> 该面板仅在带 Web 界面的 profile 提供；CLI 等 profile 下插件会静默跳过客户端注册，工具与下载功能不受影响。
 
 ## 设计上的静默失败防护
 
@@ -376,6 +389,24 @@ macOS 为什么没做、需要补什么，见 [COMPATIBILITY.md](./docs/COMPATIB
 | `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明，DSH 每开一个新预发布分支都要同步追加） |
 | npm 包管理器 | npm / pnpm 均可；需支持 `optionalDependencies` 的 `os` / `cpu` 过滤 |
 
+### DSH 0.2.0 的安装前置检查
+
+0.2.0 起，DSH 在**安装前**就会核对插件声明的 `peerDependencies` 是否覆盖当前运行版本，不覆盖会直接拒绝安装；已经装上的也会在启动时**整个 bundle 被跳过**，日志里出现：
+
+```
+dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
+```
+
+跳过是整层跳过——`smart_download` / `download_status` 两个工具都不会注册。**`0.4.0` 及更早的版本会被拒**（0.4.0 给三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0`）；`0.4.1` 起已把范围补成 `>=0.2.0-rc.1 <0.3.0-0`，在 0.2.0 上正常加载。**升级到最新的 `1.1.0` 即可**。
+
+如果只是想临时放行某个旧版本，0.2.0 提供了按「包@版本 + 精确 dsh 版本」的豁免，需要显式接受风险：
+
+```bash
+dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 dsh 版本> --accept-risk
+```
+
+豁免记录在该 profile 的 `compatibility.json` 里，可以用 `dsh plugin version-exemptions` 查看、`revoke-version` 撤销。豁免的粒度是**精确版本**：换了 dsh 版本就不再生效。
+
 macOS 未列入支持平台：**不是兼容性问题，而是缺少对应的 aria2 二进制子包**。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
 
 ## 常见问题
@@ -420,7 +451,7 @@ A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**254 例用例（252 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.50%**。
+当前基线：**261 例用例（259 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.50%**。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)）。
 2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。

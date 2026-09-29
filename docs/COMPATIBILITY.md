@@ -48,6 +48,7 @@ macOS **能用但不会加速** —— 插件装得上、下得动，只是永�
 | Node.js | `>=22.0.0`（`engines.node`） | 用到 `AbortSignal.any` 与 `AbortSignal.timeout`，二者在 Node 22 才齐全。探测层与取消路径都依赖它们，低版本会直接抛错。 |
 | `@deepseek-ai/cordis` | peerDependency，可选 | 插件按 host 提供的 `Context`（`ctx.tools.register` / `ctx.inject`）工作。 |
 | `@deepseek-ai/dsh-tools` | peerDependency，可选 | 提供 `defineTool`。 |
+| DSH 运行时 | **0.1.7-rc.1 起验证；0.2.0 已适配（含桌面版）** | `peerDependencies` 已声明覆盖 `>=0.2.0-rc.1 <0.3.0-0`；0.2.0 起这份声明被真正强制，见下节。 |
 | `@deepseek-ai/dsh-client-connection` | peerDependency，可选 | 仅进度面板用；缺失时 `registerStatusRpc` 静默跳过。 |
 | `@deepseek-ai/dsh-client-locale` | peerDependency，可选 | 面板双语文案（zh / en）。 |
 | `@deepseek-ai/dsh-client-ui-slots` | peerDependency，可选 | 面板挂载到 `shell.overlay`。 |
@@ -71,8 +72,48 @@ DSH 系的包**只发布预发布版本**（`0.1.7-rc.1` 这种）。npm 的常�
 ```
 
 **这是需要维护的**：DSH 每开一个新的预发布分支（下一个是 `0.3.0-rc.*`），
-这份范围就要同步追加一段 `||`，否则用户的 harness 升到该分支后会遇到
-`npm error ERESOLVE`。改动点只有 `package.json` 的 `peerDependencies`。
+这份范围就要同步追加一段 `||`，否则用户的 harness 升到该分支后会被**拒绝**（见下节）。
+改动点只有 `package.json` 的 `peerDependencies`。
+
+#### 0.2.0 起：范围写错不再只是 ERESOLVE
+
+0.1.x 时代，范围解析不到预发布版只表现为包管理器报 `ERESOLVE`，用户加个 `--force` 或
+换 npm 还能装上、也能跑。**0.2.0 起这条路径被收紧**：DSH 自己在装配阶段核对每个插件的
+`peerDependencies`（只看 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 这几个名字），
+不覆盖当前运行版本时，普通插件行被标 `disabled`，而 **bundle 行会让整个 bundle 被跳过**，
+插件完全不会加载，日志只有一行 `dsh: skipping profile bundle ...`。
+
+安装时也一样：`dsh plugin add` 会**先检查再动包管理器**，不兼容直接拒绝，不下载任何东西。
+换句话说，`peerDependencies` 的范围从「装得上但可能有噪音」变成了「装不装得上」的开关。
+
+判定用的是 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`，
+运行时版本取自 dsh 自身（例如 `0.2.0-rc.2`），因此范围里**必须显式写预发布段**，
+`^0.2.0` 这种写法同样解析不到 `0.2.0-rc.2`。
+
+暂时放行某个旧版本可以用「精确版本豁免」：
+
+```bash
+dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 dsh 版本> --accept-risk
+dsh plugin --profile <profile> version-exemptions     # 查看
+dsh plugin --profile <profile> revoke-version <包@版本> --dsh-version <精确 dsh 版本>  # 撤销
+```
+
+豁免写在该 profile 的 `compatibility.json`，粒度是**精确的包版本 + 精确的 dsh 版本**，
+换任一版本都不再生效。
+
+**本插件已发布版本在 `0.2.0-rc.2` 上的实际判定**（用 0.2.0 自带的
+`evaluatePluginCompatibility` 逐个跑出来的，不是推断）：
+
+| 版本 | 判定 | 说明 |
+| --- | --- | --- |
+| `0.1.5` / `0.2.0` | ❌ 被拒 | `dsh-tools` 写的是 `^0.1.0`，解析不到任何预发布版 |
+| `0.2.1` ~ `0.3.0` | ✅ 通过 | 已经写成预发布元组 |
+| `0.4.0` | ❌ 被拒 | 三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0` |
+| `0.4.1` ~ `1.0.1` | ✅ 通过 | 三个 `dsh-client-*` peer 补上了 0.2.0 分支 |
+| `1.1.0` | ✅ 通过 | 当前版本 |
+
+因此 0.4.0 的用户升级后即可恢复；0.4.1 ~ 1.0.1 的用户在 0.2.0 上本来就能用，
+升级到 1.1.0 主要是拿到桌面版说明与这份兼容性文档。
 
 ### 包管理器要求
 
@@ -89,14 +130,19 @@ npm 与 pnpm 都可以，但**必须支持 `optionalDependencies` 的 `os` / `cp
 | profile | 工具可用 | 进度面板 | 说明 |
 | --- | --- | --- | --- |
 | `web` | ✅ | ✅ | 唯一验证过面板的 profile |
+| `desktop`（0.2.0 起） | ✅ | ✅ | 桌面版，同样带 Web 界面，与 `web` 同源 |
 | 其他 | ✅ | ❌ | 功能不受影响，用 `download_status` 查进度 |
 
-面板只在 `web` 注册，因为它依赖 connection 服务提供的 `/api` 载体
+面板只在带 Web 界面的 profile 注册，因为它依赖 connection 服务提供的 `/api` 载体
 （`ctx.inject(['connection'], ...)`）。纯 CLI profile 下没有这个服务，
 `registerStatusRpc` 静默跳过，**不会**让插件加载失败。
 
 安装命令形如 `dsh plugin --profile web add @leisureyu/dsh-smart-dl`，
 把 `web` 换成你实际使用的 profile 名称即可。
+
+> **桌面版（`desktop` profile）必须用桌面版自带的 CLI 安装**（`<安装目录>/resources/runtime/cli/bin/dsh.cmd`），
+> 或侧边栏的 Plugins 页面：这个 profile 由 Electron 应用独占管理，外部 CLI 会被拒绝。
+> 本插件在 `desktop` 上的工具注册与 `web` 完全一致（`platform: 'web'` 沿用，客户端清单不需要改）。
 
 ## 二进制子包版本
 

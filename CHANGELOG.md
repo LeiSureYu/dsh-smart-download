@@ -11,6 +11,70 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-29
+
+适配 DSH 0.2.0（含桌面版）。**生产代码零改动**：0.2.0 的 `dsh-tools` 与 0.1.7-rc.2 逐字节相同，
+用 0.2.0-rc.2 自带的 `dsh-tools` 直接加载 `dist` 也验证过工具注册与 RPC 路由注册。
+
+0.2.0 新增了一道 0.1.x 没有的**安装前置检查**（按 `peerDependencies` 判定）。实测已发布版本在
+0.2.0-rc.2 上的判定结果：`0.4.1` ~ `1.0.1` **通过**，`0.4.0` 及更早**被拒**（0.4.0 给三个
+`dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0`）。所以这一版不是「修好被拒」，而是
+**补齐清单声明、把兼容范围锁进测试、并把 0.2.0 的新行为写进文档**。
+
+### 新增 / Added
+
+- **`dsh.manifestVersion: 1`**：按 0.2.0 的清单规范显式声明。
+  0.2.0 的安装器与加载器目前不强制这个字段，声明是为了先按规范对齐。
+  **Declared `dsh.manifestVersion: 1`** as the 0.2.0 manifest spec prescribes.
+
+- **`engines.dsh`**：`>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`。
+  纯声明字段：0.2.0 的前置检查**不读**它（只读 `peerDependencies`），`dsh-package-manifest` 的
+  README 也写明当前安装器与加载器都不强制它。
+  **Added a declaration-only `engines.dsh`**; 0.2.0's pre-install check reads `peerDependencies`
+  only, and the manifest spec states neither installers nor loaders enforce `engines.dsh`.
+
+- **`test/compat-manifest.test.ts`**（7 例）：把清单与 `peerDependencies` 的兼容范围锁进测试，
+  自带极简 semver 比较器，不引入新依赖。断言 `0.2.0-rc.2` 被每个 `@deepseek-ai/dsh*` peer 放行、
+  `0.3.0-rc.1` 被明确排除、`client.platform` 仍为 `web` 且 `client.external` 不存在。
+  用例数 254 → **261**。
+  **Added `test/compat-manifest.test.ts`** (7 cases) locking down the manifest and the peer ranges,
+  with a minimal built-in semver comparator and no new dependencies. Case count 254 → **261**.
+
+### 文档 / Docs
+
+- **README（中英双语）新增「DSH 0.2.0 的安装前置检查」一节**：0.2.0 在安装前核对 `peerDependencies`，
+  不覆盖就拒绝安装；已装上的会在启动时**整个 bundle 被跳过**（`dsh: skipping profile bundle`），
+  两个工具都不注册。**被拒的是 `0.4.0` 及更早**（0.4.0 给三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0`），
+  `0.4.1` 起已覆盖 0.2.0。文档同时写清 `0.4.1` ~ `1.0.1` 在 0.2.0 上的实际判定结果。
+  同时给出按「包@版本 + 精确 dsh 版本」的豁免命令（`allow-version` / `version-exemptions` /
+  `revoke-version`，记录在该 profile 的 `compatibility.json`）。版本要求同步改为 `1.1.0` 以上。
+  **READMEs describe 0.2.0's pre-install peer check**, the all-or-nothing bundle skip, the fix
+  (upgrade to 1.1.0), and the exact-version exemption commands.
+
+- **README（中英双语）补 `desktop` profile**：桌面版自带 CLI 的完整安装命令（0.2.0 的 `desktop`
+  profile 由 Electron 应用独占管理，外部 CLI 会被拒绝），以及「进度面板只在带 Web 界面的 profile
+  生效」（客户端清单的 `platform: 'web'` 在桌面版同样适用，无需改）。
+  **Added `desktop` profile notes** to both READMEs: the bundled-CLI install command and the fact
+  that `platform: 'web'` covers the desktop app too.
+
+- **README（中英双语）如实标注进度轨道一**：DSH 0.2.0 起官方不再内置 `dsh-task-progress` 格式的读取端，
+  只有第三方 `dsh-task-progress` 会读；轨道二与内置面板不受影响。
+  **Both READMEs now state plainly** that 0.2.0 ships no reader for the track-1 format.
+
+- **COMPATIBILITY.md**：平台/版本表补 0.2.0 行与 `desktop` profile 行；新增「0.2.0 起范围写错不再只是
+  ERESOLVE」小节，写明判定用的是
+  `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`、所以范围必须显式写预发布段。
+  另补安装命令与豁免机制的准确形状。
+  **COMPATIBILITY.md** gains the 0.2.0 rows, the exemption mechanics, and the reason the range must
+  spell out prerelease segments.
+
+- **TROUBLESHOOTING.md**：新增「0.2.0 上插件被整层跳过」的排查条目（症状 → 原因 → 处理）。
+  **TROUBLESHOOTING.md** gains the "bundle skipped on 0.2.0" entry.
+
+- **`src/index.ts` 顶部注释**：把「基于 DSH 0.1.0-rc.5」的过时假设改为「0.1.7-rc.1 起验证、
+  0.2.0-rc.2（含桌面版）兼容」。注释更正，无行为变化。
+  **Fixed a stale header comment** in `src/index.ts` (no behaviour change).
+
 ## [1.0.1] - 2026-09-29
 
 文档修正版。1.0.0 的代码与测试没有变化，改动只有英文 README 的一处。

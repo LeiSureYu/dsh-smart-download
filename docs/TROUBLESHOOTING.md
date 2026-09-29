@@ -2,13 +2,51 @@
 
 按症状查。每条都给出「怎么确认」与「怎么处理」，尽量给出能自己验证的命令。
 
+## 升级到 0.2.0 后插件整层消失（skipping profile bundle）
+
+**症状**：升级 DSH 到 0.2.0（含桌面版）后，`smart_download` / `download_status` 两个工具都不在了，
+面板也没有。启动日志里有一行：
+
+```
+dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin
+@leisureyu/dsh-smart-dl@0.4.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {...}
+```
+
+**原因**：0.2.0 新增了安装前置检查 —— 插件声明的 `peerDependencies` 必须覆盖当前 DSH 运行版本，
+否则**整个 bundle 被跳过**（不是单个插件行被禁用）。**`0.4.0` 及更早**给三个 `dsh-client-*` peer
+写的是 `>=0.1.7-rc.1 <0.2.0-0`，因此在 0.2.0 上会被跳过；`0.4.1` ~ `1.0.1` 已经覆盖 0.2.0，不会。
+跳过是整层的，所以两个工具都不会注册。
+
+**处理**：升到最新的 **1.1.0**（`0.4.1` 起就能在 0.2.0 上跑，升到最新即可）：
+
+```bash
+# 桌面版用桌面版自带的 CLI
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @leisureyu/dsh-smart-dl@1.1.0
+# 普通 web profile
+dsh plugin --profile web add @leisureyu/dsh-smart-dl@1.1.0
+```
+
+**只想临时放行旧版本**（不推荐，需要显式接受风险；粒度是精确的包版本 + 精确的 dsh 版本）：
+
+```bash
+dsh plugin --profile <profile> allow-version @leisureyu/dsh-smart-dl@0.4.0 --dsh-version 0.2.0-rc.2 --accept-risk
+dsh plugin --profile <profile> version-exemptions   # 查看
+```
+
+豁免写在 `<DSH_HOME>/profiles/<profile>/compatibility.json`；DSH 升级后豁免失效，要重新授予。
+桌面版也可以在侧边栏 Plugins 页面里点授权。
+
+**怎么确认是这个问题而不是别的问题**：装完之后跑一次
+`dsh --profile <profile> --dump-config`，输出里应该能找到 `- id: dsh-smart-dl`。
+找不到就还是被跳过了，日志开头会有那条 `skipping profile bundle`。
+
 ## 面板不显示 / 显示成「下载中」卡住
 
 `web` profile 面板的数据源是 `/api/smartdl.status`，它读的是与 `download_status` 同一份
 进度文件。面板不显示时按顺序排除：
 
-1. **profile 不对**。面板只在 `web` profile 注册；其他 profile 下插件功能照常，只是没有界面。
-   用 `download_status` 工具验证进度有没有写进去。
+1. **profile 不对**。面板只在带 Web 界面的 profile 注册（`web` 与桌面版的 `desktop`）；
+   其他 profile 下插件功能照常，只是没有界面。用 `download_status` 工具验证进度有没有写进去。
 2. **拿不到会话上下文**。轨道一写在 `<session.cwd>/.dsh-progress/<session.id>/`，读取端按
    session 过滤。拿不到 session 时插件**不写**轨道一（写进一个没人读的目录等于没写），
    此时只有轨道二可查。检查 `<cwd>/.dsh-progress/` 下是否出现了以会话 ID 命名的目录。

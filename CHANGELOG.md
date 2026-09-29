@@ -11,6 +11,22 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-29
+
+文档修正版。1.0.0 的代码与测试没有变化，改动只有英文 README 的一处。
+
+### 修复 / Fixed
+
+- **README.en.md 里残留了一整段 0.7.0 的旧正文**：改写「版本要求」段时替换只覆盖了前半句，
+  `0.7.0` 那一整段（约 3.3 KB，含「to pin explicitly, use `@leisureyu/dsh-smart-dl@0.6.0`」
+  这句已经过期的建议）被原样粘在新句子后面，成了英文 README 里最长的一行。中文 README 与
+  CHANGELOG 不受影响。
+  为什么单独发 1.0.1 而不是重打 tag：npm 上的 1.0.0 已经带着这段文本，而 registry 不允许
+  复用已发布的版本号。GitHub 上的 v1.0.0 tag 与 Release 保持不动。
+  **README.en.md carried a stale 0.7.0 paragraph** (≈3.3 KB, including an outdated
+  `pin ...@0.6.0` suggestion). The Chinese README and the CHANGELOG were unaffected. Shipped as
+  a patch instead of re-tagging because the registry never lets a published version be reused.
+
 ## [1.0.0] - 2026-09-29
 
 首个正式版。0.9.0 到 1.0.0 之间做了一次完整的代码审查，结果整理在
@@ -562,7 +578,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/LeiSureYu/dsh-smart-download/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...v0.8.0

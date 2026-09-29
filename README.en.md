@@ -22,7 +22,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
-Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.6.0` or newer.
+Supports **Windows x64 / arm64** and **Linux x64 / arm64**. Use `0.7.0` or newer.
 
 `dsh-smart-dl` registers two tools with DSH:
 
@@ -41,7 +41,7 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 > **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
-> **Use `0.6.0` or newer.** `0.6.0` fixes two silent corruptions in resume: ① resuming was unconditional whenever the server advertised Range support, but both `curl -C -` and `aria2 -c` only look at the local file length — measured: when the remote shrinks, or keeps the same length with different content, **both exit 0 with the wrong bytes on disk**. Resume now compares the remote length and `ETag` / `Last-Modified` first and re-downloads from scratch when the partial file cannot be proven to come from the same resource. ② when the target already existed, aria2 neither truncated nor overwrote it; it saved the new content as `f.1.bin` while the plugin still returned `path` pointing at the stale `f.bin`. aria2 now always gets `--allow-overwrite=true`. `0.5.0` fixes three silent failures in the progress tracks: ① track-1 records carried no `state` field, and dsh-task-progress only looks at `state`, so the panel showed "downloading" forever even at `pct=100`; ② with no session context the progress was written into a `default` directory nobody reads; ③ `DSH_HOME` was ignored, so progress landed in a stale home. Progress is now written per session into `<session.cwd>/.dsh-progress/<session.id>/`, track 1 is skipped entirely without a session, and a `cancelled` state was added. `0.4.2` fixes three reproduced defects: ① when the size cannot be probed the result used to carry `size: undefined`, which the host rejects as non-lossless JSON with `ToolOutputError` (the download had in fact succeeded); ② URL path traversal (`..%2F..%2F..%2Fescaped.txt`) could write outside the working directory; ③ there was no protocol allow-list, so `file://` was accepted by `curl` and copied a local file. `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the full history in [CHANGELOG.md](./CHANGELOG.md). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.6.0`.
+> **Use `0.7.0` or newer.** `0.7.0` adds **post-download integrity verification**: an exit code of 0 only means the tool thinks it finished. Measured with the bundled aria2, when the server streams chunked and closes after 1MB, aria2 exits **0** and prints `OK` while only 1MB lands (4MB declared); curl exits 0 too. The plugin now compares bytes on disk against the declared remote length and reports an error on mismatch. It also lowers the large-file concurrency threshold from 50MB to 8MB (a measured 8MB file is nearly twice as fast with 8 connections as with 4). `0.6.0` fixes two silent corruptions in resume: ① resuming was unconditional whenever the server advertised Range support, but both `curl -C -` and `aria2 -c` only look at the local file length — measured: when the remote shrinks, or keeps the same length with different content, **both exit 0 with the wrong bytes on disk**. Resume now compares the remote length and `ETag` / `Last-Modified` first and re-downloads from scratch when the partial file cannot be proven to come from the same resource. ② when the target already existed, aria2 neither truncated nor overwrote it; it saved the new content as `f.1.bin` while the plugin still returned `path` pointing at the stale `f.bin`. aria2 now always gets `--allow-overwrite=true`. `0.5.0` fixes three silent failures in the progress tracks: ① track-1 records carried no `state` field, and dsh-task-progress only looks at `state`, so the panel showed "downloading" forever even at `pct=100`; ② with no session context the progress was written into a `default` directory nobody reads; ③ `DSH_HOME` was ignored, so progress landed in a stale home. Progress is now written per session into `<session.cwd>/.dsh-progress/<session.id>/`, track 1 is skipped entirely without a session, and a `cancelled` state was added. `0.4.2` fixes three reproduced defects: ① when the size cannot be probed the result used to carry `size: undefined`, which the host rejects as non-lossless JSON with `ToolOutputError` (the download had in fact succeeded); ② URL path traversal (`..%2F..%2F..%2Fescaped.txt`) could write outside the working directory; ③ there was no protocol allow-list, so `file://` was accepted by `curl` and copied a local file. `0.4.1` corrects the `peerDependencies` ranges: `@deepseek-ai/cordis` was pinned as `^4.0.0` and the three `@deepseek-ai/dsh-client-*` peers as `>=0.1.7-rc.1 <0.2.0-0`. Those ranges silently exclude prereleases, so once the harness moved to `0.2.0-rc.1` (the `next` tag) — or cordis to `4.0.1-rc.x` — installing produced `npm error ERESOLVE`. They are now explicit `||` ranges that carry a prerelease tag on the matching tuple. `0.4.0` adds the **live progress panel** for the `web` profile and fixes two issues: the panel showing the task ID instead of the file name, and stale tasks pinning the panel on screen forever. Since `0.2.0` the plugin supports **Windows arm64** and **Linux x64 / arm64** (before that, Windows x64 only). The earlier `0.1.1` / `0.1.3` / `0.1.4` releases had defects in the DSH plugin manifest or the tool schema that caused either a rejected install (`Cannot validate installed package ... dsh.bundle.patch`) or a failed activation (`did not activate` in the startup log). See the full history in [CHANGELOG.md](./CHANGELOG.md). See the version badge above for the current release; to pin explicitly, use `@leisureyu/dsh-smart-dl@0.6.0`.
 >
 > `0.2.1` also fixes a hard install failure: the previous `peerDependencies` range (`^0.1.0` on `@deepseek-ai/dsh-tools`) resolved to **no published version at all**, because dsh-tools only ever ships prereleases. Installing it produced `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`.
 
@@ -71,8 +71,8 @@ call smart_download(url, output?, mirror?)
         ▼
 [3] decide() picks a tier by file size and aria2 availability:
      · no Range support / probe failed / size unknown / <1MB -> curl
-     · 1MB ~ 50MB  -> aria2 with 4 connections
-     · ≥ 50MB      -> aria2 with 8 connections (conservative cap, not 16)
+     · 1MB ~ 8MB   -> aria2 with 4 connections
+     · ≥ 8MB       -> aria2 with 8 connections (conservative cap, not 16)
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 tier                     ▼ curl tier
@@ -84,16 +84,23 @@ call smart_download(url, output?, mirror?)
  (resume: -c)      (resume: -C - when Range is supported)
    │ on failure
    ▼
- degrade to curl single-threaded
-        │
-        ▼
- return { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
+  degrade to curl single-threaded
+         │
+         ▼
+[5] integrity check: bytes on disk vs declared remote length
+        │ match             │ mismatch
+        ▼                   ▼
+   clear .part.json     throw, keep marker
+   return success
+
+  return { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
 ```
 
 Key points:
 
 - **Any probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
-- The connection count is chosen dynamically by file size (thresholds 1MB / 50MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing".
+- The connection count is chosen dynamically by file size (thresholds 1MB / 8MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing". The thresholds are measured, not guessed — see "The concurrency thresholds are measured" below.
+- **The downloaded size is verified after every download.** An exit code of 0 from `curl` / `aria2` only means "the tool thinks it finished", not that the byte count is right. Short reads, over-reads, and mirrors returning a 200 error page all exit 0; only comparing bytes on disk catches them (see "Guarding against silent failures").
 - `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
 - **Only `http` / `https` are accepted.** A URL can come from any page the model happens to read, so it is untrusted input: other protocols (`file:`, `ftp:`, …) are rejected before any probe or download starts.
 - **The derived output filename is sanitised.** When `output` is omitted the filename is derived from the URL, and the result is always a **single path segment** — `/`, `\`, `..` in the URI-decoded value are discarded, so nothing can be written outside the working directory.
@@ -227,6 +234,8 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 
 0.5.0 caught three more of the same kind: **track 1 missing `state`** (the panel shows "downloading" forever), **writing progress into a directory nobody reads when there is no session**, and **`DSH_HOME` not taking effect, so progress landed in a stale home**. 0.6.0 caught the most dangerous kind: **silent resume corruption** (`curl -C -` / `aria2 -c` exit 0 with wrong bytes when the remote shrank or changed) and **aria2 writing the new content to `f.1.bin` while the returned `path` still points at the stale file**. Both report success with a wrong artifact — only a positive assertion like "are the bytes on disk actually the remote's bytes" can find them. None of them throw and all tests were green — only a positive assertion like "does the panel / status query actually report the right state", or "is the file actually the remote one", can find them.
 
+**0.7.0 caught "the tool reports success but the byte count is wrong"**: when the server uses chunked encoding and closes cleanly after 1MB, the bundled aria2 1.37.0 exits with code **0** and prints `OK` in its Download Results, yet only 1MB landed on disk (4MB was declared). `curl` exits 0 in the same scenario. No non-zero exit code exists to detect it; only comparing bytes on disk after the download finds it. See the next section.
+
 **Contract**: every path in this plugin that "returns a default value" —
 
 | Stage                | Silent failure form       | Positive signal that must be asserted                  |
@@ -246,12 +255,42 @@ None of these are logic errors — they are **wrong assumptions about how an ext
 | `resolveTaskProgressDir` | no session → writes to a directory nobody reads | must return `null` (i.e. skip track 1) when neither `DSH_PROGRESS_DIR` nor a session is present, and `<cwd>/.dsh-progress/<id>` when a session is present |
 | `resolveDshHome`     | ignores `DSH_HOME` → writes to a stale home | `DSH_HOME` must take effect; empty / whitespace-only must fall back to `~/.dsh` |
 | `statusFrom`         | message-only inference → wrong status | when a record carries `state`, it must win (`state: 'running'` plus the message "下载完成" is still running) |
+| `verifySize`         | exit code 0 with wrong byte count → treated as success | matching bytes must return `ok`; a **chunked truncation** (both aria2 and curl exit 0) must be reported as a failure; "declared length unknown" and "server returned a compressed encoding" must be **skipped**, not misreported |
+| `probeUrl` `accept-encoding` | default `gzip, deflate` → compressed length | the server must receive `identity`, and the probe must return the **uncompressed** length (5000, not 41) |
 
 Every assertion is **positive**: it checks "did it actually produce output", not "did it avoid crashing". Real samples live in `test/fixtures/` (curl fixtures are `.bin` files preserving `\r`), and "the fixture must contain `\r`" is itself a forced assertion.
 
 > If you ever find a default-returning path that is not covered by a positive signal assertion, **that is a bug, not a design**. Relaxing a positive assertion back to "as long as it does not throw" reopens the silent-failure door.
 
 In addition, `test/meta-test-discovery.test.ts` enumerates every test file under `test/` and asserts that the `test` script (glob) actually covers them — so even "is CI really running these tests" is itself verified, preventing the guard rails from silently rotting inside CI.
+
+## The concurrency thresholds are measured, not guessed
+
+Before `0.7.0`, the 1MB / 50MB thresholds were guesses. Measurement changed one of them and confirmed two previously unknown traps.
+
+**Controlled experiment**: a local server throttles **per connection** to 2MB/s (modelling the real-world case where a single connection is throttled but multiple connections add up). Arguments come from the plugin's real `buildAria2Args`; each combination runs 3 rounds and the median is reported:
+
+| File size | curl (1 conn) | x=2 | x=4 | x=8 | x=16 |
+| --- | --- | --- | --- | --- | --- |
+| 2MB | 1.74 | **3.26** | 3.18 | 3.16 | 3.11 |
+| 8MB | 1.65 | 3.25 | 6.26 | **11.99** | 12.23 |
+| 32MB | 1.67 | 3.08 | 6.22 | 12.21 | **23.15** |
+| 64MB | 1.62 | 3.29 | 6.63 | 12.88 | **24.42** |
+
+(MB/s. A public-network control was not usable: on npmmirror a single connection already saturates the local bandwidth, with 10.6–26.9 MB/s variance; the aliyun mirror returns 403 to aria2's user agent.)
+
+Three conclusions:
+
+1. **Concurrency genuinely helps, and the gain is close to linear** — above 8MB, 2 connections ≈ 2× and 4 connections ≈ 4×.
+2. **The effective connection count is capped by file size**: a 2MB file tops out at x=2 (3.26), and raising it to 4/8/16 slightly *lowers* throughput to 3.1x, because once the number of splits and connections exceeds what the file can carry only connection overhead remains.
+3. Therefore **`LARGE_FILE` was lowered from 50MB to 8MB**: the whole 8–50MB band had been stuck on 4 connections, while a measured 8MB file runs at 11.99 MB/s with x=8 versus 6.26 MB/s with x=4 — nearly double.
+
+The 8-connection cap stays: at 32/64MB, x=16 really is twice as fast again (23–24 MB/s), but it is deliberately not adopted to avoid tripping per-IP concurrency limits on servers.
+
+### Two traps that would have disabled concurrency entirely
+
+- **aria2's `-x/-s` are silently defeated by `min-split-size`.** aria2 defaults to `--min-split-size=20M`; for files under 20MB it does **not split at all** — measured with an 8MB file, it issued a single GET without a Range header, making `-x 16 -s 16` a no-op with single-connection throughput. This plugin passes `-k 1M` and avoids it by luck. Deleting `-k 1M` silently degrades every tier above to a single connection with no error at all, so that line carries a warning comment in the source. Separately, `--min-split-size=512K` makes aria2 fail outright with exit code 28, so 1M is the value verified as safe.
+- **The probe must force `accept-encoding: identity`.** Node's `fetch` sends `gzip, deflate` by default, while curl and aria2 do not. A 5000-byte body is reported as 41 bytes under default probing; without the fix, the size verification added in 0.7.0 would produce **false positives on 100% of gzip-capable servers**, flagging correct downloads as corrupt.
 
 ## Supported platforms
 

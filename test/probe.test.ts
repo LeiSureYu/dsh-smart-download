@@ -264,3 +264,118 @@ test('外部 AbortSignal 已取消 -> 不支持', async () => {
   const r = await probeUrl(`${base}/supported`, controller.signal)
   assert.equal(r.supportsMultiThread, false)
 })
+
+/* ------------------------------ Accept-Encoding（0.7.0 实测） ------------------------------ */
+
+/** 真实 body 5000 字节；gzip 后声明 41 字节（模拟内容压缩后的长度） */
+const RAW_SIZE = 5000
+const GZIP_SIZE = 41
+
+/**
+ * 断言服务器看到的 accept-encoding **语义上**是 identity。
+ * 不能直接比字符串：实测 Node 24 的 undici 在带 Range 的请求里会发出
+ * `identity, identity`（把默认值和显式值拼在一起），这在 RFC 语义上仍等于
+ * 未压缩，但字符串不等于 'identity'。
+ */
+function assertIdentityEncoding(seen: string[], label: string): void {
+  assert.ok(seen.length > 0, `${label}: 应发出请求`)
+  for (const v of seen) {
+    const tokens = v
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t !== '')
+    assert.ok(tokens.length > 0, `${label}: accept-encoding 不应为空`)
+    for (const t of tokens) {
+      assert.equal(t, 'identity', `${label}: accept-encoding 应只含 identity，实际 ${v}`)
+    }
+  }
+}
+
+test('探测强制 accept-encoding: identity，拿到的是未压缩长度（否则大小校验会 100% 误报）', async () => {
+  const seen: string[] = []
+  const s = await startHandler((req, res) => {
+    seen.push(String(req.headers['accept-encoding'] ?? ''))
+    // 模拟一个会按 Accept-Encoding 压缩的服务器
+    const ae = String(req.headers['accept-encoding'] ?? '')
+    const compresses = /gzip|deflate|br/.test(ae)
+    if (compresses) {
+      res.writeHead(200, {
+        'accept-ranges': 'bytes',
+        'content-length': String(GZIP_SIZE),
+        'content-encoding': 'gzip',
+      })
+    } else {
+      res.writeHead(200, {
+        'accept-ranges': 'bytes',
+        'content-length': String(RAW_SIZE),
+      })
+    }
+    res.end()
+  })
+  try {
+    const r = await probeUrl(`${s.base}/file.bin`)
+    // 正向断言 1：服务器确实收到了 identity
+    assertIdentityEncoding(seen, 'HEAD 探测')
+    // 正向断言 2：因此拿到的是未压缩长度（若仍是 41，说明 identity 没生效）
+    assert.equal(r.contentLength, RAW_SIZE, '应拿到未压缩长度 5000 而非 gzip 长度 41')
+    // 正向断言 3：本次响应的编码是 identity，大小校验可以放心比对
+    assert.equal(r.contentEncoding, undefined, '未压缩响应不应带 contentEncoding')
+  } finally {
+    await s.close()
+  }
+})
+
+test('HEAD 405 时的 Range GET 同样强制 identity', async () => {
+  const seen: string[] = []
+  const s = await startHandler((req, res) => {
+    const ae = String(req.headers['accept-encoding'] ?? '')
+    const compresses = /gzip|deflate|br/.test(ae)
+    if (req.method === 'HEAD') {
+      res.writeHead(405, { allow: 'GET' })
+      res.end()
+      return
+    }
+    seen.push(ae)
+    if (compresses) {
+      res.writeHead(206, {
+        'content-range': `bytes 0-0/${GZIP_SIZE}`,
+        'accept-ranges': 'bytes',
+        'content-length': '1',
+        'content-encoding': 'gzip',
+      })
+    } else {
+      res.writeHead(206, {
+        'content-range': `bytes 0-0/${RAW_SIZE}`,
+        'accept-ranges': 'bytes',
+        'content-length': '1',
+      })
+    }
+    res.end('x')
+  })
+  try {
+    const r = await probeUrl(`${s.base}/file.bin`)
+    assertIdentityEncoding(seen, 'Range GET 探测')
+    assert.equal(r.contentLength, RAW_SIZE, 'Range GET 也应拿到未压缩总长度')
+  } finally {
+    await s.close()
+  }
+})
+
+test('服务器无视 identity 仍返回 gzip -> contentEncoding 被捕获，供校验跳过', async () => {
+  const s = await startHandler((_req, res) => {
+    res.writeHead(200, {
+      'accept-ranges': 'bytes',
+      'content-length': String(GZIP_SIZE),
+      'content-encoding': 'gzip',
+    })
+    res.end()
+  })
+  try {
+    const r = await probeUrl(`${s.base}/file.bin`)
+    // 正向断言：这类不合规服务器会被标记出来，verifySize 据此跳过而不是误判
+    assert.equal(r.contentEncoding, 'gzip')
+    assert.equal(r.contentLength, GZIP_SIZE)
+  } finally {
+    await s.close()
+  }
+})

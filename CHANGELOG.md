@@ -11,6 +11,56 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-29
+
+### 新增 / Added
+
+- **下载完成后校验落盘字节数**：`curl` / `aria2` 的退出码 0 只代表「它自己认为完成了」，不代表字节数对。
+  用随包 aria2 1.37.0 与 curl 8.13.0 实测坐实的静默损坏：服务器用 chunked 只发 1MB 就干净断开时，
+  aria2 退出码 **0**、摘要里写着 `OK`，落盘却只有 1MB（声明 4MB）；`curl` 同样 exit 0。
+  现在三个成功出口（aria2 成功 / aria2→curl 回退成功 / curl 成功）都会比对
+  「落盘字节数 vs 远端声明长度」，不一致就抛错，并且**不**清除 `.part.json` 旁车指纹。
+  **Verifying the downloaded size after every download**: an exit code of 0 only means the tool thinks
+  it finished, not that the byte count is right. Measured with the bundled aria2 1.37.0 and curl 8.13.0:
+  when the server streams chunked and closes cleanly after 1MB, aria2 exits **0** and prints `OK` while
+  only 1MB lands (4MB declared); curl exits 0 too. All three success paths now compare bytes on disk
+  against the declared remote length, throw on mismatch, and keep the `.part.json` marker.
+
+### 修复 / Fixed
+
+- **探测必须强制 `accept-encoding: identity`**：Node 的 `fetch` 默认带 `gzip, deflate`，
+  而 curl / aria2 默认不带 —— 5000 字节的 body 在默认探测下会报 41 字节。若不修，
+  上面新增的大小校验会对**任何支持 gzip 的服务器 100% 误报**，把正确的下载判成损坏
+  （这正是本项目最忌讳的「新增一个静默失败去修另一个静默失败」）。
+  同时捕获 `content-encoding` 供校验层判定：服务器无视 `identity` 仍返回压缩编码时**跳过**校验。
+  **The probe must force `accept-encoding: identity`**: Node's `fetch` sends `gzip, deflate` by default
+  while curl / aria2 do not — a 5000-byte body is reported as 41 bytes under default probing. Without
+  the fix, the new size verification would produce false positives on 100% of gzip-capable servers.
+  `content-encoding` is now captured so the check is **skipped** when a server ignores `identity`.
+
+### 性能 / Performance
+
+- **大文件阈值从 50MB 下调到 8MB**：受控实测（每连接限速 2MB/s、3 轮取中位数、参数取自真实
+  `buildAria2Args`）显示 8MB 文件 x=4 为 6.26 MB/s、x=8 为 11.99 MB/s（差近一倍），
+  32MB 同理（6.22 → 12.21）。8~50MB 这一整段此前被压在 4 连接上，白白损失一半速度。
+  维持 8 连接上限：32/64MB 下 x=16 确实还能再快一倍（23~24 MB/s），但保守起见不引入，
+  避免触发服务器按 IP 限并发。
+  **`LARGE_FILE` lowered from 50MB to 8MB**: controlled measurements (per-connection throttle at
+  2MB/s, median of 3 rounds, real `buildAria2Args`) show an 8MB file at 6.26 MB/s with x=4 versus
+  11.99 MB/s with x=8 — nearly double. The whole 8–50MB band had been stuck on 4 connections.
+  The 8-connection cap stays: x=16 is another ~2× at 32/64MB but is deliberately not adopted to avoid
+  tripping per-IP concurrency limits.
+
+### 文档 / Docs
+
+- 新增「并发阈值是实测的，不是猜的」章节（中英双语），记录受控实验数据与两个易踩的坑：
+  aria2 的 `-x/-s` 会被默认 `min-split-size=20M` 悄悄废掉（本插件已传 `-k 1M` 避开，
+  删掉会让所有档位静默退化成单连接）；以及探测的 Accept-Encoding 陷阱。
+  Added a bilingual "concurrency thresholds are measured, not guessed" section with the experiment
+  data and two traps: aria2's `-x/-s` being silently defeated by the default `min-split-size=20M`
+  (this plugin passes `-k 1M`; removing it degrades every tier to a single connection silently), and
+  the probe's Accept-Encoding trap.
+
 ## [0.6.0] - 2026-09-29
 
 ### 修复 / Fixed
@@ -299,7 +349,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.1...v0.4.2

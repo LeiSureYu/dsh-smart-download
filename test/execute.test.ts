@@ -26,6 +26,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { apply } from '../src/index.js'
+import { getAria2Path } from '../src/downloader.js'
 import type { SmartDownloadResult } from '../src/types.js'
 
 /**
@@ -429,5 +430,179 @@ test('续传安全：中断后保留 .part.json 指纹', async () => {
     await assert.rejects(() => pending, /取消|abort/i)
     // 失败时刻意保留指纹：下次续传时才有得比
     assert.equal(existsSync(`${out}.part.json`), true, '中断后应保留旁车指纹')
+  })
+})
+
+/* ---------------- 0.7.0：落盘完整性校验（静默损坏回归） ---------------- */
+
+/**
+ * 服务器谎报 Content-Length 少发字节：curl 会 exit 0（实测），
+ * 而落盘文件是坏的。必须被判为失败，绝不能返回 success。
+ */
+test('完整性校验：服务器少发字节 -> 抛错，不返回 success', async () => {
+  const DECLARED = 4096
+  const ACTUAL = 1024
+  await withServer((req, res) => {
+    if (req.method === 'HEAD') {
+      // 探测阶段如实声明 4096
+      res.writeHead(200, { 'content-length': String(DECLARED), 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    // 真正下载时改用 chunked（不声明 content-length）并只发 1024 字节。
+    // 这是**只有字节数校验能识破**的场景：带 Content-Length 时 curl 会自己
+    // 报 exit 18（实测），但 chunked 响应被中途截断时 curl 退出码是 0 ——
+    // 真实的静默损坏，正是 0.7.0 要堵的那一类。
+    res.writeHead(200, { 'accept-ranges': 'bytes' })
+    res.end(Buffer.alloc(ACTUAL, 0x49))
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'short.bin')
+    let err: unknown
+    try {
+      await run({ url: `${base}/short.bin`, output: out })
+    } catch (e) {
+      err = e
+    }
+    // 先确认前置条件成立：curl 自己没报错（否则这条用例没测到校验层）
+    const message = err instanceof Error ? err.message : String(err)
+    assert.match(
+      message,
+      /完整性校验失败/,
+      `chunked 截断时 curl 退出码应为 0，必须由校验层拦下；实际错误: ${message}`,
+    )
+    // 正向断言：坏文件留在原地，便于排查；且旁车保留（失败不清）
+    assert.equal(readFileSync(out).length, ACTUAL)
+    assert.equal(existsSync(`${out}.part.json`), true, '校验失败时应保留旁车指纹')
+  })
+})
+
+/**
+ * 服务器多发字节（声明 1024 实际 2048）：同样应被判为失败。
+ * 这类场景出现在续传起点算错、或镜像把两段内容拼在一起时。
+ */
+test('完整性校验：服务器多发字节 -> 抛错', async () => {
+  const DECLARED = 1024
+  const ACTUAL = 2048
+  await withServer((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': String(DECLARED), 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    // 声明 1024，但 body 写 2048 后立刻销毁 socket：模拟「发了不该发的字节」
+    res.writeHead(200, { 'content-length': String(DECLARED), 'accept-ranges': 'bytes' })
+    res.write(Buffer.alloc(ACTUAL, 0x4a))
+    res.socket?.destroy()
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'long.bin')
+    await assert.rejects(
+      () => run({ url: `${base}/long.bin`, output: out }),
+      /完整性校验失败|curl|失败/i,
+    )
+  })
+})
+
+/**
+ * 正向用例：字节数对得上时必须照常成功 —— 校验不能变成「永远失败」。
+ */
+test('完整性校验：字节数一致 -> 正常成功并清掉旁车', async () => {
+  const body = Buffer.alloc(3000, 0x4b)
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'exact.bin')
+    const result = await run({ url: `${base}/exact.bin`, output: out })
+    assert.equal(result.success, true)
+    assert.equal(result.size, body.length)
+    assert.equal(readFileSync(out).length, body.length)
+    assert.equal(existsSync(`${out}.part.json`), false, '成功后应清掉旁车')
+  })
+})
+
+/**
+ * 服务器无视 identity 直接返回 gzip：探测长度（压缩后）与落盘字节数
+ * 本就不可比，此时必须**跳过**校验而不是误判（0.7.0 实测的误报陷阱）。
+ */
+test('完整性校验：服务器无视 identity 返回 gzip -> 跳过校验，正常成功', async () => {
+  const body = Buffer.alloc(3000, 0x4c)
+  const COMPRESSED_LEN = 41
+  await withServer((req, res) => {
+    if (req.method === 'HEAD') {
+      // 无视客户端的 accept-encoding: identity，依然声明压缩后的长度
+      res.writeHead(200, {
+        'content-length': String(COMPRESSED_LEN),
+        'content-encoding': 'gzip',
+        'accept-ranges': 'bytes',
+      })
+      res.end()
+      return
+    }
+    // GET 用 chunked（不声明长度），把未压缩的 3000 字节全发过去 ——
+    // 等价于 curl / aria2 实际拿到的未压缩字节流。
+    res.writeHead(200, { 'content-encoding': 'gzip', 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'gz-lie.bin')
+    const result = await run({ url: `${base}/gz-lie.bin`, output: out })
+    // 关键断言：期望值 41 ≠ 落盘 3000，若没跳过校验就会误报失败
+    assert.equal(result.success, true, '压缩编码不可比时应跳过校验而不是误报')
+    assert.equal(readFileSync(out).length, body.length, '未压缩的 3000 字节应完整落盘')
+  })
+})
+
+/**
+ * aria2 路径的同一类静默失败（0.7.0 实测坐实）：
+ * 服务器用 chunked 只发 1MB 就干净地关掉连接，而 HEAD 声明 4MB 时，
+ * 随包 aria2 1.37.0 的退出码是 **0**、「Download Results」里写着 `OK`，
+ * 落盘文件却只有 1MB。没有任何非零退出码可供判断 —— 只有字节数校验能拦下。
+ *
+ * 本机没装 aria2 子包时这条用例会跳过（决策走 curl），这是可接受的：
+ * 校验逻辑本身已由前面的 curl 用例与 verify.test.ts 覆盖。
+ */
+test('完整性校验：aria2 被 chunked 截断 -> 退出码 0 但必须判为失败', async (t) => {
+  const aria2Available = (() => {
+    try {
+      return getAria2Path() !== null
+    } catch {
+      return false
+    }
+  })()
+  if (!aria2Available) {
+    t.skip('本机无 aria2 子包，跳过 aria2 专属校验用例')
+    return
+  }
+
+  const DECLARED = 4 * 1024 * 1024 // > 1MB 阈值，确保决策走 aria2
+  const ACTUAL = 1024 * 1024
+  await withServer((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': String(DECLARED), 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    // chunked 且不声明长度：aria2 无从判断「还剩多少」，截断后判定为 OK
+    res.writeHead(200, { 'accept-ranges': 'bytes' })
+    res.end(Buffer.alloc(ACTUAL, 0x4d))
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'aria2-trunc.bin')
+    let err: unknown
+    try {
+      await run({ url: `${base}/aria2-trunc.bin`, output: out })
+    } catch (e) {
+      err = e
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    assert.match(
+      message,
+      /完整性校验失败/,
+      `aria2 在这类截断下退出码为 0，必须由校验层拦下；实际: ${message}`,
+    )
+    // 正向断言：确实只落盘了 1MB（证实这条用例真的构造出了静默损坏）
+    assert.equal(readFileSync(out).length, ACTUAL)
   })
 })

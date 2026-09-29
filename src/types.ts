@@ -60,6 +60,13 @@ export interface ProbeResult {
    * 服务器不发 ETag 时的次优内容指纹，比仅比对长度可靠得多。
    */
   lastModified?: string
+  /**
+   * `Content-Encoding` 响应头原始值（小写后）。
+   * 0.7.0 起用于大小校验的“可信度判定”：探测已强制 `accept-encoding: identity`，
+   * 但仍有服务器无视该请求头返回 gzip/br。此时 `contentLength` 是压缩后长度，
+   * 与 curl/aria2 实际落盘的未压缩字节数不可比 —— 校验必须跳过而不是误判。
+   */
+  contentEncoding?: string
 }
 
 /** 探测可选项 */

@@ -93,6 +93,15 @@ export function getAria2Path(): string | null {
  * 了，但调用方拿到的 `output` 路径指向的仍是那个旧文件 —— 一次静默的路径错位。
  * 加上该开关后实测落盘正确覆盖为 1000 字节。
  * 注意它与 `-c` 并不冲突：`-c` 只在能续传时生效，不能续传时该开关接管覆盖语义。
+ *
+ * ⚠️ 为什么 `-k 1M` 绝对不能删（0.7.0 实测）：
+ * aria2 默认 `min-split-size=20M`。文件小于 20MB 时它**完全不分片** ——
+ * 实测 8MB 文件在默认参数下只发出 1 个不带 Range 的 GET，`-x 16 -s 16`
+ * 形同虚设，吞吐和单连接一样。带上 `-k 1M` 后同一文件立刻分成 8 片，
+ * 吞吐从 1.61 MB/s 涨到 11.99 MB/s。删掉这一行会让 `decideConcurrency()`
+ * 的所有档位**静默退化成单连接**，且没有任何报错。
+ * 另外实测 `--min-split-size=512K` 会让 aria2 以退出码 28 直接失败，
+ * 说明该值有下限，1M 是当前验证过的安全取值。
  */
 export function buildAria2Args(
   url: string,
@@ -105,7 +114,8 @@ export function buildAria2Args(
   const args: string[] = [
     '-x', String(concurrency), // 单服务器最大连接数
     '-s', String(concurrency), // 同时使用的连接数
-    '-k', '1M', // 最小分片大小
+    // 最小分片大小：决定并发上限，删掉会让 -x/-s 失效，详见函数上方注释
+    '-k', '1M',
     // 断点续传：仅在确认安全时开启（见 src/resume.ts）
     ...(resume ? ['-c'] : []),
     '--allow-overwrite=true', // 不能续传时覆盖旧文件，而不是另存 f.1.bin

@@ -24,7 +24,8 @@ import { applyMirror } from './mirror.js'
 import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
 import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, readDownloadStatus } from './status.js'
-import { clearMarker, planResume, writeMarker } from './resume.js'
+import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js'
+import { describeMismatch, verifySize } from './verify.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import type {
   DownloadStatusArgs,
@@ -121,6 +122,22 @@ export function apply(ctx: Context): void {
         const sizeField =
           probe.contentLength === undefined ? {} : { size: probe.contentLength }
 
+        // 完整性校验：下载工具退出码 0 只代表「它认为完成了」，不代表字节数对
+        // （服务器提前断开、镜像返回 200 的错误页、磁盘写满…都不会有非零退出码）。
+        // 校验失败一律抛错，并且**不**清除旁车指纹 —— 保留它，下次才有得比。
+        const assertIntegrity = async (): Promise<void> => {
+          const outcome = verifySize(
+            localFileSize(outputPath),
+            probe.contentLength,
+            probe.contentEncoding,
+          )
+          if (outcome.kind === 'ok') return
+          const message = describeMismatch(outcome)
+          reporter.fail(message)
+          await reporter.awaitFlush()
+          throw new Error(message)
+        }
+
         // 是否启用断点续传（0.6.0 起前置一层安全校验）。
         // 仅凭「服务器支持 Range」就续传是不够的：curl -C - 与 aria2 -c 都只看
         // 本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是退出码
@@ -157,6 +174,7 @@ export function apply(ctx: Context): void {
             // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
             // 否则 download_status / 轨道一读取方会看到上一次的中间状态。
             await reporter.awaitFlush()
+            await assertIntegrity()
             clearMarker(outputPath)
             return {
               ...base,
@@ -181,6 +199,7 @@ export function apply(ctx: Context): void {
               )
               reporter.done('下载完成（curl 回退）')
               await reporter.awaitFlush()
+              await assertIntegrity()
               clearMarker(outputPath)
               return {
                 ...base,
@@ -211,6 +230,7 @@ export function apply(ctx: Context): void {
           )
           reporter.done()
           await reporter.awaitFlush()
+          await assertIntegrity()
           clearMarker(outputPath)
           return {
             ...base,

@@ -21,6 +21,14 @@ requirements that are **not negotiable**.
 CI（`.github/workflows/publish.yml` 的 `check` job）在 PR 上会跑 `pnpm check` → build → test，
 红了不合并。
 
+## 发版文案
+
+GitHub Release 的正文**只列改了什么**：一条一行，写清改了什么、影响是什么。不要写为什么改、
+不要写排查过程、不要写实测数据，也不要加开场白、总结句或小标题。三五行能说清就不要写十行。
+详细背景留在 CHANGELOG 与 `docs/REVIEW-*.md`，Release 只当变更清单用。
+
+## 硬性要求
+
 ## 硬性要求
 
 ### 1. 禁止静默失败
@@ -90,6 +98,8 @@ LF 存储，检出后保持 LF 即可；不要用会改写行尾的编辑器设�
 
 **English summary.** Branch from `main` as `feat/*`, `fix/*` or `docs/*`; keep commit messages
 in Chinese in the form `fix(verify): ...`; open a PR and make sure the `check` CI job is green.
+Release bodies are a plain list of what changed — no rationale, no investigation notes, no
+measurements, no preamble or headings; keep the background in the CHANGELOG.
 Non-negotiables: every fallback/skip/default path needs a positive assertion on the concrete
 value it falls back to (no "it did not throw" tests); coverage numbers come only from
 `node --test --experimental-test-coverage`; do not ship an unverified aria2 binary for a

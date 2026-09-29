@@ -20,14 +20,20 @@ function probe(overrides: Partial<ProbeResult>): ProbeResult {
 
 /* ------------------------------ decideConcurrency ------------------------------ */
 
-test('decideConcurrency: < 50MB -> 4', () => {
+test('decideConcurrency: < 8MB -> 4（0.7.0 实测：2MB 文件 x=2 就到顶，再高反而略降）', () => {
   assert.equal(decideConcurrency(2 * MB), 4)
-  assert.equal(decideConcurrency(49 * MB), 4)
+  assert.equal(decideConcurrency(7 * MB), 4)
 })
 
-test('decideConcurrency: >= 50MB -> 8', () => {
+test('decideConcurrency: >= 8MB -> 8（0.7.0 实测：8MB 下 x=8 比 x=4 快近一倍）', () => {
   assert.equal(decideConcurrency(LARGE_FILE), 8)
+  assert.equal(decideConcurrency(49 * MB), 8)
   assert.equal(decideConcurrency(200 * MB), 8)
+})
+
+test('LARGE_FILE 阈值已从 50MB 下调为 8MB（0.7.0 实测依据）', () => {
+  // 正向断言：钉住实测结论，防止有人无意改回 50MB 让 8~50MB 掉回 4 连接
+  assert.equal(LARGE_FILE, 8 * 1024 * 1024)
 })
 
 /* ------------------------------ decide: 回退分支 ------------------------------ */
@@ -87,12 +93,20 @@ test('decide: env 只给一个字段时，另一个仍取真实环境', () => {
 
 /* ------------------------------ decide: aria2 分支 ------------------------------ */
 
-test('decide: 1MB~50MB + aria2 可用 -> aria2 4 连接', () => {
-  const d = decide(probe({ contentLength: 10 * MB }), true)
+test('decide: 1MB~8MB + aria2 可用 -> aria2 4 连接', () => {
+  const d = decide(probe({ contentLength: 2 * MB }), true)
   assert.equal(d.method, 'aria2')
   assert.equal(d.concurrency, 4)
   assert.equal(d.fellback, false)
   assert.match(d.reason, /4 连接/)
+})
+
+test('decide: 8MB~50MB + aria2 可用 -> aria2 8 连接（0.7.0 修正：此前被压在 4）', () => {
+  const d = decide(probe({ contentLength: 10 * MB }), true)
+  assert.equal(d.method, 'aria2')
+  assert.equal(d.concurrency, 8)
+  assert.equal(d.fellback, false)
+  assert.match(d.reason, /8 连接/)
 })
 
 test('decide: >= 50MB + aria2 可用 -> aria2 8 连接', () => {
@@ -109,7 +123,7 @@ test('decide: 刚好等于 1MB 阈值 -> aria2 4 连接（边界）', () => {
   assert.equal(d.concurrency, 4)
 })
 
-test('decide: 刚好等于 50MB 阈值 -> aria2 8 连接（边界）', () => {
+test('decide: 刚好等于 8MB 阈值 -> aria2 8 连接（边界）', () => {
   const d = decide(probe({ contentLength: LARGE_FILE }), true)
   assert.equal(d.method, 'aria2')
   assert.equal(d.concurrency, 8)

@@ -22,7 +22,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.6.0` 或更新版本。
+支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**；请使用 `0.7.0` 或更新版本。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
@@ -41,7 +41,7 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 > **进度面板只在 `web` profile 生效。** 其他 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
-> **版本要求：请使用 `0.6.0` 或更高。** `0.6.0` 修了续传的两个静默损坏：① 只要服务器支持 Range 就无条件续传，而 `curl -C -` 与 `aria2 -c` 都只看本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是**退出码 0 但文件是错的**；现在续传前先比对远端长度与 ETag / Last-Modified，无法证实同源就删掉半包重下。② 目标文件已存在时 aria2 既不截断也不覆盖，而是另存为 `f.1.bin`，插件返回的 `path` 却仍指向旧内容的 `f.bin`；现在统一带 `--allow-overwrite=true`。`0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.6.0`。
+> **版本要求：请使用 `0.7.0` 或更高。** `0.7.0` 新增了**落盘完整性校验**：`curl` / `aria2` 退出码 0 只代表它自己认为完成了，实测服务器用 chunked 只发 1MB 就断开时，随包 aria2 是**退出码 0、摘要显示 `OK`、落盘却只有 1MB**（声明 4MB），`curl` 同样 exit 0；现在会比对落盘字节数与远端声明长度，不一致就报错。同时把大文件并发阈值从 50MB 下调到 8MB（实测 8MB 文件 8 连接比 4 连接快近一倍）。`0.6.0` 修了续传的两个静默损坏：① 只要服务器支持 Range 就无条件续传，而 `curl -C -` 与 `aria2 -c` 都只看本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是**退出码 0 但文件是错的**；现在续传前先比对远端长度与 ETag / Last-Modified，无法证实同源就删掉半包重下。② 目标文件已存在时 aria2 既不截断也不覆盖，而是另存为 `f.1.bin`，插件返回的 `path` 却仍指向旧内容的 `f.bin`；现在统一带 `--allow-overwrite=true`。`0.5.0` 修了进度轨道的三个静默失败：① 轨道一记录缺少 `state` 字段，而 dsh-task-progress 只认 `state`，导致面板永远显示「下载中」（即使 `pct=100`）；② 没有会话上下文时把进度写进没人读的 `default` 目录；③ 未读取 `DSH_HOME`，把进度写进陈旧的 home。现在进度会按会话写入 `<session.cwd>/.dsh-progress/<session.id>/`，无会话则不写轨道一，并新增 `cancelled` 状态。`0.4.2` 修了三个实测缺陷：① 探测不到文件大小时返回 `size: undefined`，会被宿主判为非法 JSON 并抛 `ToolOutputError`（下载其实已成功）；② URL 路径穿越（`..%2F..%2F..%2Fescaped.txt`）会把文件写到工作目录之外；③ 缺少协议白名单，`file://` 会被 `curl` 接受并复制本地文件。`0.4.1` 修正了 `peerDependencies` 的版本范围：此前 `@deepseek-ai/cordis` 写作 `^4.0.0`、三个 `@deepseek-ai/dsh-client-*` 写作 `>=0.1.7-rc.1 <0.2.0-0`，当 harness 走到 `0.2.0-rc.1`（`next` 标签）或 cordis 用到 `4.0.1-rc.x` 时，这些范围会静默排除该预发布版本并导致 `npm error ERESOLVE`；现已改成带显式预发布分支的 `||` 范围。`0.4.0` 新增 `web` profile 的**实时进度面板**，并修复了面板显示任务 ID 而非文件名、以及陈旧任务永久卡住面板的问题。`0.2.0` 起支持 **Windows arm64** 与 **Linux x64 / arm64**（此前仅 Windows x64）；更早的 `0.1.1` / `0.1.3` / `0.1.4` 在 DSH 插件清单或工具 schema 上存在缺陷，会导致两种失败：安装被拒（`Cannot validate installed package ... dsh.bundle.patch`），或装上了但激活失败（启动日志出现 `did not activate`）。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。当前发布版本见顶部版本徽章；如需固定，可写 `@leisureyu/dsh-smart-dl@0.6.0`。
 >
 > `0.2.1` 另修复了一个**必然安装失败**的问题：此前 `peerDependencies` 中 `@deepseek-ai/dsh-tools` 写作 `^0.1.0`，而该包从未发布过 0.1.x 正式版（实际可用版本均为预发布版），导致该范围解析不到任何版本，安装时报 `npm error notarget No matching version found for @deepseek-ai/dsh-tools@^0.1.0`。
 
@@ -67,29 +67,38 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
         ▼
 [2] decide() 按文件大小与 aria2 可用性分档：
      · 不支持 Range / 探测失败 / 无法获取大小 / <1MB  -> curl
-     · 1MB ~ 50MB  -> aria2 4 连接
-     · ≥ 50MB       -> aria2 8 连接（保守上限，不开 16）
+     · 1MB ~ 8MB   -> aria2 4 连接
+     · ≥ 8MB        -> aria2 8 连接（保守上限，不开 16）
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 档                       ▼ curl 档
 [3a] 能定位到随包 aria2c？         [3b] curl 单线程（含进度条）
    │ 是              │ 否
    ▼                 ▼
- aria2 4/8 连接     curl 单线程（回退）
- （每秒摘要进度）
- （-c 续传）        （支持 Range 时 -C - 续传）
-   │ 失败
-   ▼
- 降级为 curl 单线程（回退）
-        │
-        ▼
- 返回结果 { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
+  aria2 4/8 连接     curl 单线程（回退）
+  （每秒摘要进度）
+  （-c 续传）        （支持 Range 时 -C - 续传）
+    │ 失败
+    ▼
+  降级为 curl 单线程（回退）
+         │
+         ▼
+[4] 完整性校验：落盘字节数 vs 远端声明长度
+        │ 一致            │ 不一致
+        ▼                 ▼
+   清除 .part.json    抛错，保留旁车
+   返回 success
+
+  返回结果 { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
 ```
 
 要点：
 
 - **任何探测异常**（超时、网络错误、无法获取文件大小）都会被安全地判定为“不支持多线程”，从而走 curl 回退，不会让下载直接失败。
-- 并发数随文件大小动态选择（阈值 1MB / 50MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
+- 并发数随文件大小动态选择（阈值 1MB / 8MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
+  阈值是 0.7.0 实测定下的，不是拍脑袋（见下方「并发阈值是实测的，不是猜的」）。
+- **下载完成后会校验落盘字节数**：`curl` / `aria2` 的退出码 0 只代表“它自己认为完成了”，不代表字节数对。
+  少发、多发、镜像返回 200 的错误页等场景都不会有非零退出码，只有校验能拦下（详见「设计上的静默失败防护」）。
 - 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像。
 - **只允许 `http` / `https`**：URL 来自模型读到的任意页面，属于不可信输入。其他协议（`file:`、`ftp:` 等）在下载开始前直接被拒绝，不会进入探测或下载流程。
 - **输出文件名会被净化**：未传 `output` 时按 URL 推导文件名，推导结果只取**单个路径段**——URI 解码后的 `/`、`\`、`..` 等一律丢弃，因此不会写到工作目录之外。
@@ -226,6 +235,10 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 0.5.0 又抓到同一类的三个：**轨道一缺 `state`**（面板永远显示「下载中」）、**无会话时把进度写进没人读的目录**、**`DSH_HOME` 未生效导致写进陈旧的 home**。0.6.0 抓到的是最危险的一类：**续传静默损坏**（`curl -C -` / `aria2 -c` 在远端变小或内容变更时退出码 0 但文件是错的）与 **aria2 覆盖时把新内容写进 `f.1.bin` 而返回的 `path` 指向旧文件**——两者都是「报告成功、产物错误」，只有「落盘内容是否等于远端内容」这种正向断言才能发现。它们同样不抛错、测试也曾经全绿——只有「面板/查询是否真的显示了正确状态」「文件是否真的是远端那份」这种正向断言才能发现。
 
+**0.7.0 抓到的是「工具报告成功、但字节数不对」**：随包 aria2 1.37.0 在服务器用 chunked 只发 1MB 就干净断开时，
+退出码是 **0**、摘要里写着 `OK`，落盘文件却只有 1MB（声明 4MB）；`curl` 在同一场景下同样是 exit 0。
+没有任何非零退出码可供判断，只有落盘后比对字节数才能发现。详见下节。
+
 **契约**：本插件所有“返回默认值”的路径——
 
 | 环节                  | 静默失败形态        | 必须断言的正向信号                                  |
@@ -245,12 +258,53 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | `resolveTaskProgressDir` | 无会话 → 写进没人读的目录 | 无 `DSH_PROGRESS_DIR` 且无会话时必须返回 `null`（即不写轨道一），有会话时必须是 `<cwd>/.dsh-progress/<id>` |
 | `resolveDshHome`    | 不读 `DSH_HOME` → 写进陈旧 home | `DSH_HOME` 必须生效，空 / 纯空白必须回落 `~/.dsh` |
 | `statusFrom`        | 只认文案 → 状态判错 | 记录带 `state` 时必须以 `state` 为准（`state: 'running'` + 文案「下载完成」仍是 running） |
+| `verifySize`        | 退出码 0 但字节数不对 → 当成成功 | 字节数一致必须返回 `ok`；**chunked 截断**（aria2/curl 均 exit 0）必须被判为失败；「探测长度未知」与「服务器返回压缩编码」必须**跳过**而非误判 |
+| `probeUrl` 的 `accept-encoding` | 默认带 `gzip, deflate` → 拿到压缩长度 | 服务器必须收到 `identity`，且必须取回**未压缩**长度（5000 而非 41） |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
 > 如果未来发现某条返回默认值的路径没有被正向信号断言覆盖，**那是一个 bug，不是设计**。把正向断言改回“只要不报错就行”，等于重新打开静默失败的后门。
 
 此外，`test/meta-test-discovery.test.ts` 会枚举 `test/` 下所有测试文件，并断言 `test` 脚本（glob）确实覆盖它们——连“CI 是否真的跑了这些测试”这一层本身也被强制验证，防止防护措施自己在 CI 里静默失效。
+
+## 并发阈值是实测的，不是猜的
+
+`0.7.0` 之前，1MB / 50MB 两个阈值是拍脑袋定的。实测后改了其中一个，并坐实了两个此前不知道的坑。
+
+**受控实验**：本地服务器按**每连接**限速 2MB/s（模拟“单连接被限速、多连接能叠加”的真实场景），
+参数取自插件真实的 `buildAria2Args`，每种组合跑 3 轮取中位数：
+
+| 文件大小 | curl（1 连接） | x=2 | x=4 | x=8 | x=16 |
+| --- | --- | --- | --- | --- | --- |
+| 2MB | 1.74 | **3.26** | 3.18 | 3.16 | 3.11 |
+| 8MB | 1.65 | 3.25 | 6.26 | **11.99** | 12.23 |
+| 32MB | 1.67 | 3.08 | 6.22 | 12.21 | **23.15** |
+| 64MB | 1.62 | 3.29 | 6.63 | 12.88 | **24.42** |
+
+（单位 MB/s。公网对照实验不可用：npmmirror 上单连接已打满本地带宽，方差 10.6~26.9 MB/s；
+aliyun 镜像对 aria2 的 UA 直接返回 403。）
+
+由此得到三条结论：
+
+1. **并发确实有用，且收益接近线性** —— 8MB 以上，2 连接 ≈ 2×、4 连接 ≈ 4×。
+2. **有效并发数被文件大小封顶**：2MB 文件在 x=2 就到顶（3.26），开到 4/8/16 反而略降到 3.1x，
+   因为分片数与连接数超过文件能承载的量之后只剩建连开销。
+3. 因此 **`LARGE_FILE` 阈值从 50MB 下调到 8MB**：8~50MB 这一整段长年被压在 4 连接上，
+   实测 8MB 文件 x=8（11.99）比 x=4（6.26）快将近一倍。
+
+维持 8 连接上限不动：32/64MB 下 x=16 确实还能再快一倍（23~24 MB/s），
+但出于“避免触发服务器按 IP 限并发”的保守考虑不引入。
+
+### 两个差点让并发全部失效的坑
+
+- **aria2 的 `-x/-s` 会被 `min-split-size` 悄悄废掉**。aria2 默认 `--min-split-size=20M`，
+  文件小于 20MB 时它**完全不分片**——实测 8MB 文件在默认参数下只发出 1 个不带 Range 的 GET，
+  `-x 16 -s 16` 形同虚设，吞吐与单连接相同。本插件已传 `-k 1M` 侥幸避开。
+  删掉 `-k 1M` 会让上面所有档位静默退化成单连接且不报任何错，因此这一行在源码里带了一份警告注释。
+  另外实测 `--min-split-size=512K` 会让 aria2 以退出码 28 直接失败，故 1M 是当前验证过的安全取值。
+- **探测必须强制 `accept-encoding: identity`**。Node 的 `fetch` 默认带 `gzip, deflate`，
+  而 curl / aria2 默认不带。5000 字节的 body 在默认探测下会报 41 字节；若不修，
+  0.7.0 新增的大小校验会对**任何支持 gzip 的服务器** 100% 误报，把正确的下载判成损坏。
 
 ## 支持平台
 

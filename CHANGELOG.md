@@ -11,6 +11,47 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-29
+
+### 新增 / Added
+
+- **补齐 Host 侧 RPC 端点（`src/rpc.ts`）的测试覆盖**：`/api/smartdl.status` 是浏览器进度面板与
+  `download_status` 工具共用的唯一 Host 端点，也是此前全项目覆盖率最低的模块（函数覆盖实测
+  **6/16**，`ok` / `fail` / `envelopeResponse` / `readPayload` 与整个 handler 主体 `count=0`，
+  一次都没被执行过）。新增 `test/rpc.test.ts`（21 例）后升至 **16/26**，上述函数全部 `count>0`。
+  覆盖的正是这个模块「静默失败」的三类高发路径，且**每条跳过 / 回落路径都断言了它回落到的具体值**：
+
+  | 路径 | 之前从未被验证的行为 | 新增的正向断言 |
+  | --- | --- | --- |
+  | 无 `connection` 服务（纯 CLI profile） | 静默跳过、不注册路由、不抛错 | 注入回调仍会执行但内部提前 return，且**恰好注册 0 条路由** |
+  | `__connection.fetch.register` 形状不对 | 同样是静默跳过（不是崩溃） | `null` / 缺 `register` / 非对象三种形状都注册 0 条路由 |
+  | 信封非法（`type` 不对 / `rpcId` 非字符串 / 空串 / `null`） | 一律 **200 + `ok:false`**（不是 HTTP 错误码，客户端易忽略） | `rpcId` 必须回退成固定哨兵 `'invalid-request'`，且 `error.code === 'internal'` |
+  | `readPayload` 的非法 `limit` | 静默回落到默认值 | `'abc'` / `null` / `{}` / `-1` / `0` / `NaN` / `Infinity` 七种非法值都必须回落到 `DEFAULT_STATUS_LIMIT`（10），用「造 3 条任务恰好全部返回」证明它没落成 0 或 `Infinity` |
+  | `limit > 50` / 小数 | 静默夹取 / 取整 | 造 60 条验证夹到 50；`limit=2.9` 必须返回 2 |
+  | `payload.session` 形状非法 | 静默丢弃（不拿非法值当路径） | `null` / 字符串 / 数字 / `{}` / `{id:1,cwd:2}` 都必须回落为 `undefined` 且调用仍成功 |
+  | handler 内的业务异常 | **不裸奔 500**，用 200 + `ok:false` 信封 | 把轨道目录指向一个「文件」逼业务层失败，断言仍是 200、带原样 `rpcId`、`result.ok` 是布尔值 |
+
+  另有三条正向契约用例：`content-type: application/json; charset=utf-8` 必须被接受（按 `;` 截断后
+  比较）、非 POST 必须 404、**非 JSON 的 `content-type` 必须 415**。最后一条端到端用例真的往轨道二
+  写一个 `DownloadTaskFile`（`progress: 0.42`），断言能读回 `pct === 42` —— 防止只返回「空壳任务」。
+  **Filled the test gap for the host-side RPC endpoint (`src/rpc.ts`)**: `/api/smartdl.status` is the
+  single host endpoint shared by the web progress panel and the `download_status` tool, and it was the
+  least-covered module in the project (measured function coverage **6/16**; `ok`, `fail`,
+  `envelopeResponse`, `readPayload` and the whole handler body all had `count=0`). The new
+  `test/rpc.test.ts` (21 cases) lifts it to **16/26**, with every one of those functions now `count>0`.
+  It covers precisely the three classes of "silent failure" this module is prone to, and **every skip /
+  fallback path asserts the concrete value it fell back to** (see the table above).
+
+### 文档 / Docs
+
+- README（中英双语）在「防护网」表格中补充 `rpc.ts` 一行，并在测试小节记录 0.8.0 的用例数
+  （**220 通过 / 0 失败**，0.7.0 为 199）。同时把 rpc.ts 与其余低覆盖模块（`resume.ts` 20/30、
+  `downloader.ts` 53/80、`progress.ts` 57/109）的现状如实记入，作为后续迭代的输入。
+  Added an `rpc.ts` row to the bilingual README guard-rail table, and recorded 0.8.0's test count
+  (**220 passing / 0 failing**, up from 199 on 0.7.0). The coverage status of `rpc.ts` and the other
+  low-coverage modules (`resume.ts` 20/30, `downloader.ts` 53/80, `progress.ts` 57/109) is recorded
+  as-is, as input for the next iteration.
+
 ## [0.7.0] - 2026-09-29
 
 ### 新增 / Added
@@ -349,7 +390,8 @@
   缺陷，会导致安装被拒（`Cannot validate installed package ... dsh.bundle.patch`）或激活失败
   （启动日志出现 `did not activate`）。
 
-[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LeiSureYu/dsh-smart-download/compare/v0.4.2...v0.5.0

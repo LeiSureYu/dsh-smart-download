@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-smart-dl",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Multi-threaded downloader plugin for DeepSeek Harness: bundles aria2, probes file size and picks aria2 multi-connection or curl fallback automatically (Windows x64/arm64, Linux x64/arm64)",
   "repository": {
     "type": "git",
@@ -33,6 +33,7 @@
     "LICENSE"
   ],
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -112,7 +113,8 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.0.0",
+    "dsh": ">=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

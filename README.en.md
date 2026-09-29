@@ -11,14 +11,17 @@
 
 > **A downloader with aria2 built in, for DSH.** One command to install, nothing else to set up: large files download over multiple connections, it falls back automatically when a server won't cooperate, and an interrupted download can be resumed.
 
-![Live progress panel on the web profile](docs/progress-pill.png)
+![Live progress panel](docs/progress-pill.png)
 
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
+
+The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: use the app's own CLI, or the **Plugins** page in the sidebar.
+
 - **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
 - **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
-- **Visible progress** — on the `web` profile a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
+- **Visible progress** — on profiles with the web UI (`web`, or the desktop app) a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 
@@ -39,15 +42,25 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 No further configuration is needed: the aria2 binaries are installed together with the plugin via npm `optionalDependencies`.
 
-**Supported profile**: `web` — the profile this plugin has been verified against (hence `--profile web` above). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
+**Supported profiles**: `web` and `desktop` (the desktop app from 0.2.0 on). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
 
-> **The progress panel is available on the `web` profile only.** On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
+**On the desktop app, install with the app's bundled CLI**, not with a separately installed `dsh` (the desktop profile is managed exclusively by the Electron application):
 
-> **1.0.0 is the stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
+```powershell
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @leisureyu/dsh-smart-dl
+```
+
+You can also add it from the **Plugins** page in the desktop sidebar.
+
+> **The progress panel is available on profiles that have the web UI** (`web`, and the desktop app's `desktop` profile). On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
+
+> **1.1.0 adapts the plugin to DSH 0.2.0.** From 0.2.0 on, DSH checks declared `peerDependencies` before installing: `0.4.0` and earlier declare a range that does not cover `0.2.0`, so an already-installed copy has its whole bundle skipped and the plugin never loads. If you are on `0.4.0` or older, upgrading is the fix; `0.4.1` and newer already cover 0.2.0 — see [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
 >
-> **Use `1.0.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md).
+> **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
 >
-> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.0.0`.
+> **Use `1.1.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md).
+>
+> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.1.0`.
 
 ## How it works
 
@@ -204,16 +217,16 @@ Constraints and trade-offs:
 
 Progress is written through `ProgressReporter` on **two tracks**; if either track is unwritable it fails silently without affecting the download:
 
-- Track 1 (dsh-task-progress format): `$DSH_PROGRESS_DIR/<taskId>.jsonl`, one JSON object per line, append-only. When that variable is unset the default is `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (the session id and working directory come from `exec.agent.session.header`). **With no session context, track 1 is not written at all** — the dsh-task-progress reader filters by session, so writing to the wrong directory is the same as not writing.
+- Track 1 (dsh-task-progress format): `$DSH_PROGRESS_DIR/<taskId>.jsonl`, one JSON object per line, append-only. **DSH 0.2.0 no longer ships a reader for it**; only the third-party [`dsh-task-progress`](https://www.npmjs.com/package/dsh-task-progress) plugin reads this format. Track 2 and the built-in panel are unaffected. When that variable is unset the default is `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (the session id and working directory come from `exec.agent.session.header`). **With no session context, track 1 is not written at all** — the dsh-task-progress reader filters by session, so writing to the wrong directory is the same as not writing.
 - Track 2 (this plugin's own format): `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json` (`DSH_HOME` defaults to `~/.dsh`), overwritten as a whole.
 
 Every record carries a `state` field (`running` / `done` / `failed` / `cancelled`): the dsh-task-progress reader only looks at `state` and treats a missing one as `running`, which is why pre-0.5.0 records with `pct=100` and `msg=下载完成` still showed "downloading" forever. Progress is **de-duplicated by the whole record** (`pct + state + msg + spd + eta` must all match to skip); any change is written, so the panel sees live speed and ETA, and terminal states (completed / failed / cancelled) always break through because `state` changed. aria2 output is parsed from the `--summary-interval=1` summary lines (including speed and ETA); curl is parsed from `--progress-bar` percentages.
 
 Since `0.6.0` writing is **asynchronous**: `report()` only enqueues a record and a microtask batch-writes it in order, so the download loop is no longer blocked by a synchronous `appendFileSync`. Callers `await reporter.awaitFlush()` before returning, so `download_status` and the panel always read a terminal state rather than the last intermediate one.
 
-## Progress panel in the UI (web profile)
+## Progress panel in the UI (web / desktop)
 
-On the `web` profile the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; when the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all.
+On profiles with the web UI (`web`, and the desktop app's `desktop`) the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; when the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all.
 
 ![progress panel](docs/progress-pill.png)
 
@@ -352,6 +365,24 @@ What it **does not** need: it does not read your DSH session contents, does not 
 | `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple — a new DSH prerelease branch means appending a clause) |
 | Package manager | npm or pnpm; must honour `os` / `cpu` filtering of `optionalDependencies` |
 
+### The DSH 0.2.0 pre-install compatibility check
+
+From 0.2.0 on, DSH checks an installed plugin's declared `peerDependencies` **before installation**: if they do not cover the running version, the install is refused. If the plugin is already installed, its **entire bundle is skipped** at startup and the log shows:
+
+```
+dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
+```
+
+The skip is all-or-nothing — neither `smart_download` nor `download_status` gets registered. **`0.4.0` and earlier are refused** (0.4.0 gave three `dsh-client-*` peers the range `>=0.1.7-rc.1 <0.2.0-0`); from `0.4.1` on the range covers `>=0.2.0-rc.1 <0.3.0-0` and loads fine on 0.2.0. **Upgrading to the latest `1.1.0` is the fix.**
+
+To let one specific old version through anyway, 0.2.0 offers a per-(package version, exact dsh version) exemption that requires accepting the risk explicitly:
+
+```bash
+dsh plugin --profile <profile> allow-version <package@version> --dsh-version <exact dsh version> --accept-risk
+```
+
+The exemption is recorded in that profile's `compatibility.json`; list it with `dsh plugin version-exemptions` and undo it with `revoke-version`. Exemptions are **exact-version** only: a different dsh version does not inherit them.
+
 macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage for it**. On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
 
 ## FAQ
@@ -396,7 +427,7 @@ A: No. Call `smart_download` again with the same `url` and `output`; against a s
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **254 cases (252 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
+Current baseline: **261 cases (259 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets, so the same code on CRLF reports different numbers and different uncovered line
 numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).

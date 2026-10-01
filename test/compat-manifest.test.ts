@@ -15,9 +15,9 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = dirname(here)
@@ -25,6 +25,7 @@ const root = dirname(here)
 interface Pkg {
   scripts?: Record<string, string>
   version: string
+  main?: string
   engines?: Record<string, string>
   dsh?: {
     manifestVersion?: number
@@ -183,12 +184,21 @@ test('compat: 客户端清单只用平台基线，不额外声明 external', () 
   ])
 })
 
-test('compat: 提供 prepare 脚本，使从 Git 仓库地址安装能产出 dist', () => {
-  // dist/ 不入库，git/tarball 安装是先抓取源码再本地构建：
-  // 没有 prepare 就永远不跑 tsc，main 指向的 dist/index.js 缺失，插件装完不启用。
+test('compat: 从 Git 仓库地址安装无需构建脚本，dist 已在仓库里', () => {
+  // DSH 0.2.0 自带 pnpm 11，git 依赖一旦有 prepare 就会被
+  // ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED 拒绝；而 allowBuilds 的 key 是
+  // `<name>@git+<url>#<commit-sha>`，用户无法预先填写，批准这条路走不通。
+  // 所以从仓库地址安装不能依赖 prepare，dist/ 必须提交进仓库。
   const scripts = pkg.scripts ?? {}
-  assert.equal(scripts.prepare, 'npm run build')
-  // 构建入口本身也要存在，否则 prepare 只是个空壳
+  assert.equal(scripts.prepare, undefined)
+  // 发布时仍然要构建，否则 tarball 里会是旧的 dist
+  assert.ok(typeof scripts.prepublishOnly === 'string')
+  assert.ok(scripts.prepublishOnly.includes('build'))
+  // 正向断言：main 指向的产物在仓库里真实存在，装完即可加载
+  const main = pkg.main
+  assert.ok(typeof main === 'string' && main.length > 0)
+  assert.ok(existsSync(resolve(root, main)), `main 指向的文件不存在：${main}`)
+  // 构建入口本身也要存在，否则重新构建无从谈起
   assert.ok(typeof scripts.build === 'string' && scripts.build.includes('tsc'))
 })
 

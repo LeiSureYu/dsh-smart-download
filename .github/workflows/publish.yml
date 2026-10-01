@@ -287,7 +287,7 @@ jobs:
               return 0
             fi
 
-            tgz=$(cd "$dir" && npm pack --silent --pack-destination "$PACK_DIR")
+            tgz=$(cd "$dir" && npm pack --silent --pack-destination "$PACK_DIR" | tail -n 1)
             echo "packed $dir -> $PACK_DIR/$tgz"
 
             # 先把清单读进变量，再用 here-string 匹配。
@@ -341,7 +341,7 @@ jobs:
             exit 0
           fi
 
-          tgz=$(npm pack --silent --pack-destination "$PACK_DIR")
+          tgz=$(npm pack --silent --pack-destination "$PACK_DIR" | tail -n 1)
           echo "packed main package -> $PACK_DIR/$tgz"
 
           token="${NPM_TOKEN:-}"

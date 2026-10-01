@@ -63,7 +63,7 @@ dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
 Requirements and caveats:
 
 - The URL must have the three-segment `https://<host>/<owner>/<repo>` shape (an optional `.git` suffix or `#<ref>` is fine). Proxy-mirror URLs with an embedded path prefix (e.g. `https://ghfast.top/https://github.com/owner/repo.git`) are **not accepted**.
-- A git / tarball install **fetches the source first and then builds locally after install**: it runs `prepare` → `tsc`, so it is slower than installing the npm package and needs a TypeScript toolchain on the machine (devDependencies are installed along with the source).
+- A git / tarball install **fetches the repository contents directly**: `dist/` is committed, so there is no local build, `prepare` does not run, and `allowBuilds` approval is irrelevant. The `files` field still applies to git installs, so source files not listed in it are not installed.
 - Compatibility (`peerDependencies`) is only evaluated after the fetch; on a mismatch the profile files are rolled back and no half-installed state is left behind.
 - Before installing, DSH probes **GitHub** with `git ls-remote` and fails after a 5-second timeout. If `github.com` is unreachable from your network, this check fails — install the npm package `@leisureyu/dsh-smart-dl` instead (recommended), or use the plugin marketplace.
 
@@ -426,8 +426,11 @@ A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-pr
 **Q: Do I have to restart an interrupted download?**
 A: No. Call `smart_download` again with the same `url` and `output`; against a server that supports Range it resumes from where it stopped.
 
+**Q: Installing from a repository URL fails with `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`?**
+A: This is pnpm 11 (bundled with DSH 0.2.0) blocking build scripts in git dependencies: any git dependency carrying `prepare` is rejected. Allowing it requires an `allowBuilds` entry in the profile's `pnpm-workspace.yaml`, but that key looks like `<name>@git+<url>#<commit-sha>` — it embeds a commit hash and cannot be written in advance, so "approve, then install" is a dead end. Since `1.1.2` this plugin commits `dist/` to the repository and drops `prepare`, so installing from a repository URL needs no build step. Upgrade to `1.1.2`; if it still fails, install the npm package `@leisureyu/dsh-smart-dl` instead.
+
 **Q: I installed from the GitHub repository URL but no tool showed up / the plugin is inactive?**
-A: First make sure the install actually succeeded: installing from source requires that git host to be reachable, and when `github.com` is unreachable the install fails at the 5-second probe (the console records `failedAt: 'spec-host'`). If it did install but no tool appears, you are most likely on `1.1.0` or older — those versions had no `prepare` script, so a source install never built `dist/`, the file `main` points at did not exist, and neither tools nor routes got registered. Upgrade to `1.1.1` or newer.
+A: First make sure the install actually succeeded: installing from a repository URL requires that git host to be reachable, and when `github.com` is unreachable the install fails at the 5-second probe (the console records `failedAt: 'spec-host'`). If it did install but no tool appears, you are most likely on `1.1.1` or older — `dist/` has been committed to the repository since `1.1.2`; before that either `prepare` was missing (`1.1.0` and older) or pnpm 11 blocked it (`1.1.1`), and in both cases the file `main` points at did not exist, so neither tools nor routes got registered. Upgrade to `1.1.2` or newer.
 
 ## Documentation
 
@@ -445,7 +448,7 @@ A: First make sure the install actually succeeded: installing from source requir
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **262 cases (260 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
+Current baseline: **262 cases (260 pass / 2 skip / 0 fail)**, **99.81%** line / **92.53%** branch coverage.
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets, so the same code on CRLF reports different numbers and different uncovered line
 numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).

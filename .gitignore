@@ -1,8 +1,10 @@
 # 依赖
 node_modules/
 
-# 构建产物
-dist/
+# 构建产物：dist/ 需要入库
+# DSH 0.2.0 自带 pnpm 11，会拦截 git 依赖的构建脚本（ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED），
+# 且 allowBuilds 的 key 带 commit sha，用户无法预先填写。因此从仓库地址安装不能依赖 prepare，
+# dist/ 必须提交进仓库（从 git 安装时 files 字段仍生效，多余源码不会被装进去）。
 *.tsbuildinfo
 
 # 日志

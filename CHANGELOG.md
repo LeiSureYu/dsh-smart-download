@@ -9,6 +9,24 @@
 > Entries are written in Chinese, with English summaries from `0.4.2` on. Entries before `0.4.2`
 > are reconstructed from the git history and only record verifiable changes.
 
+## [Unreleased]
+
+## [1.1.2] - 2026-10-02
+
+### 修复 / Fixed
+
+- 从 Git 仓库地址安装不再依赖构建脚本：`dist/` 提交进仓库，并去掉 `prepare`。DSH 0.2.0 自带 pnpm 11 会拦截 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），放行需要在 profile 的 `pnpm-workspace.yaml` 写 `allowBuilds`，而它的 key 形如 `<包名>@git+<url>#<commit-sha>`、带 commit 哈希无法预先填写，批准这条路走不通；`1.1.1` 因此装上就失败。现在从仓库地址安装直接取仓库内容，不跑 `prepare`、不需要审批、也不需要本机 TypeScript 工具链。
+  **Installing from a Git repository URL no longer depends on a build script**: `dist/` is committed and `prepare` is removed. DSH 0.2.0 ships pnpm 11, which blocks build scripts in git dependencies (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`); allowing it requires an `allowBuilds` entry whose key is `<name>@git+<url>#<commit-sha>` — it embeds a commit hash and cannot be written in advance, so approval is a dead end, which is why `1.1.1` failed to install. A repository-URL install now takes the repository contents directly: no `prepare`, no approval, no local TypeScript toolchain.
+
+- `.gitignore` 不再忽略 `dist/`，改为在文件内说明为什么必须入库。发布仍由 `prepublishOnly` 构建，npm tarball 不受影响。
+  `.gitignore` no longer ignores `dist/` and now carries an in-file note on why it must be committed. Publishing still builds via `prepublishOnly`, so the npm tarball is unaffected.
+
+- 清单测试改为断言「`dist/` 在仓库里、`main` 指向的产物真实存在、且没有 `prepare`」，并把 `prepare` 缺失时的发布期构建（`prepublishOnly` 含 `build`）一并断言。用例数 262 → **262**。
+  The manifest test now asserts "`dist/` is committed, the file `main` points at actually exists, and there is no `prepare`", plus the publish-time build (`prepublishOnly` contains `build`). Cases 262 → **262**.
+
+- 文档更新「从 Git 仓库地址安装」：说明 `dist/` 已入库、无需构建与审批，并指出从 git 安装时 `files` 字段仍然生效。常见问题新增「安装报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`」一条。
+  Docs update "installing from a Git repository URL": `dist/` is committed, no build or approval needed, and the `files` field still applies to git installs. Added an FAQ entry for `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`.
+
 ## [1.1.1] - 2026-10-02
 
 ### 修复 / Fixed
@@ -24,9 +42,6 @@
 
 - 新增 1 例清单测试，断言 `scripts.prepare` 存在且指向会跑 `tsc` 的构建入口。用例数 261 → **262**。
   **Added 1 manifest test** asserting `scripts.prepare` exists and points at a build entry that runs `tsc`. Cases 261 → **262**.
-
-## [Unreleased]
-
 ## [1.1.0] - 2026-09-29
 
 适配 DSH 0.2.0（含桌面版）。**生产代码零改动**：0.2.0 的 `dsh-tools` 与 0.1.7-rc.2 逐字节相同，

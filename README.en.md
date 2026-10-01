@@ -52,6 +52,21 @@ No further configuration is needed: the aria2 binaries are installed together wi
 
 You can also add it from the **Plugins** page in the desktop sidebar.
 
+### Installing from a Git repository URL
+
+Besides the npm package name, the repository URL works too:
+
+```bash
+dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
+```
+
+Requirements and caveats:
+
+- The URL must have the three-segment `https://<host>/<owner>/<repo>` shape (an optional `.git` suffix or `#<ref>` is fine). Proxy-mirror URLs with an embedded path prefix (e.g. `https://ghfast.top/https://github.com/owner/repo.git`) are **not accepted**.
+- A git / tarball install **fetches the source first and then builds locally after install**: it runs `prepare` → `tsc`, so it is slower than installing the npm package and needs a TypeScript toolchain on the machine (devDependencies are installed along with the source).
+- Compatibility (`peerDependencies`) is only evaluated after the fetch; on a mismatch the profile files are rolled back and no half-installed state is left behind.
+- Before installing, DSH probes **GitHub** with `git ls-remote` and fails after a 5-second timeout. If `github.com` is unreachable from your network, this check fails — install the npm package `@leisureyu/dsh-smart-dl` instead (recommended), or use the plugin marketplace.
+
 > **The progress panel is available on profiles that have the web UI** (`web`, and the desktop app's `desktop` profile). On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
 > **1.1.0 adapts the plugin to DSH 0.2.0.** From 0.2.0 on, DSH checks declared `peerDependencies` before installing: `0.4.0` and earlier declare a range that does not cover `0.2.0`, so an already-installed copy has its whole bundle skipped and the plugin never loads. If you are on `0.4.0` or older, upgrading is the fix; `0.4.1` and newer already cover 0.2.0 — see [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
@@ -411,6 +426,9 @@ A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-pr
 **Q: Do I have to restart an interrupted download?**
 A: No. Call `smart_download` again with the same `url` and `output`; against a server that supports Range it resumes from where it stopped.
 
+**Q: I installed from the GitHub repository URL but no tool showed up / the plugin is inactive?**
+A: First make sure the install actually succeeded: installing from source requires that git host to be reachable, and when `github.com` is unreachable the install fails at the 5-second probe (the console records `failedAt: 'spec-host'`). If it did install but no tool appears, you are most likely on `1.1.0` or older — those versions had no `prepare` script, so a source install never built `dist/`, the file `main` points at did not exist, and neither tools nor routes got registered. Upgrade to `1.1.1` or newer.
+
 ## Documentation
 
 | Document | Contents |
@@ -427,7 +445,7 @@ A: No. Call `smart_download` again with the same `url` and `output`; against a s
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **261 cases (259 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
+Current baseline: **262 cases (260 pass / 2 skip / 0 fail)**, **99.81%** line / **92.50%** branch coverage.
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets, so the same code on CRLF reports different numbers and different uncovered line
 numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).

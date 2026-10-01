@@ -9,6 +9,22 @@
 > Entries are written in Chinese, with English summaries from `0.4.2` on. Entries before `0.4.2`
 > are reconstructed from the git history and only record verifiable changes.
 
+## [1.1.1] - 2026-10-02
+
+### 修复 / Fixed
+
+- 补上 `prepare` 脚本（`npm run build`）。`dist/` 不入库，从 Git 仓库地址或 tarball 安装是先抓取源码再本地构建；此前只有 `prepublishOnly`，只在发布时执行，所以从源码装完不会跑 `tsc`，`main` 指向的 `dist/index.js` 不存在，工具与 RPC 路由都注册不出来 —— 表现为「装上了但不启用」。
+  **Added the `prepare` script** (`npm run build`). `dist/` is not committed, so git/tarball installs fetch source and build locally; only `prepublishOnly` existed, which runs on publish alone, so a source install never ran `tsc` and the plugin ended up installed but inactive.
+
+- 文档补上「从 Git 仓库地址安装」这一形态：地址必须是 `https://<host>/<owner>/<repo>` 三段式（带路径前缀的代理镜像地址不被接受）；源码安装先抓取再构建，比装 npm 包慢；兼容性在抓取后才判定，不匹配会回滚。并说明 DSH 安装前会用 `git ls-remote` 探测 GitHub、超时 5 秒即失败。
+  **Documented installing from a Git repository URL**: the URL must be the three-segment `https://<host>/<owner>/<repo>` form (proxy-mirror URLs with a path prefix are rejected); source installs fetch then build and are slower; compatibility is evaluated after the fetch and rolls back on mismatch. Also noted DSH's pre-install `git ls-remote` GitHub probe with a 5-second timeout.
+
+- 常见问题新增一条：从仓库地址装上但工具没出现时的排查顺序（先确认主机可达，再看是否装到了 1.1.0 或更早）。
+  **Added an FAQ entry** for "installed from a repository URL but no tool appears" (check host reachability first, then the installed version).
+
+- 新增 1 例清单测试，断言 `scripts.prepare` 存在且指向会跑 `tsc` 的构建入口。用例数 261 → **262**。
+  **Added 1 manifest test** asserting `scripts.prepare` exists and points at a build entry that runs `tsc`. Cases 261 → **262**.
+
 ## [Unreleased]
 
 ## [1.1.0] - 2026-09-29

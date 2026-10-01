@@ -23,6 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const root = dirname(here)
 
 interface Pkg {
+  scripts?: Record<string, string>
   version: string
   engines?: Record<string, string>
   dsh?: {
@@ -180,6 +181,15 @@ test('compat: 客户端清单只用平台基线，不额外声明 external', () 
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-slots',
   ])
+})
+
+test('compat: 提供 prepare 脚本，使从 Git 仓库地址安装能产出 dist', () => {
+  // dist/ 不入库，git/tarball 安装是先抓取源码再本地构建：
+  // 没有 prepare 就永远不跑 tsc，main 指向的 dist/index.js 缺失，插件装完不启用。
+  const scripts = pkg.scripts ?? {}
+  assert.equal(scripts.prepare, 'npm run build')
+  // 构建入口本身也要存在，否则 prepare 只是个空壳
+  assert.ok(typeof scripts.build === 'string' && scripts.build.includes('tsc'))
 })
 
 test('compat: bundle patch 仍然指向仓库里的 cordis.patch.yml', () => {

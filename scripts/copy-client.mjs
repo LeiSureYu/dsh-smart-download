@@ -16,4 +16,6 @@ const to = resolve(root, 'dist/client.js')
 mkdirSync(dirname(to), { recursive: true })
 copyFileSync(from, to)
 
-console.log(`copied ${from} -> ${to}`)
+// 走 stderr：`npm pack` 会把 prepare/build 的 stdout 一起吐出来，
+// 发布流程用 tgz=$(npm pack …) 取文件名，stdout 多一行就会拼出错误路径。
+console.error(`copied ${from} -> ${to}`)

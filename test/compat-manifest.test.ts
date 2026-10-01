@@ -25,6 +25,7 @@ const root = dirname(here)
 interface Pkg {
   scripts?: Record<string, string>
   version: string
+  main?: string
   engines?: Record<string, string>
   dsh?: {
     manifestVersion?: number

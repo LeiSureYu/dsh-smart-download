@@ -51,6 +51,21 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 也可以在桌面版侧边栏的 Plugins 页面里添加。
 
+### 从 Git 仓库地址安装
+
+除了 npm 包名，也可以直接填仓库地址：
+
+```bash
+dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
+```
+
+要求与注意事项：
+
+- 地址必须是 `https://<host>/<owner>/<repo>` 这种三段形态（可带 `.git` 后缀或 `#<ref>`）。带路径前缀的代理镜像地址（如 `https://ghfast.top/https://github.com/owner/repo.git`）**不被接受**。
+- git / tarball 安装是**先抓取源码、再在装完之后本地构建**：会跑 `prepare` → `tsc`，因此比装 npm 包慢，并且需要本机装有 TypeScript 工具链（从源码装时 devDependencies 会一并安装）。
+- 兼容性（`peerDependencies`）在抓取之后才判定，不匹配会回滚 profile 文件，不会留下半装状态。
+- DSH 在安装前会用 `git ls-remote` 探测 **GitHub** 主机，超时 5 秒即判失败。如果你所在的网络访问不了 `github.com`，这一步就会失败 —— 请改用 npm 包名 `@leisureyu/dsh-smart-dl`（推荐）或插件市场安装。
+
 > **进度面板只在带 Web 界面的 profile 生效**（`web` 与桌面版的 `desktop`）。纯 CLI 等 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
 > **1.1.0 为 DSH 0.2.0 适配。** 0.2.0 起安装前会核对 `peerDependencies`：`0.4.0` 及更早版本声明的范围不含 `0.2.0`，装上后整个 bundle 会被跳过，插件完全不加载。如果你装的是 `0.4.0` 或更早，升级即可；`0.4.1` 起已覆盖 0.2.0。详见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
@@ -435,6 +450,9 @@ A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "h
 **Q：下载中断后要重新开始吗？**
 A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`，支持 Range 的服务器会从断点继续。
 
+**Q：用 GitHub 仓库地址装上之后，工具没有出现 / 插件没启用？**
+A：先确认真的装成功了：从源码安装要求该 git 主机可达，`github.com` 连不上时安装会在 5 秒探测处失败（控制台会留下 `failedAt: 'spec-host'`）。若确实装上了却没有工具，多半是装到了 `1.1.0` 或更早 —— 那时没有 `prepare` 脚本，从源码安装不会构建 `dist/`，`main` 指向的文件不存在，工具与路由都注册不出来。升级到 `1.1.1` 及以上即可。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -451,7 +469,7 @@ A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**261 例用例（259 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.50%**。
+当前基线：**262 例用例（260 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.50%**。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)）。
 2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。

@@ -152,6 +152,7 @@ window.__ModuleLoader__.load({
 			'entry': '下载面板',
 			'close': '关闭下载面板',
 			'empty': '暂无下载任务',
+			'emptyHint': '用 smart_download 下载文件后，记录会出现在这里；下载过程中右下角也会显示实时进度。',
 			'sound': '完成提示音',
 			/* ---- t32 下载管理器 ---- */
 			'panel': '下载管理',
@@ -200,6 +201,7 @@ window.__ModuleLoader__.load({
 			'entry': 'Download panel',
 			'close': 'Close download panel',
 			'empty': 'No downloads yet',
+			'emptyHint': 'Files you download with smart_download show up here; live progress also appears in the bottom-right corner while a download runs.',
 			'sound': 'Completion sound',
 			/* ---- t32 download manager ---- */
 			'panel': 'Downloads',
@@ -334,6 +336,53 @@ window.__ModuleLoader__.load({
 				default:
 					return 'presenceUnknown';
 			}
+		}
+
+		/**
+		 * 每一行/每一段的**语义色**。
+		 *
+		 * 为什么集中在这里而不是写在各个 style 里：颜色是「状态」的另一种说法，
+		 * 散落到行、进度条、徽标三处就会各自漂移（改一处忘两处）。这里只认
+		 * `--dsw-alias-*` 宿主变量并给固定兜底色 —— 主题切换（明/暗）由宿主负责，
+		 * 我们不自己发明颜色。
+		 *
+		 * @param kind `'task'` 取任务状态色；`'presence'` 取产物状态色
+		 * @param value 状态值
+		 * @returns CSS 颜色字符串
+		 */
+		function semanticColor(kind, value) {
+			if (kind === 'task') {
+				switch (value) {
+					case 'completed':
+						return 'var(--dsw-alias-label-secondary, #16a34a)';
+					case 'failed':
+						return 'var(--dsw-alias-label-error, #dc2626)';
+					case 'cancelled':
+						return 'var(--dsw-alias-label-secondary, #8a8f98)';
+					default:
+						// running 及其它：主色（进行中）
+						return 'var(--dsw-alias-label-primary, #2563eb)';
+				}
+			}
+			switch (value) {
+				case 'present':
+					return 'var(--dsw-alias-label-secondary, #16a34a)';
+				case 'missing':
+					return 'var(--dsw-alias-label-deep, #b45309)';
+				case 'changed':
+					return 'var(--dsw-alias-label-deep, #b45309)';
+				case 'blocked':
+					return 'var(--dsw-alias-label-error, #dc2626)';
+				default:
+					return 'var(--dsw-alias-label-secondary, #8a8f98)';
+			}
+		}
+
+		/** 进度百分比（0-100 的整数，脏数据一律夹到区间内，不渲染 NaN）。 */
+		function pctOf(task) {
+			const raw = Number(task && task.pct);
+			if (!Number.isFinite(raw)) return 0;
+			return Math.min(100, Math.max(0, Math.round(raw)));
 		}
 
 		/** Why "also delete the local file" is unavailable, or null when it is. */
@@ -1343,28 +1392,66 @@ window.__ModuleLoader__.load({
 			// 行内「时间」：没有可展示的时间戳时整个 span 不渲染（不留一个空位）
 			const when = formatShortTime(task.updatedAt);
 
+			const pct = pctOf(task);
+			const statusColor = semanticColor('task', task.status);
+			const presenceColor = semanticColor('presence', state.presence);
+
 			return react.createElement(
 				'div',
 				{
 					'data-dsh-smart-dl': 'manager-row',
 					'data-task-id': task.id,
-				tabIndex: 0,
-				onKeyDown: onRowKeyDown,
+					tabIndex: 0,
+					onKeyDown: onRowKeyDown,
 					style: {
 						display: 'flex',
 						flexDirection: 'column',
-						gap: 6,
-						padding: '10px 12px',
+						gap: 8,
+						padding: '12px 14px',
 						border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
 						borderRadius: 10,
+						// hover / 键盘聚焦都给可见反馈：Delete 键是行级操作，
+						// 用户必须能看见「焦点现在在哪一行」，否则会误删别的文件。
+						transition: 'border-color 120ms ease, background 120ms ease',
+						background: 'var(--dsw-alias-bg-layer, transparent)',
+					},
+					onMouseEnter: (event) => {
+						const el = event.currentTarget;
+						if (el) el.style.borderColor = 'var(--dsw-alias-border-inverted, rgba(127,127,127,0.5))';
+					},
+					onMouseLeave: (event) => {
+						const el = event.currentTarget;
+						if (el) el.style.borderColor = '';
+					},
+					onFocus: (event) => {
+						const el = event.currentTarget;
+						if (el) el.style.borderColor = 'var(--dsw-alias-label-primary, #2563eb)';
+					},
+					onBlur: (event) => {
+						const el = event.currentTarget;
+						if (el) el.style.borderColor = '';
 					},
 				},
 				react.createElement(
 					'div',
-					{ style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+					{ style: { display: 'flex', alignItems: 'center', gap: 8 } },
+					// 状态色点：比文字更早进入视线（一眼扫出哪条失败/在进行）
+					react.createElement('span', {
+						key: 'dot',
+						'data-dsh-smart-dl': 'status-dot',
+						style: {
+							flex: 'none',
+							width: 8,
+							height: 8,
+							borderRadius: '50%',
+							background: statusColor,
+						},
+						title: t(task.status === 'completed' ? 'completed' : task.status),
+					}),
 					react.createElement(
 						'span',
 						{
+							key: 'name',
 							style: { flex: '1 1 auto', fontWeight: 600, fontSize: 13, wordBreak: 'break-all' },
 							title: fullLabel(task) || undefined,
 						},
@@ -1372,33 +1459,75 @@ window.__ModuleLoader__.load({
 					),
 					react.createElement(
 						'span',
-						{ style: { flex: 'none', fontSize: 11, opacity: 0.75 } },
-						`${String(task.pct ?? 0)}%`,
+						{
+							key: 'pct',
+							'data-dsh-smart-dl': 'pct',
+							style: { flex: 'none', fontSize: 11, opacity: 0.75, fontVariantNumeric: 'tabular-nums' },
+						},
+						`${String(pct)}%`,
 					),
+				),
+				// 进度条：3px 高、圆角、按状态着色；0% 时也不塌陷（保留 1px 轨道）
+				react.createElement(
+					'div',
+					{
+						key: 'bar',
+						style: {
+							height: 3,
+							borderRadius: 999,
+							background: 'var(--dsw-alias-bg-skeleton, rgba(127,127,127,0.18))',
+							overflow: 'hidden',
+						},
+					},
+					react.createElement('div', {
+						'data-dsh-smart-dl': 'progress-bar',
+						style: {
+							width: `${pct}%`,
+							height: '100%',
+							borderRadius: 999,
+							background: statusColor,
+						},
+					}),
 				),
 				react.createElement(
 					'div',
-					{ style: { display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11, opacity: 0.8 } },
-					react.createElement('span', null, t(task.status === 'completed' ? 'completed' : task.status)),
+					{ style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 11 } },
+					react.createElement(
+						'span',
+						{ key: 'status', style: { color: statusColor, fontWeight: 600 } },
+						t(task.status === 'completed' ? 'completed' : task.status),
+					),
 					state.size !== undefined && state.size !== null
-						? react.createElement('span', { key: 'size' }, formatBytes(state.size, t('sizeUnknown')))
+						? react.createElement('span', { key: 'size', style: { opacity: 0.75 } }, formatBytes(state.size, t('sizeUnknown')))
 						: null,
 					when !== ''
 						? react.createElement(
 								'span',
-								{ key: 'time', 'data-dsh-smart-dl': 'updated-at', title: t('updatedAt') },
+								{ key: 'time', 'data-dsh-smart-dl': 'updated-at', style: { opacity: 0.75 }, title: t('updatedAt') },
 								when,
 							)
 						: null,
+					// presence 徽标：独立成块（此前与状态文字混排，扫不出来）
 					react.createElement(
 						'span',
-						{ key: 'presence', 'data-dsh-smart-dl': 'presence' },
+						{
+							key: 'presence',
+							'data-dsh-smart-dl': 'presence',
+							style: {
+								padding: '1px 6px',
+								borderRadius: 999,
+								fontSize: 10,
+								color: presenceColor,
+								border: `1px solid ${presenceColor}`,
+								opacity: 0.9,
+							},
+						},
 						t(presenceKey(state.presence)),
 					),
 				),
 				react.createElement(
 					'div',
-					{ style: { display: 'flex', gap: 8 } },
+					{ style: { display: 'flex', gap: 8, marginTop: 2 } },
 					react.createElement(
 						'button',
 						{
@@ -1408,7 +1537,16 @@ window.__ModuleLoader__.load({
 							disabled: !revealable,
 							title: revealable ? t('reveal') : t('revealDisabled'),
 							onClick: () => onReveal(task),
-							style: { cursor: revealable ? 'pointer' : 'default', fontSize: 12, padding: '4px 10px' },
+							style: {
+								cursor: revealable ? 'pointer' : 'default',
+								fontSize: 12,
+								padding: '4px 10px',
+								borderRadius: 6,
+								border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+								background: 'transparent',
+								color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+								opacity: revealable ? 1 : 0.45,
+							},
 						},
 						t('reveal'),
 					),
@@ -1419,7 +1557,18 @@ window.__ModuleLoader__.load({
 							'data-dsh-smart-dl': 'delete',
 							'aria-label': t('deleteRecord'),
 							onClick: () => onDelete(task),
-							style: { cursor: 'pointer', fontSize: 12, padding: '4px 10px' },
+							style: {
+								cursor: 'pointer',
+								fontSize: 12,
+								padding: '4px 10px',
+								borderRadius: 6,
+								// 删除是破坏性操作：描边用 error 色但不填充，
+								// 保持「可点但不诱导」的分寸。
+								border: '1px solid var(--dsw-alias-label-error, #dc2626)',
+								background: 'transparent',
+								color: 'var(--dsw-alias-label-error, #dc2626)',
+								opacity: 0.9,
+							},
 						},
 						t('deleteRecord'),
 					),
@@ -1521,7 +1670,7 @@ window.__ModuleLoader__.load({
 						: react.createElement('div', { key: 'why', style: { fontSize: 12, opacity: 0.8 } }, t(blocker)),
 					react.createElement(
 						'div',
-						{ style: { fontSize: 12, color: 'var(--dsw-alias-label-warning, #b45309)' } },
+						{ style: { fontSize: 12, color: 'var(--dsw-alias-label-deep, #b45309)' } },
 						t('confirmIrreversible'),
 					),
 					react.createElement(
@@ -1700,6 +1849,7 @@ window.__ModuleLoader__.load({
 					style: {
 						display: 'flex',
 						flexDirection: 'column',
+					flex: '1 1 auto',
 						gap: 12,
 						height: '100%',
 						padding: 16,
@@ -1734,7 +1884,58 @@ window.__ModuleLoader__.load({
 					? null
 					: react.createElement('div', { key: 'notice', style: { fontSize: 12 } }, notice),
 				tasks.length === 0
-					? react.createElement('div', { style: { fontSize: 13, opacity: 0.7 } }, t('empty'))
+					? react.createElement(
+							'div',
+							{
+								key: 'empty',
+								'data-dsh-smart-dl': 'empty',
+								style: {
+									flex: '1 1 auto',
+									display: 'flex',
+									flexDirection: 'column',
+									alignItems: 'center',
+									justifyContent: 'center',
+									gap: 10,
+									padding: '48px 16px',
+									textAlign: 'center',
+								},
+							},
+							// 下载图标（纯 SVG，不引依赖；与侧边栏入口同一套画法）
+							react.createElement(
+								'svg',
+								{
+									width: 40,
+									height: 40,
+									viewBox: '0 0 24 24',
+									fill: 'none',
+									stroke: 'var(--dsw-alias-label-tertiary, #9ca3af)',
+									strokeWidth: 1.6,
+									strokeLinecap: 'round',
+									strokeLinejoin: 'round',
+									'aria-hidden': 'true',
+								},
+								react.createElement('path', { d: 'M12 3v11' }),
+								react.createElement('path', { d: 'M8 11l4 4 4-4' }),
+								react.createElement('path', { d: 'M4 19h16' }),
+							),
+							react.createElement(
+								'div',
+								{ style: { fontSize: 13, fontWeight: 600 } },
+								t('empty'),
+							),
+							react.createElement(
+								'div',
+								{
+									style: {
+										fontSize: 12,
+										opacity: 0.7,
+										maxWidth: 320,
+										lineHeight: 1.6,
+									},
+								},
+								t('emptyHint'),
+							),
+						)
 					: tasks.map((task) =>
 							react.createElement(SmartDlManagerRow, {
 								key: task.id,

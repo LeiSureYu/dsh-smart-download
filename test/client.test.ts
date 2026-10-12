@@ -2261,3 +2261,75 @@ test('管理器：remote.session 不可用时，降级到服务端 op:reveal（�
     panel.dispose()
   }
 })
+
+/* ---------------- 视觉打磨：进度条 / 状态色点 / presence 徽标 / 空状态引导 ---------------- */
+
+test('管理器（视觉）：行内有进度条，宽度等于该任务的百分比', async () => {
+  const { request } = serve([managedTask({ pct: 42, status: 'running' })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const bar = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'progress-bar')[0]
+    assert.ok(bar, '每行必须有进度条')
+    assert.equal((bar.props?.style as { width?: string }).width, '42%', '进度条宽度必须等于任务百分比')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器（视觉）：状态色点按状态取色，且完成/失败颜色不同', async () => {
+  const { request } = serve([
+    managedTask({ id: 'ok1', status: 'completed', pct: 100 }),
+    managedTask({ id: 'bad1', status: 'failed', pct: 30 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const dots = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'status-dot')
+    assert.equal(dots.length, 2, '每行一个状态色点')
+    assert.notEqual(
+      (dots[0].props?.style as { background?: string }).background,
+      (dots[1].props?.style as { background?: string }).background,
+      '完成与失败必须取不同颜色（否则色点没有信息量）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器（视觉）：空状态给图标 + 引导文案（不是干巴巴一行字）', async () => {
+  const { request } = serve([])
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    const tree = await renderManagerSettled(panel)
+    const empty = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'empty')[0]
+    assert.ok(empty, '空状态必须有专属容器')
+    const text = textOf(tree)
+    assert.match(text, /emptyHint|smart_download/, '必须给出「怎么才会出现记录」的引导')
+    assert.equal(
+      findAll(tree, (el) => el.type === 'svg').length > 0,
+      true,
+      '空状态要有图标（纯 SVG，不引依赖）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})

@@ -525,6 +525,12 @@ export function forgetManagedTask(taskId: string, session?: ProgressSession): st
 /**
  * `op:'delete'`：**先删产物、成功后再删记录**（顺序不得颠倒）。
  *
+ * ⚠️ **此函数不做 confirm 校验。** 确认（`confirm:true`）由分派层
+ * （`registerStatusRpc` 里 `MANAGE_CONFIRM_REQUIRED` 那一处）负责，函数本体
+ * **拿到 `taskId` 就会真的删产物**。任何新调用方必须先过 `readManagePayload`
+ * 并检查 confirm，再调这里 —— 绕过分派层直调本函数等于绕过不可逆操作的确认
+ * 门（对抗性审查 PANEL-DL-3）。
+ *
  * 为什么顺序是硬要求：先删记录的话，产物删除失败时用户就永久失去了重试的入口
  * （记录没了 = 面板上再也看不到这一条，而文件还躺在磁盘上）。
  *

@@ -177,6 +177,14 @@ window.__ModuleLoader__.load({
 			'presencePresent': '文件在原位',
 			'updatedAt': '最近更新',
 			'sizeUnknown': '大小未知',
+			'deleteReasonGone': '本地文件已不在原位置（记录已删除）',
+			'deleteReasonBusy': '本地文件暂时无法删除（可能正被占用，或磁盘只读）',
+			'deleteReasonDenied': '本地文件删除被拒绝（权限不足）',
+			'deleteReasonIsDir': '该路径是目录，不能按文件删除',
+			'deleteReasonIsLink': '该路径是符号链接，为安全起见不删除',
+			'deleteReasonChanged': '本地文件与下载完成时不一致（可能已被替换），为安全起见不删除',
+			'deleteReasonNoPath': '这条记录没有保存输出路径，只能删除记录',
+			'deleteReasonRunning': '下载仍在进行，未删除',
 			'actionFailed': '操作失败',
 		};
 
@@ -216,6 +224,14 @@ window.__ModuleLoader__.load({
 			'presencePresent': 'file in place',
 			'updatedAt': 'Last update',
 			'sizeUnknown': 'size unknown',
+			'deleteReasonGone': 'The local file is no longer where it was (record deleted)',
+			'deleteReasonBusy': 'The local file could not be deleted right now (it may be in use, or the disk is read-only)',
+			'deleteReasonDenied': 'Deleting the local file was denied (insufficient permissions)',
+			'deleteReasonIsDir': 'That path is a directory and cannot be deleted as a file',
+			'deleteReasonIsLink': 'That path is a symbolic link; for safety it was not deleted',
+			'deleteReasonChanged': 'The local file no longer matches what was downloaded (it may have been replaced); for safety it was not deleted',
+			'deleteReasonNoPath': 'This record has no saved output path; only the record could be deleted',
+			'deleteReasonRunning': 'The download is still running; nothing was deleted',
 			'actionFailed': 'Action failed',
 		};
 
@@ -332,6 +348,56 @@ window.__ModuleLoader__.load({
 				default:
 					return null;
 			}
+		}
+
+		/**
+		 * Map the Host's `delete` `reason` (the frozen contract set in
+		 * `src/rpc.ts` `DeleteReason`) onto a dictionary key.
+		 *
+		 * Why a mapping instead of the value itself: the reason codes are
+		 * Host-side snake/case words (`is-dir`, `no-path`), while the dictionary
+		 * keys are camelCase product copy — the two must not be coupled by
+		 * string identity, or renaming one silently breaks the other.
+		 *
+		 * @param reason the `reason` from `smartdl.manage` `op:'delete'`
+		 * @returns dictionary key, or `null` for an unknown reason (caller falls
+		 *   back to the generic "action failed" copy — an unknown reason must
+		 *   never render as an empty string)
+		 */
+		function deleteReasonKey(reason) {
+			switch (reason) {
+				case 'gone': return 'deleteReasonGone';
+				case 'busy': return 'deleteReasonBusy';
+				case 'denied': return 'deleteReasonDenied';
+				case 'is-dir': return 'deleteReasonIsDir';
+				case 'is-link': return 'deleteReasonIsLink';
+				case 'changed': return 'deleteReasonChanged';
+				case 'no-path': return 'deleteReasonNoPath';
+				case 'running': return 'deleteReasonRunning';
+				default: return null;
+			}
+		}
+
+		/**
+		 * Human text for a handled-but-not-deleted outcome.
+		 *
+		 * `smartdl.manage` answers `{ ok: true, value: { fileDeleted, reason,
+		 * errorCode } }` — `ok` means "the request was processed", NOT "the file
+		 * is gone". When `fileDeleted` is false the row must stay and the user
+		 * must be told why (PANEL-DL-1), with the specific cause (PANEL-DL-2)
+		 * rather than a generic "action failed".
+		 *
+		 * @param value the `result.value` of a `manage` reply
+		 * @param t the dictionary lookup
+		 * @returns localized one-line text; empty string when there is nothing
+		 *   meaningful to say
+		 */
+		function deleteFailureText(value, t) {
+			if (!value) return '';
+			const key = deleteReasonKey(value.reason);
+			const base = key ? t(key) : t('actionFailed');
+			const code = typeof value.errorCode === 'string' && value.errorCode !== '' ? value.errorCode : '';
+			return code === '' ? base : `${base}（${code}）`;
 		}
 
 		/** Human byte size; falls back to the caller's "unknown" copy. */
@@ -1503,24 +1569,40 @@ window.__ModuleLoader__.load({
 
 			const remove = async (task, withFile) => {
 				setPending(null);
+				let result = null;
 				try {
 					// `confirm` 只在该为 true 时出现：forget 的契约里没有这个字段，
 					// 多带一个 `confirm:false` 只会让服务端多一个「为什么在这里」的疑问。
 					const body = withFile
 						? { op: 'delete', taskId: task.id, confirm: true }
 						: { op: 'forget', taskId: task.id };
-					const result = await manage(body);
-					if (result && result.ok) {
-						panelStore.clearPresence(task.id);
-						// Force the shared snapshot to refresh: the record is gone,
-						// and the pill's next poll may be up to 2 seconds away.
-						panelStore.publish(tasks.filter((row) => row.id !== task.id));
-						await inspectAll();
-					} else {
-						setNotice(t('actionFailed'));
-					}
+					result = await manage(body);
 				} catch {
 					setNotice(t('actionFailed'));
+					return;
+				}
+				// PANEL-DL-1：`ok` 的语义是「请求被处理」，不是「文件已删」——
+				// busy/denied/changed/is-dir/is-link/running 这些失败也返回
+				// ok:true + fileDeleted:false。所以不能再用 ok 分支「删没删」，
+				// 必须看 value 里到底删了什么：记录删了才允许行消失。
+				const value = result && result.ok ? result.value : null;
+				const recordRemoved = value && Array.isArray(value.recordRemoved) ? value.recordRemoved : [];
+				if (!value || recordRemoved.length === 0) {
+					// 请求被处理了，但记录没删成（busy/denied/changed/is-dir/is-link/
+					// running）：行必须留着（它还指向一个真实的产物），并把服务端
+					// 给出的具体原因告诉用户，而不是一句笼统的「操作失败」。
+					setNotice(deleteFailureText(value, t) || t('actionFailed'));
+					return;
+				}
+				panelStore.clearPresence(task.id);
+				// Force the shared snapshot to refresh: the record is gone,
+				// and the pill's next poll may be up to 2 seconds away.
+				panelStore.publish(tasks.filter((row) => row.id !== task.id));
+				await inspectAll();
+				// PANEL-DL-2：记录已删但产物没删成时（只在 withFile 的竞态下可能，
+				// 例如点击后文件被移走），也要说清楚——记录没了但文件还在磁盘上。
+				if (withFile && value.fileDeleted === false) {
+					setNotice(deleteFailureText(value, t));
 				}
 			};
 

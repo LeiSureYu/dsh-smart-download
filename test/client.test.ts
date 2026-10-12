@@ -1931,3 +1931,100 @@ test('管理器：inspect 失败 → 该行保持 conservative（不给删文件
   }
 })
 
+/* ---------------- PANEL-DL-1/2：删除结果按 fileDeleted 判定，失败要说明原因 ---------------- */
+
+/**
+ * 打开删除确认框、点「同时删除本地文件」，返回渲染后的最终树。
+ * 供三个「删除结果」用例共用：它们只关心 delete 之后的行与文案。
+ */
+async function deleteAndExpectStay(panel: Panel): Promise<unknown> {
+  const tree = await renderManagerSettled(panel)
+  clickByData(tree, 'delete', '删除按钮')
+  const dialog = await renderManagerSettled(panel)
+  clickByData(dialog, 'confirm-with-file', '同时删除按钮')
+  return await renderManagerSettled(panel)
+}
+
+test('管理器：删除失败（changed，文件被换过）→ 行保留 + 显示具体原因（不是笼统的操作失败）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'delete'
+        ? { ok: true, value: { fileDeleted: false, reason: 'changed', errorCode: 'EACCES', recordRemoved: [], irreversible: 'x' } }
+        : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const after = await deleteAndExpectStay(panel)
+    // 行必须还在（删除按钮还在 = 该行没被移除）
+    assert.ok(
+      findAll(after, (el) => el.props?.['data-dsh-smart-dl'] === 'delete').length === 1,
+      '删除失败后该行必须保留（文件还在，不能让用户失去线索）',
+    )
+    const text = textOf(after)
+    // 测试桩的 locale 不带译文，t() 对未知键回显键名 —— 所以断言「键名或译文」二选一
+    //（既有用例如 confirmIrreversible 那条就是这么写的）
+    assert.match(text, /deleteReasonChanged|与下载完成时不一致|no longer matches/, '必须显示 changed 的具体原因')
+    assert.match(text, /EACCES/, 'errorCode 作为次要信息展示')
+    assert.doesNotMatch(text, /actionFailed|操作失败|Action failed/, '不得退回笼统文案（那是「不知道原因」的失败）')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：删除失败（busy，文件被占用）→ 行保留 + 文案区分于 changed', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'delete'
+        ? { ok: true, value: { fileDeleted: false, reason: 'busy', recordRemoved: [], irreversible: 'x' } }
+        : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const after = await deleteAndExpectStay(panel)
+    assert.ok(findAll(after, (el) => el.props?.['data-dsh-smart-dl'] === 'delete').length === 1, '行保留')
+    assert.match(textOf(after), /deleteReasonBusy|暂时无法删除|in use|read-only/, 'busy 有自己的文案')
+    assert.doesNotMatch(
+      textOf(after),
+      /deleteReasonChanged|与下载完成时不一致|no longer matches/,
+      'busy 的文案不得与 changed 混用',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：删除成功 → 行移除（沿用既有语义，作为对照）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'delete'
+        ? { ok: true, value: { fileDeleted: true, recordRemoved: ['x'], irreversible: 'x' } }
+        : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const after = await deleteAndExpectStay(panel)
+    assert.equal(
+      findAll(after, (el) => el.props?.['data-dsh-smart-dl'] === 'delete').length,
+      0,
+      '删除成功后该行必须消失',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+

@@ -896,13 +896,37 @@ test('manage/delete：产物是目录 -> reason=is-dir，目录与记录都保�
   })
 })
 
-test('manage/delete：产物是符号链接 -> reason=is-link，链接与它指向的目标都不能被删', async () => {
+/**
+ * 建符号链接（**需要先探测权限**）。
+ *
+ * Windows 上创建符号链接需要管理员或开发者模式，普通终端会 EPERM。这条安全规则
+ * （is-link）很重要不能删，但也不该让没权限的环境整片变红 —— 建不了就返回 null，
+ * 由调用方 skip 并说明原因（如实报告，而不是假装通过）。
+ */
+function trySymlink(target: string, link: string): string | null {
+  try {
+    symlinkSync(target, link)
+    return link
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    // 只有「没权限」才允许跳过；其它失败（路径问题等）仍然是真失败
+    if (code === 'EPERM' || code === 'EACCES') return null
+    throw error
+  }
+}
+
+test('manage/delete：产物是符号链接 -> reason=is-link，链接与它指向的目标都不能被删', async (t) => {
   const products = tempDir()
   await withDirs(async ({ downloadDir }) => {
     try {
       const target = seedProduct(products, 'real-target.bin', 't'.repeat(64))
       const link = path.join(products, 'link.bin')
-      symlinkSync(target, link)
+      if (trySymlink(target, link) === null) {
+        // 没有创建符号链接的权限（Windows 需要管理员或开发者模式）：如实跳过。
+        // 硬跑会让 EPERM 把整片测试染红，反而掩盖真正的回归。
+        t.skip('无创建符号链接的权限（Windows 需要管理员或开发者模式）')
+        return
+      }
       // 记录里的尺寸与**目标**一致：如果实现用 stat 而不是 lstat，它会认为
       // 「这就是我的文件」然后把链接的目标删掉 —— 那正是这条用例要抓的。
       const dlRecord = seedTask(downloadDir, 'dl-link', { outPath: link, size: 64 })

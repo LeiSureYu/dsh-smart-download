@@ -488,17 +488,47 @@ Implementation notes (useful for troubleshooting a panel that does not show up):
 
 ## Download manager (1.4.0+)
 
-The left sidebar gains a **Downloads** entry that opens a **full-page list** in the main area: every task is visible (in-progress and finished, including failed and cancelled), each row showing the file name, status, progress, last-update time and size, plus two actions:
+The left sidebar gains a **Downloads** entry that opens a **full-page list** in the main area: every task is visible
+(in-progress and finished, including failed and cancelled), no longer bounded by the overlay's 30-second receipt window.
 
-- **Show in folder**: opens the system file manager with **that file selected** (`explorer.exe /select,<file>` on Windows). It goes through the host's `remote.session.openWorkspacePath`, and **works for paths outside the workspace** — downloaded files usually do not live there.
-- **Delete record**: the confirmation dialog shows the **absolute path, the file size**, and states that **deleting the local file is permanent — it does not go to the recycle bin**. "Also delete the local file" is offered only while the file is still in place; **a moved file, or one that no longer matches the download (size/mtime changed), allows deleting the record only** — that is the safety boundary of "deleting the file that was actually downloaded", not laziness.
+**List capabilities**: filter by status (All / Downloading / Completed / Failed·Cancelled, each with a count), search
+by file name (case-insensitive), and delete records in bulk after multi-select. Bulk deletion **only removes records —
+it never touches local files**: one mis-click would mean several files gone for good (no recycle bin), which is a
+lopsided trade; to delete a file, use that row's confirmation dialog.
 
-Deletion goes through `POST /api/smartdl.manage` (`inspect` / `forget` / `delete`) and the server enforces 14 safety rules: the path **can only come from this plugin's own records** (the client sends a `taskId`; caller-supplied paths are never read), only absolute paths, `normalize`-stable with no `..`/NUL, `lstat` only (directories and symlinks are refused), **a size mismatch is refused**, running tasks are refused, paths inside the record directories are refused, **the file is deleted before the record**, failures are classified as `gone`/`busy`/`denied`/`is-dir`/`is-link`/`changed`/`no-path`/`running`, and **nothing ever pretends to have succeeded**. When a deletion fails the row **stays on screen** with the specific reason (in use / permission denied / file replaced…).
+**Each row shows**: a status dot with coloured status text, a progress bar (coloured by status), the file name and
+percentage, size, last-update time, and a `presence` badge (in place / moved / changed / not deletable);
+**while downloading it also shows live speed and ETA** (ETA only while running — reporting "0s left" for a finished
+task is noise). Two per-row actions:
 
-Why the output path must be recorded first: from 1.4.0 the progress records gained optional `outPath` / `size` / `fileMtimeMs` (same shape as `batch`, written only when present). **Older records without these fields still read fine, but can only have their record deleted** — without a reliable path there is no safe deletion.
+- **Show in folder**: opens the system file manager with **that file selected**. It prefers the host's
+  `remote.session`; when that service is unavailable it **falls back to the server** (the host process runs
+  `explorer.exe /select,` / `open -R` / `xdg-open`), so it depends on **no client-side injection** and works for
+  paths outside the workspace — downloaded files usually do not live there.
+- **Delete**: the confirmation dialog shows the **absolute path, the file size**, and states that **deleting the
+  local file is permanent — it does not go to the recycle bin**. "Also delete the local file" is offered only while
+  the file is still in place; **a moved file, or one that no longer matches the download (size/mtime changed), allows
+  deleting the record only** — the safety boundary of "deleting the file that was actually downloaded", not laziness.
 
-> The 1.3.0 session-header entry has been removed; the overlay keeps only its reporting duty (live progress, receipts, sound).
+**Keyboard**: focus a row and press `Delete` to open that row's confirmation dialog (not an immediate delete — the
+brake on an irreversible action stays); the dialog focuses **the option you used last time**, so `Enter` confirms
+(the choice is stored in `localStorage`). When the file has been moved, focus falls back to "Delete record only".
 
+Deletion goes through `POST /api/smartdl.manage` (`inspect` / `forget` / `delete` / `reveal`) and the server enforces
+14 safety rules: the path **can only come from this plugin's own records** (the client sends a `taskId`; caller-supplied
+paths are never read), only absolute paths, `normalize`-stable with no `..`/NUL, `lstat` only (directories and symlinks
+are refused), **a size mismatch is refused**, running tasks are refused, paths inside the record directories are
+refused, **the file is deleted before the record**, failures are classified as
+`gone`/`busy`/`denied`/`is-dir`/`is-link`/`changed`/`no-path`/`running`, and **nothing ever pretends to have
+succeeded**. When a deletion fails the row **stays on screen** with the specific reason (in use / permission denied /
+file replaced…).
+
+Why the output path must be recorded first: from 1.4.0 the progress records gained optional `outPath` / `size` /
+`fileMtimeMs` (same shape as `batch`, written only when present). **Older records without these fields still read
+fine, but can only have their record deleted** — without a reliable path there is no safe deletion.
+
+> The 1.3.0 session-header entry has been removed; the overlay keeps only its reporting duty (live progress,
+> receipts, sound).
 ## Guarding against silent failures
 
 Three **silent failures of the same kind** were found during development:

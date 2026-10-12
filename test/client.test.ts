@@ -1027,6 +1027,41 @@ test('关闭：× 关掉后不会被轮询弹回（同一批任务），新任�
   }
 })
 
+/**
+ * PANEL-R1（t27 审查留下的 low）：上面那条关闭用例用 `store.publish()` 直灌数据，
+ * 把 2 秒轮询那根导线**短路**了；审查者的独立探针证明风险真实存在（删掉
+ * `autoHidden = true` 后，真实轮询确实会把面板弹回来），但仓库里没有断言守它。
+ * 这条把它固化：不调 publish，让真计时器自己跳两轮。
+ */
+test('关闭：× 关掉后，真实的 2 秒轮询不会把面板弹回（走真计时器，不直灌 store）', async () => {
+  const live = [task({ id: 'r1', name: 'running.bin', status: 'running', updatedAt: Date.now() })]
+  const { request, payloads } = serve(live)
+  const panel = mountPanel(request)
+  try {
+    panel.render() // 挂载 → effect 里 tick() 立刻跑一次（真实 requestStatus）
+    await settle()
+    assert.ok(panel.render(), '进行中必须自动出现')
+    const callsAfterMount = payloads.length
+    assert.ok(callsAfterMount >= 1, '首次 tick 必须已经问过 Host')
+
+    panel.clickClose()
+    assert.equal(panel.render(), null, '× 关闭后必须立刻消失')
+
+    // 真实 2 秒计时器跳两轮：每一轮都会把同一批 running 任务重新灌进 store
+    await new Promise((resolve) => setTimeout(resolve, POLL_WAIT_MS))
+    assert.ok(
+      payloads.length > callsAfterMount,
+      '轮询必须仍在跑（RPC 调用次数还在增长，否则这条用例只是「没数据所以没显示」）',
+    )
+    const callsAfterFirstTick = payloads.length
+    await new Promise((resolve) => setTimeout(resolve, POLL_WAIT_MS))
+    assert.ok(payloads.length > callsAfterFirstTick, '第二轮 tick 也必须真的发生')
+    assert.equal(panel.render(), null, '真实轮询不得把关掉的面板弹回来')
+  } finally {
+    panel.dispose()
+  }
+})
+
 test('自动消失：全部任务终态后 5 秒自动层消失（走真实轮询计时器，注入时钟）', async () => {
   const realNow = Date.now
   const base = realNow()

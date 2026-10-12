@@ -471,6 +471,13 @@ window.__ModuleLoader__.load({
 				 * Feed a fresh Host snapshot in. A task id we have never seen
 				 * means a new download started: that is the one event that
 				 * re-arms the auto layer after the user closed it.
+				 *
+				 * 已知边界（PANEL-R2，t27 审查记录；**既有设计、不是缺陷**）：
+				 * `seenIds` 只增不减，判据是「这个 id 有没有见过」，而不是「这条任务此刻
+				 * 是否还在活动」。所以万一 task id 被复用，关掉之后的同一条任务再进终态
+				 * 也不会把自动层重新武装。当前不会发生（id 里带随机段，见 src/progress.ts）；
+				 * 真要改，先想清楚「新任务」到底该按什么判定 —— 按 id + 终态组合，还是按
+				 * 「本轮新出现的活动任务」。
 				 */
 				publish(nextTasks) {
 					let hasNew = false;

@@ -177,11 +177,26 @@ test('compat: 客户端清单只用平台基线，不额外声明 external', () 
   // 客户端脚本唯一的 require('react') 属于平台基线，无需写进 external。
   assert.equal(pkg.dsh?.client?.platform, 'web')
   assert.equal(pkg.dsh?.client?.external, undefined)
-  assert.deepEqual(pkg.dsh?.client?.inject, [
+  // 正向断言：客户端脚本用到的每个命名空间都必须**在清单里声明** ——
+  // 光在代码里写 `inject: ['remote.session', 'layout']` 不够，manifest 才决定
+  // 插件能不能拿到它们。漏声明时 ctx.remote.session 是 undefined，
+  // 「在文件夹中显示」会静默失败（用户实机反馈的正是这个）。
+  const inject = pkg.dsh?.client?.inject ?? []
+  for (const needed of [
     '@deepseek-ai/dsh-client-locale',
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-slots',
-  ])
+    // remote.session 的两半：客户端代理 + 宿主服务
+    '@deepseek-ai/dsh-api-remotes',
+    '@deepseek-ai/dsh-api-session-controller',
+    // ctx.layout.selectPanel（面板开合）
+    '@deepseek-ai/dsh-client-ui-layout',
+  ]) {
+    assert.ok(
+      inject.includes(needed),
+      `客户端清单必须声明 ${needed}：代码里用到的命名空间靠 manifest 才能拿到`,
+    )
+  }
 })
 
 test('compat: 从 Git 仓库地址安装无需构建脚本，dist 已在仓库里', () => {

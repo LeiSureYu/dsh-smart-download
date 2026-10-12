@@ -11,6 +11,36 @@
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-10-13
+
+**文档**：把三份面向用户的文档补齐到 1.4.x 的实际状态。`ARCHITECTURE.md` 的模块表此前**严重失真** ——
+`rpc.ts` 写的「~188 行 / 1 个端点」，实际是 770 行 / 3 个端点；`client.js` 写的 365 行，实际 2333 行；
+`cleanup.ts` / `throughput-cache.ts` / `verify.ts` 三个模块**根本没列进表**。
+
+**Docs**: brought the three user-facing documents up to date with 1.4.x. The module table in
+`ARCHITECTURE.md` had drifted badly — `rpc.ts` was listed as "~188 lines / one endpoint" (it is 770 lines
+and three endpoints), `client.js` as 365 lines (it is 2333), and three modules
+(`cleanup.ts` / `throughput-cache.ts` / `verify.ts`) were missing entirely.
+
+### 变更 / Changed
+
+- `ARCHITECTURE.md`：模块表按真实数据重写（19 个模块，行数与职责全部核对过）；新增
+  「下载管理器：删除与「在文件夹中显示」」一节 —— 数据流、三条硬约束（路径只能来自本插件自己的记录 /
+  只有文件确实在原位才动手 / 绝不假装成功）、`spawn` 的异步 `error` 会打崩宿主的坑、
+  以及会话为什么必须随请求带上。
+- `COMPATIBILITY.md`：新增「客户端插件的服务依赖」—— 五个 manifest 声明的用途与缺失后果，点明
+  「光在代码里写 `inject` 不够，manifest 才决定拿不拿得到」（`remote.session` 恒为 `undefined` 的真因），
+  并说明 `remote.session` **不是必需的**（有服务端降级路径）。「包管理器要求」补上 **pnpm 11 的构建审批**
+  说明：仓库把 `onlyBuiltDependencies` 写在 `package.json` 的 `pnpm` 字段（pnpm 9 的位置，CI 用 9），
+  而 pnpm 11 改从 `pnpm-workspace.yaml` 读 —— 未批准时 `pnpm install` 会以 `ERR_PNPM_IGNORED_BUILDS`
+  直接失败。
+- `TROUBLESHOOTING.md`：新增五条 —— 侧边栏没有「下载管理」入口 / 「在文件夹中显示」提示
+  「打不开文件夹位置」/ 删除后「文件没了、记录还在」/ 面板上没有「同时删除本地文件」/
+  批量删除为什么不能连文件一起删。
+
+> 内部工作记录（`PLAN-*` / `REVIEW-*` / `VERIFY-*` / `SPIKE-*` / `ROADMAP-*`）**刻意不改**：
+> 它们是开发过程记录，改了就是篡改历史，而且自 1.4.1 起已不随包发布。
+
 ## [1.4.1] - 2026-10-13
 
 **文档与打包**：补齐 1.4.0 的更新日志与 README（此前**缺了 12 个提交**的内容：筛选/搜索/批量、速度与 ETA、

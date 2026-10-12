@@ -145,6 +145,38 @@ export declare function checkManagedTarget(outPath: string, recordedSize: number
  */
 export declare function inspectManagedTask(taskId: string, session?: ProgressSession): ManageInspectResult;
 /**
+ * 各平台上「打开文件管理器并定位文件」的命令。
+ *
+ * `DSH_SMARTDL_REVEAL_CMD` 是**测试接缝**（与 `DSH_SMARTDL_THROUGHPUT_DIR`
+ * 等同一套做法）：真实跑测试时不该在开发者桌面上弹出资源管理器窗口，
+ * 无头 CI 里也没有 `xdg-open`。覆盖成任意存在的命令即可走完整路径，
+ * 且不产生副作用。
+ *
+ * @param target 产物的绝对路径
+ * @returns 命令与参数（参数走数组，不拼 shell 字符串）
+ */
+export declare function revealCommand(target: string): {
+    command: string;
+    args: string[];
+};
+/**
+ * 起一个「打开文件管理器」的子进程，**如实报告它到底起没起来**。
+ *
+ * 为什么不能用 `spawn(...).unref()` 加 try/catch：`spawn` 在命令不存在时
+ * **不同步抛错**，而是异步 emit `'error'`；没有监听器时它就是未捕获异常，
+ * 会直接崩掉整个宿主进程。CI 上（Linux 容器里没有 `xdg-open`）就是这样把
+ * 测试进程打挂的；换成用户的机器同样会崩 —— 点一下「在文件夹中显示」把
+ * DSH 弄崩，代价远大于这个功能本身。
+ *
+ * 所以这里两条路都堵上：同步抛（参数非法）与异步 `'error'` 都返回 `false`，
+ * 只有真的收到 `'spawn'` 事件才返回 `true`（不假装成功）。
+ *
+ * @param command 可执行文件名（不拼 shell 字符串，参数走数组）
+ * @param args 参数数组
+ * @returns 是否成功启动；启动成功后 `unref()`，子进程不随宿主退出而被杀
+ */
+export declare function openWithCommand(command: string, args: string[]): Promise<boolean>;
+/**
  * `op:'reveal'`：在系统的文件管理器里**定位**该任务的产物。
  *
  * 为什么需要它：客户端插件拿不到 `remote.session`（`ctx.remote.session` 在这份
@@ -158,7 +190,7 @@ export declare function inspectManagedTask(taskId: string, session?: ProgressSes
  * 拒目录与符号链接 / 尺寸不符…）。产物不在原位置时如实报 `presence` 且**什么
  * 都不打开** —— 打开一个「看起来对」的邻居路径比什么都不做更糟。
  */
-export declare function revealManagedTask(taskId: string, session?: ProgressSession): ManageRevealResult;
+export declare function revealManagedTask(taskId: string, session?: ProgressSession): Promise<ManageRevealResult>;
 /**
  * `op:'forget'`：只删本插件的两条进度记录（不碰任何产物）。
  *

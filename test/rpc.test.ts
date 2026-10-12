@@ -1369,16 +1369,57 @@ test('manage forget：带 session 能删掉会话隔离的轨道一记录（修�
 
 /* ---------------- op:'reveal'：让宿主进程开文件管理器（remote.session 的降级路径） ---------------- */
 
-test('manage reveal：文件在原位 → revealed:true（Windows 走 explorer /select,）', async () => {
+/**
+ * 跑 reveal 用例时把打开命令换成 `node`。
+ *
+ * 为什么必须换：不换的话测试会**真的在开发者桌面上弹出资源管理器窗口**，
+ * 无头 CI 里则可能根本没有 `xdg-open`（那正是曾经把测试进程打挂的原因）。
+ * 换成 `node` 走的是同一条代码路径（spawn + 等 'spawn' 事件），但没有副作用。
+ */
+async function withRevealCmd<T>(command: string, fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.DSH_SMARTDL_REVEAL_CMD
+  process.env.DSH_SMARTDL_REVEAL_CMD = command
+  try {
+    return await fn()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_SMARTDL_REVEAL_CMD
+    else process.env.DSH_SMARTDL_REVEAL_CMD = saved
+  }
+}
+
+test('manage reveal：文件在原位 → revealed:true（命令真的起来了）', async () => {
   await withDirs(async ({ downloadDir }) => {
     const artifact = path.join(downloadDir, '..', 'reveal-me.bin')
     writeFileSync(artifact, '0123456789')
     seedTask(downloadDir, 'dl-reveal1', { outPath: artifact, size: 10 })
-    const res = (await (
-      await manageHandler()(manageRequest({ op: 'reveal', taskId: 'dl-reveal1' }))
-    ).json()) as { result: { value: { revealed: boolean; presence: string } } }
-    assert.equal(res.result.value.revealed, true, '文件在原位必须报告已定位')
-    assert.equal(res.result.value.presence, 'present')
+    const value = await withRevealCmd('node', async () => {
+      const res = (await (
+        await manageHandler()(manageRequest({ op: 'reveal', taskId: 'dl-reveal1' }))
+      ).json()) as { result: { value: { revealed: boolean; presence: string } } }
+      return res.result.value
+    })
+    assert.equal(value.revealed, true, '文件在原位且命令存在时必须报告已定位')
+    assert.equal(value.presence, 'present')
+  })
+})
+
+test('manage reveal：打开器不存在 → 如实报失败，且**不崩进程**（回归护栏）', async () => {
+  // 这是真实发生过的崩溃：spawn 在命令不存在时**异步 emit 'error'**，
+  // try/catch 抓不到；没有监听器就是未捕获异常，会打挂整个宿主进程
+  // （CI 上 Linux 容器没有 xdg-open，测试进程就是这样被带崩的）。
+  await withDirs(async ({ downloadDir }) => {
+    const artifact = path.join(downloadDir, '..', 'reveal-me2.bin')
+    writeFileSync(artifact, '0123456789')
+    seedTask(downloadDir, 'dl-reveal3', { outPath: artifact, size: 10 })
+    const value = await withRevealCmd('definitely-not-a-real-command-xyz', async () => {
+      const res = (await (
+        await manageHandler()(manageRequest({ op: 'reveal', taskId: 'dl-reveal3' }))
+      ).json()) as { result: { value: { revealed: boolean; reason?: string; errorCode?: string } } }
+      return res.result.value
+    })
+    assert.equal(value.revealed, false, '命令起不来时不得假装成功')
+    assert.equal(value.reason, 'busy', '按既有约定归到 busy')
+    assert.equal(value.errorCode, 'ENOENT', '真实原因放进 errorCode')
   })
 })
 

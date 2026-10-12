@@ -328,6 +328,66 @@ export function inspectManagedTask(taskId, session) {
     };
 }
 /**
+ * 各平台上「打开文件管理器并定位文件」的命令。
+ *
+ * `DSH_SMARTDL_REVEAL_CMD` 是**测试接缝**（与 `DSH_SMARTDL_THROUGHPUT_DIR`
+ * 等同一套做法）：真实跑测试时不该在开发者桌面上弹出资源管理器窗口，
+ * 无头 CI 里也没有 `xdg-open`。覆盖成任意存在的命令即可走完整路径，
+ * 且不产生副作用。
+ *
+ * @param target 产物的绝对路径
+ * @returns 命令与参数（参数走数组，不拼 shell 字符串）
+ */
+export function revealCommand(target) {
+    const override = process.env.DSH_SMARTDL_REVEAL_CMD;
+    if (typeof override === 'string' && override.trim() !== '') {
+        return { command: override.trim(), args: [target] };
+    }
+    if (process.platform === 'win32') {
+        // `/select,` 后**不加空格**（Explorer 的命令行约定）
+        return { command: 'explorer.exe', args: [`/select,${target}`] };
+    }
+    if (process.platform === 'darwin') {
+        return { command: 'open', args: ['-R', target] };
+    }
+    // Linux 没有统一的「选中文件」参数：退化为打开所在目录
+    return { command: 'xdg-open', args: [path.dirname(target)] };
+}
+/**
+ * 起一个「打开文件管理器」的子进程，**如实报告它到底起没起来**。
+ *
+ * 为什么不能用 `spawn(...).unref()` 加 try/catch：`spawn` 在命令不存在时
+ * **不同步抛错**，而是异步 emit `'error'`；没有监听器时它就是未捕获异常，
+ * 会直接崩掉整个宿主进程。CI 上（Linux 容器里没有 `xdg-open`）就是这样把
+ * 测试进程打挂的；换成用户的机器同样会崩 —— 点一下「在文件夹中显示」把
+ * DSH 弄崩，代价远大于这个功能本身。
+ *
+ * 所以这里两条路都堵上：同步抛（参数非法）与异步 `'error'` 都返回 `false`，
+ * 只有真的收到 `'spawn'` 事件才返回 `true`（不假装成功）。
+ *
+ * @param command 可执行文件名（不拼 shell 字符串，参数走数组）
+ * @param args 参数数组
+ * @returns 是否成功启动；启动成功后 `unref()`，子进程不随宿主退出而被杀
+ */
+export function openWithCommand(command, args) {
+    return new Promise((resolve) => {
+        let child;
+        try {
+            child = spawn(command, args, { detached: true, stdio: 'ignore' });
+        }
+        catch {
+            resolve(false);
+            return;
+        }
+        child.once('error', () => resolve(false));
+        child.once('spawn', () => {
+            // detached + unref：文件管理器不跟着宿主进程一起被回收
+            child.unref();
+            resolve(true);
+        });
+    });
+}
+/**
  * `op:'reveal'`：在系统的文件管理器里**定位**该任务的产物。
  *
  * 为什么需要它：客户端插件拿不到 `remote.session`（`ctx.remote.session` 在这份
@@ -341,7 +401,7 @@ export function inspectManagedTask(taskId, session) {
  * 拒目录与符号链接 / 尺寸不符…）。产物不在原位置时如实报 `presence` 且**什么
  * 都不打开** —— 打开一个「看起来对」的邻居路径比什么都不做更糟。
  */
-export function revealManagedTask(taskId, session) {
+export async function revealManagedTask(taskId, session) {
     const task = findTask(taskId, session);
     if (!task) {
         return { found: false, presence: 'unknown', revealed: false, reason: 'no-path' };
@@ -357,33 +417,19 @@ export function revealManagedTask(taskId, session) {
         };
     }
     const target = task.outPath;
-    try {
-        if (process.platform === 'win32') {
-            // `/select,` 后**不加空格**（Explorer 的命令行约定）；用 spawn 传参数数组，
-            // 不拼成 shell 字符串 —— 路径里的空格与 & 不会被解释成别的含义。
-            spawn('explorer.exe', [`/select,${target}`], {
-                detached: true,
-                stdio: 'ignore',
-            }).unref();
-        }
-        else if (process.platform === 'darwin') {
-            spawn('open', ['-R', target], { detached: true, stdio: 'ignore' }).unref();
-        }
-        else {
-            // Linux 没有统一的「选中文件」参数：退化为打开所在目录。
-            spawn('xdg-open', [path.dirname(target)], { detached: true, stdio: 'ignore' }).unref();
-        }
-        return { found: true, presence: 'present', outPath: target, revealed: true };
-    }
-    catch (error) {
-        return {
+    const plan = revealCommand(target);
+    const opened = await openWithCommand(plan.command, plan.args);
+    return opened
+        ? { found: true, presence: 'present', outPath: target, revealed: true }
+        : {
             found: true,
             presence: 'present',
             revealed: false,
+            // 契约里没有「打开器不存在」这一项：按既有约定归到 busy，
+            // 真实原因放进 errorCode（ENOENT = 命令不在 PATH 上）
             reason: 'busy',
-            errorCode: reasonFromErrno(errnoOf(error)),
+            errorCode: 'ENOENT',
         };
-    }
 }
 /**
  * `op:'forget'`：只删本插件的两条进度记录（不碰任何产物）。
@@ -508,11 +554,6 @@ function reasonFromErrno(code) {
             return 'busy';
     }
 }
-/** 从 catch 到的 unknown 里取 errno（拿不到就给空串，调用方据此省略该字段）。 */
-function errnoOf(error) {
-    const code = error?.code;
-    return typeof code === 'string' ? code : '';
-}
 /**
  * 注册本插件的三个 HTTP 端点：`/api/smartdl.status`（读快照）、
  * `/api/smartdl.cleanup`（按保留窗口清历史）与 `/api/smartdl.manage`
@@ -545,7 +586,7 @@ export function registerStatusRpc(ctx) {
             // 「它到底删了什么、留下了什么」，而不是只看到一个「成功」。
             return ok(cleanupHistory(query, session));
         });
-        registerApiRoute(child, MANAGE_ENDPOINT, (payload) => {
+        registerApiRoute(child, MANAGE_ENDPOINT, async (payload) => {
             const parsed = readManagePayload(payload);
             // 校验失败一律 ok:false（而不是默默按默认值执行）：这是**不可逆**操作面，
             // 调用方必须知道自己的请求没有被当成别的东西执行。
@@ -557,7 +598,7 @@ export function registerStatusRpc(ctx) {
             // op === 'reveal'：打开系统文件管理器定位产物。**不需要 confirm** —— 它不
             // 修改任何东西，且路径只能来自本插件自己的记录（调用方给不了路径）。
             if (op === 'reveal')
-                return ok(revealManagedTask(taskId, session));
+                return ok(await revealManagedTask(taskId, session));
             if (op === 'forget') {
                 return ok({ recordRemoved: forgetManagedTask(taskId, session) });
             }

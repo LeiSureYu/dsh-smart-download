@@ -26,6 +26,24 @@ window.__ModuleLoader__.load({
 		/** Endpoint owned by src/rpc.ts. */
 		const STATUS_ENDPOINT = 'smartdl.status';
 		/**
+		 * Endpoint owned by src/rpc.ts (t31): the download manager's read/write face.
+		 *
+		 * One endpoint with an `op` discriminator, exactly like the design note in
+		 * `docs/PLAN-DLMANAGER.md` §4.3 — a second endpoint name would buy nothing
+		 * and double the route surface. Ops: `inspect` (does the file still exist,
+		 * and is it still the one we downloaded), `forget` (drop the record),
+		 * `delete` (drop the record and, when confirmed, the file too).
+		 */
+		const MANAGE_ENDPOINT = 'smartdl.manage';
+		/**
+		 * Sidebar entry + main-panel id.
+		 *
+		 * Deliberately namespaced: `plugins` / `settings` are the Host's own panel
+		 * ids, and `main` is a **keyed** slot — a collision would either throw on
+		 * `selectPanel` or silently replace someone else's page.
+		 */
+		const PANEL_ID = 'smartdl.downloads';
+		/**
 		 * How many tasks the pill asks for.
 		 *
 		 * 50 = the Host's `MAX_STATUS_LIMIT` (src/status.ts): asking for more is
@@ -115,11 +133,11 @@ window.__ModuleLoader__.load({
 		/** Overlay entry id; also the React key and the CSS class suffix. */
 		const ENTRY_ID = 'smartdl.progress';
 		/**
-		 * Header entry id. The button lives in
-		 * `conversation.session.header.actions` — the same session-level slot the
-		 * official jobs / subagent / agent-preset / agent-team UIs use for their
-		 * entry points — because that is the one always-mounted place a user can
-		 * reach after the auto panel has disappeared.
+		 * Header entry id. **Removed in the download-manager rework (t32)**: the
+		 * session header was the wrong place — a download manager is a global,
+		 * cross-session concern, and the sidebar is where the Host puts those
+		 * (jobs / plugins / settings). Kept as a named constant so the removal is
+		 * one line and greppable, rather than a silently vanished string.
 		 */
 		const ENTRY_BUTTON_ID = 'smartdl.progress-entry';
 
@@ -135,6 +153,31 @@ window.__ModuleLoader__.load({
 			'close': '关闭下载面板',
 			'empty': '暂无下载任务',
 			'sound': '完成提示音',
+			/* ---- t32 下载管理器 ---- */
+			'panel': '下载管理',
+			'panelClose': '返回会话',
+			'reveal': '在文件夹中显示',
+			'revealDisabled': '文件已不在原位置',
+			'deleteRecord': '删除记录',
+			'confirmTitle': '删除这条下载记录？',
+			'confirmRecordOnly': '只删除记录',
+			'confirmWithFile': '同时删除本地文件',
+			'confirmCancel': '取消',
+			'confirmIrreversible': '删除本地文件不可恢复，不进回收站。',
+			'confirmPath': '路径',
+			'confirmSize': '大小',
+			'confirmPresenceMissing': '文件已不在原位置（可能被移动或重命名），只能删除记录。',
+			'confirmPresenceChanged': '文件与下载完成时不一致（大小或修改时间已变），只能删除记录。',
+			'confirmPresenceBlocked': '该路径不是普通文件（目录或符号链接），只能删除记录。',
+			'confirmPresenceUnknown': '这条记录没有保存输出路径（更早版本的任务），只能删除记录。',
+			'presenceMissing': '文件已移走',
+			'presenceChanged': '文件已改变',
+			'presenceBlocked': '路径不可删',
+			'presenceUnknown': '无路径记录',
+			'presencePresent': '文件在原位',
+			'updatedAt': '最近更新',
+			'sizeUnknown': '大小未知',
+			'actionFailed': '操作失败',
 		};
 
 		const en = {
@@ -149,10 +192,49 @@ window.__ModuleLoader__.load({
 			'close': 'Close download panel',
 			'empty': 'No downloads yet',
 			'sound': 'Completion sound',
+			/* ---- t32 download manager ---- */
+			'panel': 'Downloads',
+			'panelClose': 'Back to chat',
+			'reveal': 'Show in folder',
+			'revealDisabled': 'File is no longer where it was downloaded',
+			'deleteRecord': 'Delete record',
+			'confirmTitle': 'Delete this download record?',
+			'confirmRecordOnly': 'Delete record only',
+			'confirmWithFile': 'Also delete the local file',
+			'confirmCancel': 'Cancel',
+			'confirmIrreversible': 'Deleting the local file is permanent — it does not go to the recycle bin.',
+			'confirmPath': 'Path',
+			'confirmSize': 'Size',
+			'confirmPresenceMissing': 'The file is no longer at its original location (moved or renamed); only the record can be deleted.',
+			'confirmPresenceChanged': 'The file no longer matches what was downloaded (size or mtime changed); only the record can be deleted.',
+			'confirmPresenceBlocked': 'That path is not a regular file (a directory or a symlink); only the record can be deleted.',
+			'confirmPresenceUnknown': 'This record has no saved output path (from an earlier version); only the record can be deleted.',
+			'presenceMissing': 'file moved',
+			'presenceChanged': 'file changed',
+			'presenceBlocked': 'path not deletable',
+			'presenceUnknown': 'no path recorded',
+			'presencePresent': 'file in place',
+			'updatedAt': 'Last update',
+			'sizeUnknown': 'size unknown',
+			'actionFailed': 'Action failed',
 		};
 
-		/** Required services (cordis fiber inject). */
-		const inject = ['slots', 'locale', 'connection'];
+		/**
+		 * Required services (cordis fiber inject).
+		 *
+		 * `remote.session` is what makes "show in folder" possible: it carries
+		 * `openWorkspacePath({ path, action: 'reveal' })`, which the Host maps to
+		 * `explorer.exe /select,<file>` on Windows, `open -R` on macOS and
+		 * `xdg-open <dir>` on Linux. It is a **service** dependency (the same
+		 * mechanism `slots` / `locale` / `connection` already use), not a module
+		 * whitelist entry — several official client plugins declare it verbatim.
+		 *
+		 * `layout` is what opens/closes the panel (`selectPanel(id)`).
+		 *
+		 * Both are read defensively at the call site: a profile without them
+		 * degrades to "no reveal button" / "no panel", never to a crash.
+		 */
+		const inject = ['slots', 'locale', 'connection', 'remote.session', 'layout'];
 
 		/** Statuses rendered as a live bar; the rest are receipts. */
 		function isLive(task, now) {
@@ -179,6 +261,109 @@ window.__ModuleLoader__.load({
 				if (task.updatedAt > newest) newest = task.updatedAt;
 			}
 			return newest;
+		}
+
+		/**
+		 * Can the local file still be deleted *together with* the record?
+		 *
+		 * The rule is the user's own: "取决于下载好的东西还在不在原文件夹…
+		 * 如果移走便只有删除记录". So the answer comes straight from the Host's
+		 * `inspect` verdict, and only `present` earns the destructive option:
+		 *
+		 *   present  → both options (the file is there and it is still ours)
+		 *   missing  → record only (moved / renamed / deleted)
+		 *   changed  → record only (size or mtime moved: that is someone else's
+		 *              file now, and deleting it would be destroying data we do
+		 *              not own — the Host refuses it too, R6)
+		 *   blocked  → record only (a directory or a symlink sits at that path)
+		 *   unknown  → record only (an older record with no saved path)
+		 *
+		 * Written as a whitelist of one rather than a blacklist of four on
+		 * purpose: a future sixth verdict must fail closed, and the next reader
+		 * does not have to enumerate which failures were thought of.
+		 *
+		 * @param presence - the Host's `inspect.presence` value
+		 * @returns whether "also delete the local file" may be offered
+		 */
+		function canDeleteLocalFile(presence) {
+			return presence === 'present';
+		}
+
+		/**
+		 * May the row offer "show in folder"?
+		 *
+		 * Needs an absolute path to reveal. `missing` still gets the button —
+		 * the file may have been moved elsewhere and revealing its *recorded*
+		 * path is still the best pointer we have — but a record with no path at
+		 * all cannot be revealed, so that one is disabled.
+		 */
+		function canReveal(task, presence) {
+			const outPath = typeof task.outPath === 'string' ? task.outPath : '';
+			return outPath !== '' && presence !== 'unknown';
+		}
+
+		/** The one-line presence badge for a row (already localized by the caller). */
+		function presenceKey(presence) {
+			switch (presence) {
+				case 'present':
+					return 'presencePresent';
+				case 'missing':
+					return 'presenceMissing';
+				case 'changed':
+					return 'presenceChanged';
+				case 'blocked':
+					return 'presenceBlocked';
+				default:
+					return 'presenceUnknown';
+			}
+		}
+
+		/** Why "also delete the local file" is unavailable, or null when it is. */
+		function presenceBlockerKey(presence) {
+			switch (presence) {
+				case 'missing':
+					return 'confirmPresenceMissing';
+				case 'changed':
+					return 'confirmPresenceChanged';
+				case 'blocked':
+					return 'confirmPresenceBlocked';
+				case 'unknown':
+					return 'confirmPresenceUnknown';
+				default:
+					return null;
+			}
+		}
+
+		/** Human byte size; falls back to the caller's "unknown" copy. */
+		function formatBytes(bytes, unknownText) {
+			const n = Number(bytes);
+			if (!Number.isFinite(n) || n <= 0) return unknownText;
+			if (n < 1024) return `${String(n)} B`;
+			const units = ['KB', 'MB', 'GB', 'TB'];
+			let value = n / 1024;
+			let unit = 0;
+			while (value >= 1024 && unit < units.length - 1) {
+				value /= 1024;
+				unit += 1;
+			}
+			return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+		}
+
+		/**
+		 * Short local timestamp for a manager row (`MM-DD HH:mm`).
+		 *
+		 * 为什么手写而不用 `toLocaleString()`：列表每行都要一个时间，而 locale
+		 * 格式随浏览器设置变（`2026/10/12 下午2:40`、`10/12/26, 2:40 PM`…），
+		 * 既撑不住行宽也没法在测试里断言一个固定值。`MM-DD HH:mm` 与本仓库其它
+		 * 地方的紧凑单位（`5.0 MB`、`4m51s`）同一种风格。
+		 *
+		 * @param ms epoch 毫秒；非法/缺省返回空串（调用方据此不渲染该 span）
+		 */
+		function formatShortTime(ms) {
+			if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '';
+			const d = new Date(ms);
+			const pad = (n) => String(n).padStart(2, '0');
+			return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 		}
 
 		/**
@@ -435,13 +620,25 @@ window.__ModuleLoader__.load({
 			let userOpen = false;
 			let autoHidden = false;
 			let muted = readMuted(storage);
+			/**
+			 * Per-task Host verdicts from `smartdl.manage` `op:'inspect'`, keyed by
+			 * task id: `{ presence, outPath, size }`.
+			 *
+			 * Why it lives in the store rather than in each row component: the
+			 * sidebar entry, the overlay pill and the manager page all need the
+			 * same answer to "can this row delete its file", and three copies of
+			 * an `inspect` result would drift the moment one of them refreshed.
+			 * Absent entry = "not inspected yet", which the UI treats as
+			 * conservative (no destructive option until the Host has answered).
+			 */
+			const presence = new Map();
 			const seenIds = new Set();
 			const announcer = createTerminalAnnouncer((kind) => {
 				if (muted) return;
 				play(kind);
 			});
 
-			const snapshot = () => ({ tasks, now, userOpen, autoHidden, muted });
+			const snapshot = () => ({ tasks, now, userOpen, autoHidden, muted, presence });
 			const emit = () => {
 				for (const listener of [...listeners]) listener();
 			};
@@ -459,6 +656,20 @@ window.__ModuleLoader__.load({
 				muted = next === true;
 				writeMuted(storage, muted);
 				emit();
+			};
+			/** Record one `inspect` verdict (the manager page is the only writer). */
+			const setPresence = (taskId, verdict) => {
+				if (typeof taskId !== 'string' || taskId === '') return;
+				presence.set(taskId, verdict);
+				emit();
+			};
+			/**
+			 * Drop a task's cached verdict. Called after `forget` / `delete`: the
+			 * record is gone, so a stale verdict would keep answering questions
+			 * about a row that no longer exists.
+			 */
+			const clearPresence = (taskId) => {
+				if (presence.delete(taskId)) emit();
 			};
 
 			return {
@@ -504,6 +715,8 @@ window.__ModuleLoader__.load({
 				toggle: () => (userOpen ? close() : open()),
 				setMuted: setMuted,
 				toggleMuted: () => setMuted(!muted),
+				setPresence: setPresence,
+				clearPresence: clearPresence,
 				/** 插件卸载：清掉待响的一声。 */
 				dispose: () => announcer.dispose(),
 			};
@@ -935,66 +1148,458 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * The `conversation.session.header.actions` entry: the always-there way
-		 * back into the panel.
+		 * The `sidebar.panellist` glyph.
 		 *
-		 * Why the header: the auto panel is *gone* by design a few seconds after
-		 * the last task settles, and the four official session-level UIs (jobs,
-		 * subagent, agent-preset, agent-team) all hang their entry points off this
-		 * very slot, so it is the conventional, always-mounted place — no new
-		 * chrome, no permanent capsule. It reads the shared store for its badge
-		 * and does not poll: the overlay's poller is the only Host caller.
-		 * @param props - the shared store and the locale seat.
-		 * @returns the entry button.
+		 * Why this component is almost empty: the sidebar renders the button
+		 * itself — its own `PanelRow` builds the `<button>` with the click
+		 * handler, `aria-label`, `aria-current` and the active state, and hands
+		 * us only `{ size, active }` to draw with (`dsh-client-ui-sidebar/lib/
+		 * client.js:173-199`; the plugin manager's icon is likewise a bare
+		 * `({ size }) => jsx(Icon…, { size })`). Writing our own `onClick` here
+		 * would be dead code, and re-declaring the a11y attributes would fight
+		 * the shell's.
+		 *
+		 * Inline SVG on purpose (no new dependency, no bundled asset): our
+		 * client.js is a hand-written classic script whose `require` is limited
+		 * to a small whitelist, and the official primitives package is not
+		 * known to be in it — see PLAN-DLMANAGER §1.5.
+		 *
+		 * @param props - `{ size, active }` from the sidebar row.
+		 * @returns the glyph.
 		 */
-		function SmartDlEntryButton({ panelStore, t }) {
-			const [, setRevision] = react.useState(0);
-			react.useEffect(
-				() => panelStore.subscribe(() => setRevision((n) => n + 1)),
-				[panelStore],
-			);
-			const state = panelStore.getSnapshot();
-			const liveCount =
-				state.tasks === null ? 0 : state.tasks.filter((task) => isLive(task, state.now)).length;
-			const view = panelView(state);
-
+		function SmartDlSidebarIcon({ size, active }) {
+			const px = typeof size === 'number' && size > 0 ? size : 18;
 			return react.createElement(
-				'button',
+				'svg',
 				{
-					type: 'button',
-					'data-dsh-smart-dl': 'entry',
-					'aria-label': t('entry'),
-					'aria-expanded': view.visible,
-					title: t('entry'),
-					onClick: () => panelStore.toggle(),
-					style: {
-						display: 'inline-flex',
-						alignItems: 'center',
-						gap: 4,
-						cursor: 'pointer',
-					},
+					width: px,
+					height: px,
+					viewBox: '0 0 24 24',
+					fill: 'none',
+					stroke: 'currentColor',
+					strokeWidth: 1.6,
+					strokeLinecap: 'round',
+					strokeLinejoin: 'round',
+					'aria-hidden': true,
+					focusable: false,
+					// The sidebar picks the colour; we only follow `active` for the
+					// one thing an icon legitimately owns — which glyph to draw.
+					style: { display: 'block' },
 				},
-				t('entry'),
-				liveCount > 0
-					? react.createElement(
-							'span',
-							{
-								// 进行中才出现的计数：没有下载时它只会变成永久噪声。
-								'data-dsh-smart-dl': 'entry-count',
-								'aria-hidden': true,
-								style: { fontVariantNumeric: 'tabular-nums' },
-							},
-							String(liveCount),
-						)
+				// A download tray: the arrow into the tray is the "incoming" half,
+				// the tray the "already here" half. One shape, both meanings.
+				react.createElement('path', { key: 'arrow', d: 'M12 3v11' }),
+				react.createElement('path', { key: 'head', d: 'M8 10l4 4 4-4' }),
+				react.createElement('path', { key: 'tray', d: 'M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2' }),
+				active === true
+					? react.createElement('path', { key: 'active', d: 'M12 3v11', strokeWidth: 2.2 })
 					: null,
 			);
 		}
 
 		/**
-		 * Client plugin body: install the dictionaries, then contribute the panel
-		 * to the frame-wide overlay *and* the entry button to the session header,
-		 * once those slots exist. The two share one `panelStore`, which is what
-		 * lets a button in one slot drive a panel in another.
+		 * One manager row: what it is, where it went, and the two things you can
+		 * do about it.
+		 *
+		 * `presence` is read from the shared store (filled by `inspect`), never
+		 * computed here: the verdict needs an `lstat` on the Host, and guessing
+		 * it in the browser would be exactly the kind of "looks right, isn't"
+		 * this project keeps getting bitten by. With no verdict yet the row is
+		 * conservative — no destructive option.
+		 *
+		 * @param props - the task, the locale seat, and the row's callbacks.
+		 * @returns the row element.
+		 */
+		function SmartDlManagerRow({ task, t, presence, onReveal, onDelete }) {
+			const label = shortLabel(task) || t('untitled');
+			const state = panelStore_PresenceOf(presence, task.id);
+			const deletable = canDeleteLocalFile(state.presence);
+			const revealable = canReveal(task, state.presence);
+			const blocker = presenceBlockerKey(state.presence);
+			// 行内「时间」：没有可展示的时间戳时整个 span 不渲染（不留一个空位）
+			const when = formatShortTime(task.updatedAt);
+
+			return react.createElement(
+				'div',
+				{
+					'data-dsh-smart-dl': 'manager-row',
+					'data-task-id': task.id,
+					style: {
+						display: 'flex',
+						flexDirection: 'column',
+						gap: 6,
+						padding: '10px 12px',
+						border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+						borderRadius: 10,
+					},
+				},
+				react.createElement(
+					'div',
+					{ style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+					react.createElement(
+						'span',
+						{
+							style: { flex: '1 1 auto', fontWeight: 600, fontSize: 13, wordBreak: 'break-all' },
+							title: fullLabel(task) || undefined,
+						},
+						label,
+					),
+					react.createElement(
+						'span',
+						{ style: { flex: 'none', fontSize: 11, opacity: 0.75 } },
+						`${String(task.pct ?? 0)}%`,
+					),
+				),
+				react.createElement(
+					'div',
+					{ style: { display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11, opacity: 0.8 } },
+					react.createElement('span', null, t(task.status === 'completed' ? 'completed' : task.status)),
+					state.size !== undefined && state.size !== null
+						? react.createElement('span', { key: 'size' }, formatBytes(state.size, t('sizeUnknown')))
+						: null,
+					when !== ''
+						? react.createElement(
+								'span',
+								{ key: 'time', 'data-dsh-smart-dl': 'updated-at', title: t('updatedAt') },
+								when,
+							)
+						: null,
+					react.createElement(
+						'span',
+						{ key: 'presence', 'data-dsh-smart-dl': 'presence' },
+						t(presenceKey(state.presence)),
+					),
+				),
+				react.createElement(
+					'div',
+					{ style: { display: 'flex', gap: 8 } },
+					react.createElement(
+						'button',
+						{
+							type: 'button',
+							'data-dsh-smart-dl': 'reveal',
+							'aria-label': t('reveal'),
+							disabled: !revealable,
+							title: revealable ? t('reveal') : t('revealDisabled'),
+							onClick: () => onReveal(task),
+							style: { cursor: revealable ? 'pointer' : 'default', fontSize: 12, padding: '4px 10px' },
+						},
+						t('reveal'),
+					),
+					react.createElement(
+						'button',
+						{
+							type: 'button',
+							'data-dsh-smart-dl': 'delete',
+							'aria-label': t('deleteRecord'),
+							onClick: () => onDelete(task),
+							style: { cursor: 'pointer', fontSize: 12, padding: '4px 10px' },
+						},
+						t('deleteRecord'),
+					),
+				),
+				// Why the destructive option is missing, when it is. Silence here
+				// reads as "the button is broken"; one line reads as "by design".
+				blocker === null && deletable
+					? null
+					: react.createElement(
+							'div',
+							{ style: { fontSize: 11, opacity: 0.75 } },
+							blocker === null ? null : t(blocker),
+						),
+			);
+		}
+
+		/** Read one task's cached verdict out of the store's presence map. */
+		function panelStore_PresenceOf(presence, taskId) {
+			const hit = presence instanceof Map ? presence.get(String(taskId)) : undefined;
+			if (!hit) return { presence: 'unknown', outPath: '', size: undefined };
+			return {
+				presence: typeof hit.presence === 'string' ? hit.presence : 'unknown',
+				outPath: typeof hit.outPath === 'string' ? hit.outPath : '',
+				size: typeof hit.size === 'number' ? hit.size : undefined,
+			};
+		}
+
+		/**
+		 * The delete confirmation.
+		 *
+		 * Two rules it exists to enforce, both from the user:
+		 *   1. show the **full absolute path** and the size — a destructive
+		 *      action must never be confirmed against a truncated label;
+		 *   2. offer "also delete the local file" **only** when the Host says the
+		 *      file is still there and still ours (`presence === 'present'`),
+		 *      otherwise only the record can go ("如果移走便只有删除记录").
+		 *
+		 * It also states plainly that deleting the file is permanent and skips
+		 * the recycle bin — there is no trash service in this runtime, so the
+		 * confirmation is the only warning the user gets.
+		 *
+		 * @param props - the task, its verdict, the locale seat, and callbacks.
+		 * @returns the dialog element.
+		 */
+		function SmartDlConfirmDialog({ task, t, verdict, onRecordOnly, onWithFile, onCancel }) {
+			const deletable = canDeleteLocalFile(verdict.presence);
+			const blocker = presenceBlockerKey(verdict.presence);
+			const outPath = verdict.outPath !== '' ? verdict.outPath : '(no path recorded)';
+
+			return react.createElement(
+				'div',
+				{
+					'data-dsh-smart-dl': 'confirm',
+					role: 'dialog',
+					'aria-modal': true,
+					'aria-label': t('confirmTitle'),
+					style: {
+						position: 'fixed',
+						inset: 0,
+						display: 'flex',
+						alignItems: 'center',
+						justifyContent: 'center',
+						background: 'rgba(0,0,0,0.32)',
+						zIndex: 40,
+					},
+				},
+				react.createElement(
+					'div',
+					{
+						style: {
+							width: 420,
+							maxWidth: 'calc(100vw - 32px)',
+							display: 'flex',
+							flexDirection: 'column',
+							gap: 10,
+							padding: 16,
+							borderRadius: 12,
+							background: 'var(--dsw-alias-bg-module-platform, #ffffff)',
+							boxShadow: '0 12px 32px rgba(0,0,0,0.24)',
+						},
+					},
+					react.createElement(
+						'div',
+						{ style: { fontWeight: 600, fontSize: 14 } },
+						t('confirmTitle'),
+					),
+					react.createElement(
+						'div',
+						{ style: { fontSize: 12, wordBreak: 'break-all' } },
+						`${t('confirmPath')}: ${outPath}`,
+					),
+					react.createElement(
+						'div',
+						{ style: { fontSize: 12 } },
+						`${t('confirmSize')}: ${formatBytes(verdict.size, t('sizeUnknown'))}`,
+					),
+					blocker === null
+						? null
+						: react.createElement('div', { key: 'why', style: { fontSize: 12, opacity: 0.8 } }, t(blocker)),
+					react.createElement(
+						'div',
+						{ style: { fontSize: 12, color: 'var(--dsw-alias-label-warning, #b45309)' } },
+						t('confirmIrreversible'),
+					),
+					react.createElement(
+						'div',
+						{ style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+						react.createElement(
+							'button',
+							{
+								type: 'button',
+								'data-dsh-smart-dl': 'confirm-cancel',
+								onClick: onCancel,
+								style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
+							},
+							t('confirmCancel'),
+						),
+						react.createElement(
+							'button',
+							{
+								type: 'button',
+								'data-dsh-smart-dl': 'confirm-record-only',
+								onClick: onRecordOnly,
+								style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
+							},
+							t('confirmRecordOnly'),
+						),
+						deletable
+							? react.createElement(
+									'button',
+									{
+										type: 'button',
+										'data-dsh-smart-dl': 'confirm-with-file',
+										onClick: onWithFile,
+										style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
+									},
+									t('confirmWithFile'),
+								)
+							: null,
+					),
+				),
+			);
+		}
+
+		/**
+		 * The manager page: the whole main area, one row per download.
+		 *
+		 * Registered as a **keyed** `main` slot, which is what makes it a page
+		 * rather than a floating card — the Host swaps the conversation out for
+		 * it (`selectPanel(PANEL_ID)` opens, `selectPanel(null)` goes back).
+		 * That is the plugin-manager shape, and it is what the user asked for
+		 * ("占满主区的一页").
+		 *
+		 * It does **not** poll: the overlay pill is the single poller and feeds
+		 * the shared store, so a page open for two minutes costs the same Host
+		 * traffic as a pill sitting in the corner. `inspect` is called once per
+		 * task when the page mounts, and again after any operation that could
+		 * have changed the file.
+		 *
+		 * @param props - the shared store, the manage caller, and the locale seat.
+		 * @returns the page element.
+		 */
+		function SmartDlManagerPage({ panelStore, manage, reveal, t, onClose }) {
+			const [, setRevision] = react.useState(0);
+			react.useEffect(
+				() => panelStore.subscribe(() => setRevision((n) => n + 1)),
+				[panelStore],
+			);
+			// The task awaiting confirmation, kept as local UI state: it is one
+			// interaction's worth of data, not something any other slot needs.
+			const [pending, setPending] = react.useState(null);
+			const [notice, setNotice] = react.useState(null);
+
+			const state = panelStore.getSnapshot();
+			const tasks = state.tasks === null ? [] : state.tasks;
+
+			/** Refresh every row's verdict. Cheap on purpose: one call per task. */
+			const inspectAll = async () => {
+				for (const task of tasks) {
+					try {
+						const result = await manage({ op: 'inspect', taskId: task.id });
+						if (result && result.ok) panelStore.setPresence(task.id, result.value);
+					} catch {
+						// One bad row must not blank the page; the row keeps its
+						// conservative "unknown" verdict and stays deletable by
+						// record only.
+					}
+				}
+			};
+
+			react.useEffect(() => {
+				void inspectAll();
+				// 只在挂载时跑一次：任务列表由共享 store 驱动，行内操作后会显式再查。
+				// eslint-disable-next-line no-empty-function
+			}, []);
+
+			const revealTask = async (task) => {
+				const verdict = panelStore_PresenceOf(state.presence, task.id);
+				const outPath = verdict.outPath !== '' ? verdict.outPath : task.outPath;
+				if (typeof outPath !== 'string' || outPath === '') return;
+				try {
+					await reveal(outPath);
+				} catch {
+					setNotice(t('actionFailed'));
+				}
+			};
+
+			const remove = async (task, withFile) => {
+				setPending(null);
+				try {
+					// `confirm` 只在该为 true 时出现：forget 的契约里没有这个字段，
+					// 多带一个 `confirm:false` 只会让服务端多一个「为什么在这里」的疑问。
+					const body = withFile
+						? { op: 'delete', taskId: task.id, confirm: true }
+						: { op: 'forget', taskId: task.id };
+					const result = await manage(body);
+					if (result && result.ok) {
+						panelStore.clearPresence(task.id);
+						// Force the shared snapshot to refresh: the record is gone,
+						// and the pill's next poll may be up to 2 seconds away.
+						panelStore.publish(tasks.filter((row) => row.id !== task.id));
+						await inspectAll();
+					} else {
+						setNotice(t('actionFailed'));
+					}
+				} catch {
+					setNotice(t('actionFailed'));
+				}
+			};
+
+			return react.createElement(
+				'div',
+				{
+					'data-dsh-smart-dl': 'manager',
+					style: {
+						display: 'flex',
+						flexDirection: 'column',
+						gap: 12,
+						height: '100%',
+						padding: 16,
+						boxSizing: 'border-box',
+						overflowY: 'auto',
+					},
+				},
+				react.createElement(
+					'div',
+					{ style: { display: 'flex', alignItems: 'center', gap: 8 } },
+					react.createElement(
+						'span',
+						{ style: { flex: '1 1 auto', fontWeight: 600, fontSize: 15 } },
+						t('panel'),
+					),
+					react.createElement(
+						'button',
+						{
+							type: 'button',
+							'data-dsh-smart-dl': 'manager-close',
+							'aria-label': t('panelClose'),
+							onClick: () => {
+								setPending(null);
+								if (typeof onClose === 'function') onClose();
+							},
+							style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
+						},
+						t('panelClose'),
+					),
+				),
+				notice === null
+					? null
+					: react.createElement('div', { key: 'notice', style: { fontSize: 12 } }, notice),
+				tasks.length === 0
+					? react.createElement('div', { style: { fontSize: 13, opacity: 0.7 } }, t('empty'))
+					: tasks.map((task) =>
+							react.createElement(SmartDlManagerRow, {
+								key: task.id,
+								task: task,
+								t: t,
+								presence: state.presence,
+								onReveal: revealTask,
+								onDelete: (row) => setPending(row.id),
+							}),
+						),
+				pending === null
+					? null
+					: react.createElement(SmartDlConfirmDialog, {
+							task: tasks.find((row) => row.id === pending) ?? { id: pending },
+							t: t,
+							verdict: panelStore_PresenceOf(state.presence, pending),
+							onCancel: () => setPending(null),
+							onRecordOnly: () => {
+								const row = tasks.find((item) => item.id === pending);
+								if (row) void remove(row, false);
+							},
+							onWithFile: () => {
+								const row = tasks.find((item) => item.id === pending);
+								if (row) void remove(row, true);
+							},
+						}),
+			);
+		}
+
+		/**
+		 * Client plugin body: install the dictionaries, then contribute the
+		 * overlay pill (progress only), the sidebar entry + main page (the
+		 * download manager), sharing one `panelStore` — which is what lets a
+		 * click in one slot drive a page registered in another.
 		 * @param ctx - client root context.
 		 */
 		function apply(ctx) {
@@ -1036,6 +1641,44 @@ window.__ModuleLoader__.load({
 				panelStore: panelStore,
 			});
 
+			/** Business face of the manager page: status, manage, and reveal. */
+			const manageInjected = () => ({
+				requestStatus: (payload, signal) =>
+					ctx.connection.rpc.call(API_PATH, STATUS_ENDPOINT, payload, signal),
+				/**
+				 * One `smartdl.manage` call.
+				 *
+				 * Returns the **Host's whole envelope** (`{ ok, value }`), not just
+				 * `value`: the page distinguishes "the Host refused" from "the Host
+				 * answered with something unexpected", and only the envelope carries
+				 * that. Unwrapping here would collapse both into a falsy `result.ok`
+				 * and silently drop every verdict — which is exactly what the first
+				 * cut of this function did.
+				 */
+				manage: async (body) => {
+					const result = await ctx.connection.rpc.call(API_PATH, MANAGE_ENDPOINT, body);
+					return result;
+				},
+				reveal: async (outPath) => {
+					// Read defensively: `remote.session` is declared in `inject`, but a
+					// profile without the session controller must degrade to "nothing
+					// happened" rather than take the page down.
+					const session = ctx.remote && ctx.remote.session;
+					if (!session || typeof session.openWorkspacePath !== 'function') return { ok: false };
+					try {
+						return await session.openWorkspacePath({ path: outPath, action: 'reveal' });
+					} catch {
+						return { ok: false };
+					}
+				},
+				panelStore: panelStore,
+				onClose: () => {
+					if (ctx.layout && typeof ctx.layout.selectPanel === 'function') {
+						ctx.layout.selectPanel(null);
+					}
+				},
+			});
+
 			ctx.effect(
 				() =>
 					ctx.slots.inject('shell.overlay', function* () {
@@ -1053,23 +1696,41 @@ window.__ModuleLoader__.load({
 				'dsh-smart-dl: shell.overlay progress pill',
 			);
 
+			// `main` 先注册、`sidebar.panellist` 后注册：选中一个不存在的 key 会抛错
+			// 并保留当前面板（dsh-client-ui-layout 的 README），所以页面必须比入口
+			// 先就位 —— 同一 apply 内保序即可。
 			ctx.effect(
 				() =>
-					ctx.slots.inject('conversation.session.header.actions', function* () {
+					ctx.slots.inject('main', function* () {
 						yield ctx.slots.register(
 							{
-								// 与 jobs / subagent / agent-preset / agent-team 同一个槽位：
-								// 会话头部按钮是「面板关掉之后还能再打开」的惯例入口。
-								name: 'conversation.session.header.actions',
-								id: ENTRY_BUTTON_ID,
+								name: 'main',
+								key: PANEL_ID,
+								locale: NS,
+								inject: manageInjected,
+							},
+							SmartDlManagerPage,
+						);
+					}),
+				'dsh-smart-dl: main downloads page',
+			);
+
+			ctx.effect(
+				() =>
+					ctx.slots.inject('sidebar.panellist', () =>
+						ctx.slots.register(
+							{
+								name: 'sidebar.panellist',
+								id: PANEL_ID,
 								order: 30,
+								label: () => 'Downloads',
 								locale: NS,
 								inject: () => ({ panelStore: panelStore }),
 							},
-							SmartDlEntryButton,
-						);
-					}),
-				'dsh-smart-dl: session header entry',
+							SmartDlSidebarIcon,
+						),
+					),
+				'dsh-smart-dl: sidebar downloads entry',
 			);
 		}
 

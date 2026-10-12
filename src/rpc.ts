@@ -14,8 +14,16 @@
  *         或 { ..., "result": { "ok": false, "error": { code, message, details } } }
  */
 import type { Context } from '@deepseek-ai/cordis'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import { cleanupHistory, readCleanupQuery } from './cleanup.js'
+import {
+  isSafeTaskId,
+  removeTaskRecords,
+  resolveDownloadProgressDir,
+  resolveTaskProgressDir,
+} from './progress.js'
 import type { ProgressSession } from './progress.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
@@ -30,8 +38,21 @@ const STATUS_ENDPOINT = 'smartdl.status'
  * 一条路由一个路径，再拆一条就得把信封校验整套抄第二遍；而这两个 method
  * 本来就是同一个 RPC 面的两个方向（读快照 / 删历史），共用信封与错误语义
  * 才是对的。
+ *
+ * （1.4.0 更正：这段注释此前写成「同挂一个路由、按 method 分派」，但实现从来就是
+ * **一条端点一条精确路由** —— `registerApiRoute` 把路径拼成 `/api/<端点名>`；
+ * 两个端点真正共享的是**信封校验与错误语义**（复用同一个 `registerApiRoute`），
+ * 不是路径。加第三个端点时若不更正，读到这里的人会以为还要改一张分派表。）
  */
 const CLEANUP_ENDPOINT = 'smartdl.cleanup'
+/**
+ * 管理端点名（1.4.0）：下载管理器的服务端入口，按 `op` 分派三个操作。
+ *
+ * 与 cleanup 的区别是**粒度**：cleanup 按保留窗口批量清进度文件，manage 处理
+ * 「用户显式点的那一条任务」（查状态 / 只删记录 / 连产物一起删）。两者不合并：
+ * 时间窗口语义与单条确认语义混在一起，迟早出现「随手清一下却删掉了刚下的文件」。
+ */
+const MANAGE_ENDPOINT = 'smartdl.manage'
 
 /** `connection.fetch.register` 接受的精确路由（结构化子集，避免依赖 dsh-client-connection 类型）。 */
 interface ConnectionFetchRoute {
@@ -260,9 +281,366 @@ function registerApiRoute(
   child.effect(start, `dsh-smart-dl: ${API_PATH}/${endpoint} Fetch route`)
 }
 
+/* ================= 1.4.0：smartdl.manage（下载管理器的服务端） ================= */
+
 /**
- * 注册本插件的两个 HTTP 端点：`/api/smartdl.status`（读快照）与
- * `/api/smartdl.cleanup`（清历史）。
+ * `inspect` 的 `presence` 取值。**这是与浏览器端（t32）钉死的契约**，
+ * 值集合不得单方面增删 —— 客户端按它渲染文案。
+ */
+export type ManagePresence = 'present' | 'changed' | 'missing' | 'unknown' | 'blocked'
+
+/** `delete` 的 `reason` 取值。同样是与客户端钉死的契约。 */
+export type DeleteReason =
+  | 'gone'
+  | 'busy'
+  | 'denied'
+  | 'is-dir'
+  | 'is-link'
+  | 'changed'
+  | 'no-path'
+  | 'running'
+
+/** 固定文案做成常量：客户端与测试都按同一份措辞断言，散落的字面量迟早对不上。 */
+export const MANAGE_BAD_PAYLOAD =
+  '拒绝管理请求：body 必须是对象，且带 op（inspect / forget / delete）与 taskId'
+export const MANAGE_CONFIRM_REQUIRED =
+  '拒绝删除本地文件：需要 confirm:true；只想删记录请用 op:"forget"'
+/**
+ * 不可逆性必须明写（1.4.0）：删除不进回收站。
+ *
+ * 为什么：本插件是 Node 侧宿主代码，运行时里没有可用的回收站服务（Electron 的
+ * `shell.trashItem` 不在我们的能力面里），所以 `unlink` 就是**永久删除**。
+ * 这句话同时出现在这里、返回结果的 reason 文案里与 docs/SECURITY.md。
+ */
+export const MANAGE_DELETE_IRREVERSIBLE =
+  '删除本地文件是永久删除（不进回收站）：删了就没了'
+
+/** `delete` / `forget` 的返回形状（契约）。 */
+export interface ManageDeleteResult {
+  fileDeleted: boolean
+  reason?: DeleteReason
+  /**
+   * 附加诊断（非契约字段，客户端可以不看）：底层 errno 代码。
+   *
+   * 为什么加：契约的 `reason` 集合是冻结的，而真实世界里还有 `ENOSPC`、
+   * `EROFS` 这类失败。把它们一律塞进 `busy` 会丢掉唯一能排查的信息 ——
+   * 加一个**只增不改**的字段比悄悄改 reason 语义安全。
+   */
+  errorCode?: string
+  recordRemoved: string[]
+  /** 契约外的补充：不可逆提示，客户端可直接展示 */
+  irreversible: string
+}
+
+/** `inspect` 的返回形状（契约字段 + 一个只增的 `found`）。 */
+export interface ManageInspectResult {
+  /** 契约外补充：这个 taskId 是否真的有记录（区分「记录里没路径」与「没有这条记录」） */
+  found: boolean
+  presence: ManagePresence
+  outPath: string
+  size?: number
+  fileSize?: number
+  fileMtimeMs?: number
+  /** 记录里的任务状态（`running` / `completed` / `failed` / `cancelled`），无记录时为 '' */
+  state: string
+}
+
+/** 已校验的管理请求。 */
+export interface ManageRequest {
+  op: 'inspect' | 'forget' | 'delete'
+  taskId: string
+  confirm: boolean
+  session?: ProgressSession
+}
+
+/**
+ * 解析并校验管理请求。
+ *
+ * **R1 落点**：这里只接受 `taskId` / `op` / `confirm` / `session` —— 载荷里
+ * 出现任何路径字段都不会被读取，更不会被当成删除目标。删除目标只能来自本插件
+ * 自己写下的记录（`outPath`），这是「只删自己的下载」这条前提的根。
+ *
+ * @param payload 信封里的 payload（任何东西）
+ * @returns 合法请求，或固定文案的错误
+ */
+export function readManagePayload(
+  payload: unknown,
+): { request: ManageRequest } | { error: string } {
+  if (payload === null || typeof payload !== 'object') return { error: MANAGE_BAD_PAYLOAD }
+  const body = payload as { op?: unknown; taskId?: unknown; confirm?: unknown; session?: unknown }
+  const op = body.op
+  if (op !== 'inspect' && op !== 'forget' && op !== 'delete') {
+    return { error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete）` }
+  }
+  // **R2 落点**：taskId 会被拼进文件名，必须过白名单；带分隔符 / `..` / 驱动器号
+  // 的 id 能让 path.join 指到记录目录之外，而删除是不可逆的。
+  if (!isSafeTaskId(body.taskId)) {
+    return {
+      error: `${MANAGE_BAD_PAYLOAD}（taskId 只允许 [A-Za-z0-9._-]、字母数字开头、最长 64 字符）`,
+    }
+  }
+  const session = readSession(body.session)
+  return {
+    request: {
+      op,
+      taskId: body.taskId,
+      confirm: body.confirm === true,
+      ...(session === undefined ? {} : { session }),
+    },
+  }
+}
+
+/** 一条记录指向的产物在磁盘上的判定结果（`inspect` 与 `delete` 共用同一套）。 */
+type TargetCheck =
+  | { kind: 'no-path' }
+  /** 记录里的路径不合规（非绝对 / 未归一化 / 落在本插件自己的记录目录里） */
+  | { kind: 'bad-path'; why: string }
+  | { kind: 'missing' }
+  | { kind: 'dir' }
+  | { kind: 'link' }
+  | { kind: 'other' }
+  | { kind: 'changed'; fileSize: number }
+  | { kind: 'present'; fileSize: number }
+
+/** `path.relative` 判定「child 是否在 parent 之内」（含相等）。 */
+function isUnder(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child)
+  if (rel === '') return true
+  return !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/**
+ * 检查记录里的 `outPath` 是否是一个**可以安全删除的普通文件**。
+ *
+ * 这一串就是 R3–R6、R9 的落点，顺序是刻意的（从最便宜、最不能跳过的开始）：
+ *
+ * - **R3 绝对路径**：相对路径的含义取决于进程 cwd，删的时候可能与写的时候不是
+ *   同一个文件。
+ * - **R4 归一化 + 无 NUL**：`..\..\Windows\System32\x` 这类构造能在「看起来是
+ *   自己记录过的路径」外壳下指向别处；归一化比较是最便宜的防线。
+ * - **R5 只用 `lstat`**：`stat`/`realpath` 会跟进符号链接，于是「删记录里的那个
+ *   文件」会变成「删链接指向的任意目标」。目录也在这里被拒（目录删除会退化成
+ *   递归删除，代价不可控）。
+ * - **R6 尺寸核对**：原文件被移走后，另一个文件占了同一个名字时，只看存在性会
+ *   删错东西。记录里没有尺寸（0）时跳过核对（那只是少一道保险，不会更宽松）。
+ * - **R9 不许删自己的记录目录**：那条路属于「删除记录」的职责。
+ *
+ * @param outPath 记录里的输出路径
+ * @param recordedSize 记录里的字节数（0 = 没记录）
+ * @param session 当前会话（用于判定 R9 的轨道一目录）
+ */
+export function checkManagedTarget(
+  outPath: string,
+  recordedSize: number,
+  session?: ProgressSession,
+): TargetCheck {
+  if (outPath === '') return { kind: 'no-path' }
+  if (outPath.includes('\u0000')) return { kind: 'bad-path', why: '路径里含 NUL' }
+  if (!path.isAbsolute(outPath)) return { kind: 'bad-path', why: '不是绝对路径' }
+  if (path.normalize(outPath) !== outPath) return { kind: 'bad-path', why: '路径未归一化（含 . / ..）' }
+
+  // R9：本插件自己的记录目录（轨道一 + 轨道二）内的任何东西都不该从这个入口删。
+  const ownDirs = [resolveDownloadProgressDir(), resolveTaskProgressDir(session)]
+  for (const dir of ownDirs) {
+    if (dir !== null && isUnder(dir, outPath)) {
+      return { kind: 'bad-path', why: '目标是本插件的进度记录目录' }
+    }
+  }
+
+  let st: fs.Stats
+  try {
+    // R5：lstat，不跟进符号链接
+    st = fs.lstatSync(outPath)
+  } catch {
+    return { kind: 'missing' }
+  }
+  if (st.isSymbolicLink()) return { kind: 'link' }
+  if (st.isDirectory()) return { kind: 'dir' }
+  if (!st.isFile()) return { kind: 'other' }
+  // R6：只有记录了尺寸（>0）时才核对；不一致就是「这不是当初那一个」
+  if (recordedSize > 0 && recordedSize !== st.size) return { kind: 'changed', fileSize: st.size }
+  return { kind: 'present', fileSize: st.size }
+}
+
+/** 把磁盘判定映射成契约里的 `presence`。 */
+function presenceOf(check: TargetCheck, found: boolean): ManagePresence {
+  if (!found) return 'unknown'
+  switch (check.kind) {
+    case 'no-path':
+      return 'unknown'
+    case 'missing':
+      return 'missing'
+    case 'changed':
+      return 'changed'
+    case 'present':
+      return 'present'
+    default:
+      // bad-path / dir / link / other：都存在但我们不会去动它
+      return 'blocked'
+  }
+}
+
+/** 按 taskId 读记录（合并两条轨道），返回 TaskStatus 或 undefined。 */
+function findTask(taskId: string, session?: ProgressSession) {
+  // limit 传 1：已经按 taskId 过滤过，过滤发生在截断之前（见 readDownloadStatus）
+  return readDownloadStatus(1, taskId, session).tasks[0]
+}
+
+/**
+ * `op:'inspect'`：报告这条任务的产物当前是什么样子。
+ *
+ * 纯只读（`lstat`），不做任何修改；没有记录时如实报 `found:false` ——
+ * 「没有这条记录」与「记录里没有路径」在 UI 上是两种文案，不能混。
+ */
+export function inspectManagedTask(
+  taskId: string,
+  session?: ProgressSession,
+): ManageInspectResult {
+  const task = findTask(taskId, session)
+  if (!task) {
+    return { found: false, presence: 'unknown', outPath: '', state: '' }
+  }
+  const check = checkManagedTarget(task.outPath, task.size, session)
+  return {
+    found: true,
+    presence: presenceOf(check, true),
+    outPath: task.outPath,
+    ...(task.size > 0 ? { size: task.size } : {}),
+    ...(check.kind === 'present' || check.kind === 'changed' ? { fileSize: check.fileSize } : {}),
+    ...(task.fileMtimeMs > 0 ? { fileMtimeMs: task.fileMtimeMs } : {}),
+    state: task.status,
+  }
+}
+
+/**
+ * `op:'forget'`：只删本插件的两条进度记录（不碰任何产物）。
+ *
+ * 与产物删除的区别：这一步只删**我们自己写的文件**，路径由 taskId + 目录规则
+ * 推导（R2 + `taskRecordFiles` 的 lstat 校验），不接受调用方给路径。
+ */
+export function forgetManagedTask(taskId: string, session?: ProgressSession): string[] {
+  return removeTaskRecords(taskId, session)
+}
+
+/**
+ * `op:'delete'`：**先删产物、成功后再删记录**（顺序不得颠倒）。
+ *
+ * 为什么顺序是硬要求：先删记录的话，产物删除失败时用户就永久失去了重试的入口
+ * （记录没了 = 面板上再也看不到这一条，而文件还躺在磁盘上）。
+ *
+ * 哪些情况**仍然删记录**（用户的目标「清掉这一条」可以做全）：
+ * - `gone`：文件本来就不在了，没有什么可重试的；
+ * - `no-path`：记录里根本没有路径（1.4.0 之前的历史记录），这是 ③↔④ 的降级矩阵，
+ *   面板在这条路径上只会给「删除记录」一个动作。
+ *
+ * 哪些情况**保留记录**：其余所有原因 —— 产物还在（`busy`/`denied`/`changed`/
+ * `is-dir`/`is-link`）、或任务还在跑（`running`）。保留记录 = 保留重试入口。
+ *
+ * @param taskId 已通过白名单的 task id
+ * @param session 当前会话（定位轨道一记录）
+ */
+export function deleteManagedTask(
+  taskId: string,
+  session?: ProgressSession,
+): ManageDeleteResult {
+  const task = findTask(taskId, session)
+  const irreversible = MANAGE_DELETE_IRREVERSIBLE
+
+  // 没有记录：没有可删的产物，也没有可删的记录文件（幂等）
+  if (!task) {
+    return { fileDeleted: false, reason: 'no-path', recordRemoved: [], irreversible }
+  }
+  // **R8**：任务还在跑。此时删产物会让正在写的 aria2 进入诡异状态，也不符合
+  // 用户此刻的本意（他多半想取消，而不是删除）。记录同样保留。
+  if (task.status === 'running') {
+    return { fileDeleted: false, reason: 'running', recordRemoved: [], irreversible }
+  }
+
+  const check = checkManagedTarget(task.outPath, task.size, session)
+  if (check.kind === 'no-path') {
+    return {
+      fileDeleted: false,
+      reason: 'no-path',
+      recordRemoved: forgetManagedTask(taskId, session),
+      irreversible,
+    }
+  }
+  if (check.kind === 'missing') {
+    return {
+      fileDeleted: false,
+      reason: 'gone',
+      recordRemoved: forgetManagedTask(taskId, session),
+      irreversible,
+    }
+  }
+  if (check.kind === 'bad-path') {
+    // R3/R4/R9：路径不合规 —— 产物不删（记录也保留，让人能看到这条记录为什么删不掉）
+    return { fileDeleted: false, reason: 'denied', errorCode: 'BAD_PATH', recordRemoved: [], irreversible }
+  }
+  if (check.kind === 'dir') {
+    return { fileDeleted: false, reason: 'is-dir', recordRemoved: [], irreversible }
+  }
+  if (check.kind === 'link') {
+    return { fileDeleted: false, reason: 'is-link', recordRemoved: [], irreversible }
+  }
+  if (check.kind === 'other') {
+    // 既不是普通文件也不是目录/链接（设备、FIFO…）：同样按「本地策略拒绝」回报
+    return { fileDeleted: false, reason: 'denied', errorCode: 'NOT_A_FILE', recordRemoved: [], irreversible }
+  }
+  if (check.kind === 'changed') {
+    // R6：文件被换过（尺寸不符）。删错东西的代价远大于「让用户手动处理」。
+    return { fileDeleted: false, reason: 'changed', recordRemoved: [], irreversible }
+  }
+
+  // 到这里是 present：唯一真的会 unlink 的分支
+  try {
+    fs.unlinkSync(task.outPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? ''
+    return {
+      fileDeleted: false,
+      reason: reasonFromErrno(code),
+      ...(code === '' ? {} : { errorCode: code }),
+      recordRemoved: [],
+      irreversible,
+    }
+  }
+  return {
+    fileDeleted: true,
+    recordRemoved: forgetManagedTask(taskId, session),
+    irreversible,
+  }
+}
+
+/**
+ * 把 `unlink` 的 errno 映射成契约里的 `reason`。
+ *
+ * 映射刻意保守：只有明确是「本来就没有」才报 `gone`（用户侧文案是「文件已不在」），
+ * 权限类报 `denied`，占用类报 `busy`，目录报 `is-dir`，链接报 `is-link`，
+ * **其余一律 `busy` 并把原始 code 放进 `errorCode`** —— 绝不把不明失败报成成功，
+ * 也不编一个契约里不存在的 reason。
+ */
+function reasonFromErrno(code: string): DeleteReason {
+  switch (code) {
+    case 'ENOENT':
+      return 'gone'
+    case 'EACCES':
+    case 'EPERM':
+      return 'denied'
+    case 'EISDIR':
+      return 'is-dir'
+    case 'ELOOP':
+      return 'is-link'
+    default:
+      // EBUSY / ENOTEMPTY / EROFS / ENOSPC / 未知 …都归到 busy
+      return 'busy'
+  }
+}
+
+/**
+ * 注册本插件的三个 HTTP 端点：`/api/smartdl.status`（读快照）、
+ * `/api/smartdl.cleanup`（按保留窗口清历史）与 `/api/smartdl.manage`
+ * （1.4.0：下载管理器的 inspect / forget / delete）。
  *
  * 通过 `ctx.inject(['connection'], ...)` 挂载：只有当 profile 真的提供了
  * connection 服务（web profile）时才注册，纯 CLI profile 下静默跳过，
@@ -271,6 +649,7 @@ function registerApiRoute(
  * 浏览器端目前只调用 status（面板保持只读）；cleanup 是 D7-② 拍板要加的
  * **清理入口** —— 从前 `ProgressReporter.cleanup()` 只有调用方在代码里显式
  * 调用才有效，这个端点把它变成可被外部（脚本、未来的面板按钮）触发的入口。
+ * manage 是 1.4.0 下载管理器要的**单条操作入口**，删除规则见上方那一节。
  *
  * @param ctx 插件上下文
  */
@@ -290,6 +669,26 @@ export function registerStatusRpc(ctx: Context): void {
       // 逐文件的删 / 留都在 value 里如实报告：清理不可逆，调用方必须能核对
       // 「它到底删了什么、留下了什么」，而不是只看到一个「成功」。
       return ok(cleanupHistory(query, session))
+    })
+
+    registerApiRoute(child, MANAGE_ENDPOINT, (payload) => {
+      const parsed = readManagePayload(payload)
+      // 校验失败一律 ok:false（而不是默默按默认值执行）：这是**不可逆**操作面，
+      // 调用方必须知道自己的请求没有被当成别的东西执行。
+      if ('error' in parsed) return fail(parsed.error)
+      const { op, taskId, confirm, session } = parsed.request
+
+      if (op === 'inspect') return ok(inspectManagedTask(taskId, session))
+      if (op === 'forget') {
+        return ok({ recordRemoved: forgetManagedTask(taskId, session) })
+      }
+
+      // op === 'delete'：没有 confirm:true 就整个拒绝。
+      // 契约里 `reason` 的取值集合没有「未确认」这一项，所以这里不能悄悄降级成
+      // 「只删记录」—— 那会让客户端在 fileDeleted 处理不当时以为产物也删了。
+      // （要只删记录，客户端用 op:'forget'：语义显式，返回形状也不同。）
+      if (!confirm) return fail(MANAGE_CONFIRM_REQUIRED)
+      return ok(deleteManagedTask(taskId, session))
     })
   })
 }

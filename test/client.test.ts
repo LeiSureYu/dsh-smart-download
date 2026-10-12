@@ -221,7 +221,10 @@ interface CapturedSlot {
 
 /** 两个 slot 的 id（与 src/client.js 的常量一致；测试里显式写死，防止被悄悄改名）。 */
 const OVERLAY_SLOT = 'shell.overlay'
-const HEADER_SLOT = 'conversation.session.header.actions'
+/** t32：侧边栏入口（只画图标，按钮由侧边栏渲染）。 */
+const SIDEBAR_SLOT = 'sidebar.panellist'
+/** t32：占满主区的下载管理页面。 */
+const MAIN_SLOT = 'main'
 
 /** 翻译替身：字典键原样返回，`eta` 插值保留成 `eta:<值>` 便于断言。 */
 function translator(): (key: string, vars?: Record<string, string>) => string {
@@ -355,24 +358,48 @@ interface Panel {
   render: (sessionState?: { byId: Record<string, unknown> }) => unknown
   /** 读一次面板渲染产出的正文文本 */
   text: () => string
-  /** 渲染会话头部入口按钮，返回它的元素树与按钮元素 */
-  renderEntry: () => { tree: unknown; text: string; button: FakeElement | undefined }
-  /** 点击入口按钮（调它的 onClick），返回点击后重新渲染的入口元素树 */
-  clickEntry: () => unknown
+  /**
+   * 渲染侧边栏入口（t32 之后它只是一个 SVG 图标：按钮、点击、aria、选中态
+   * 全部由侧边栏自己渲染，我们只提供图标）。
+   */
+  renderEntry: () => { tree: unknown; text: string; svg: FakeElement | undefined }
+  /**
+   * t32 改写（原为 `clickEntry`）：侧边栏入口不再有自己的 onClick，「打开」
+   * 由侧边栏调 `ctx.layout.selectPanel(id)` 完成。这里等价地驱动共享 store，
+   * 并记一次 selectPanel 调用（开合契约的观测点）。
+   */
+  openManager: () => unknown
+  /** 渲染 main 下载管理页面 */
+  renderManager: () => unknown
+  /** main slot 本身：供 mountWithManage 在渲染前替换注入面上的 manage */
+  __mainSlot: { inject: Record<string, unknown> }
+  /** main 页面注入面上的 manage（Host 调用替身） */
+  manage: (body: Record<string, unknown>) => Promise<unknown>
+  /** main 页面注入面上的 reveal（文件管理器调用替身） */
+  reveal: (outPath: string) => Promise<unknown>
+  /** 记录 selectPanel 的调用序列（开合断言用） */
+  panelCalls: Array<string | null>
   /** 点击面板上的 × 关闭按钮（调它的 onClick），返回点击后重新渲染的面板树 */
   clickClose: () => unknown
   /** 直接往共享 store 里灌一份快照（等价于面板轮询拿到新数据） */
   publish: (tasks: Array<Record<string, unknown>>) => void
+  /** 直接往共享 store 里灌一条 inspect 判定（管理器用例用） */
+  setPresence: (id: string, verdict: Record<string, unknown>) => void
   /** 卸载（清理 interval，避免拖住测试进程） */
   dispose: () => void
 }
 
 /**
- * 装配面板与入口按钮。
+ * 装配面板、侧边栏入口与 main 页面。
  *
- * 两个 slot 都要接住：`shell.overlay`（面板）与
- * `conversation.session.header.actions`（固定入口）。它们的 `inject` 都会**真跑一次**
- * （业务面在那里构造），组件拿到的是同一份注入对象 + 框架 prop。
+ * t32 改写说明（原注释写的是「装配面板与入口按钮」，只接 overlay 与会话头部）：
+ * 会话头部入口按用户要求移除，改成 **`sidebar.panellist`（入口）+ `main`（页面）**。
+ * 三个 slot 都要接住，它们的 `inject` 都会**真跑一次**（业务面在那里构造），
+ * 组件拿到的是同一份注入对象 + 框架 prop。
+ *
+ * 桩的 `inject` 同时接受 generator 与非 generator 两种形态：侧边栏按官方惯例
+ * 用 `inject(slot, () => register(...))`（单个 registration），其余两个是
+ * `function* () { yield register(...) }`。
  *
  * @param requestStatus 面板向 Host 取快照的替身
  */
@@ -393,8 +420,13 @@ function mountPanel(
   const ctx = {
     locale: { register: () => () => undefined },
     slots: {
-      inject: (slotName: string, fn: () => Generator<unknown, void, unknown>) => {
-        for (const step of fn()) {
+      inject: (slotName: string, fn: () => Generator<unknown, void, unknown> | unknown) => {
+        const produced = fn() as Generator<unknown, void, unknown>
+        const steps: unknown[] =
+          produced && typeof (produced as Generator)[Symbol.iterator] === 'function'
+            ? [...(produced as Generator<unknown, void, unknown>)]
+            : [produced]
+        for (const step of steps) {
           const registered = step as {
             options: { name: string; id: string; inject?: () => Record<string, unknown> }
             component: CapturedSlot['component']
@@ -424,10 +456,13 @@ function mountPanel(
       return () => undefined
     },
     connection: { rpc: { call: () => Promise.resolve({ ok: true, value: { tasks: [] } }) } },
+    remote: { session: { openWorkspacePath: () => Promise.resolve({ ok: true }) } },
+    layout: { selectPanel: () => undefined },
   }
   mod.apply(ctx)
   assert.ok(slots.has(OVERLAY_SLOT), 'apply 必须注册 shell.overlay 面板')
-  assert.ok(slots.has(HEADER_SLOT), 'apply 必须注册会话头部入口按钮')
+  assert.ok(slots.has(SIDEBAR_SLOT), 'apply 必须注册 sidebar.panellist 入口')
+  assert.ok(slots.has(MAIN_SLOT), 'apply 必须注册 main 下载管理页面')
 
   const renderSlot = (
     slotName: string,
@@ -462,9 +497,37 @@ function mountPanel(
 
   const store = (slots.get(OVERLAY_SLOT) as CapturedSlot).inject.panelStore as {
     publish: (tasks: Array<Record<string, unknown>>) => void
+    open: () => void
+    close: () => void
+    setPresence: (id: string, verdict: Record<string, unknown>) => void
+    clearPresence: (id: string) => void
   }
 
   let last: unknown = null
+  /** 记录 main 页面拿到的注入面（manage / reveal / onClose），供管理器用例断言。 */
+  const mainInject = (slots.get(MAIN_SLOT) as CapturedSlot).inject as {
+    manage: (body: Record<string, unknown>) => Promise<unknown>
+    reveal: (outPath: string) => Promise<unknown>
+    onClose: () => void
+  }
+  /** 记录 layout.selectPanel 的调用（开合契约的观测点）。 */
+  const panelCalls: Array<string | null> = []
+
+  /** 渲染 main 下载管理页面。 */
+  const renderManager = (): unknown => {
+    const slot = slots.get(MAIN_SLOT)
+    assert.ok(slot, 'main 页面必须已注册')
+    react.markRender(MAIN_SLOT)
+    // manage / reveal / onClose 每次都从 `slot.inject` 现取：用例要在渲染前替换
+    // manage（页面的 inspectAll 在挂载时跑，替换晚一步就打在默认桩上）。
+    const element = slot.component({
+      ...slot.inject,
+      onClose: () => panelCalls.push(null),
+      t: translator(),
+    })
+    return renderHostTree(element)
+  }
+
   return {
     rig,
     render(sessionState) {
@@ -474,19 +537,36 @@ function mountPanel(
     text() {
       return textOf(last)
     },
+    /**
+     * 渲染侧边栏入口（t32 之后它只是一个图标：按钮由侧边栏自己渲染）。
+     * 返回元素树与 svg 元素。
+     */
     renderEntry() {
-      const tree = renderSlot(HEADER_SLOT)
-      const buttons = findAll(tree, (el) => el.type === 'button')
-      return { tree, text: textOf(tree), button: buttons[0] }
+      const tree = renderSlot(SIDEBAR_SLOT)
+      const svg = findAll(tree, (el) => el.type === 'svg')[0]
+      return { tree, text: textOf(tree), svg }
     },
-    clickEntry() {
-      const { button } = this.renderEntry()
-      assert.ok(button, '入口必须是一个 button 元素')
-      const onClick = button.props.onClick as (() => void) | undefined
-      assert.equal(typeof onClick, 'function', '入口按钮必须可点（onClick 必须是函数）')
-      onClick?.()
-      return this.renderEntry().tree
+    /**
+     * 打开管理器：等价于「侧边栏按钮被点」—— 侧边栏自己调 selectPanel(id)，
+     * 我们这里直接驱动共享 store 的 open()，并记录一次 selectPanel 调用。
+     */
+    openManager() {
+      panelCalls.push('smartdl.downloads')
+      store.open()
+      return renderManager()
     },
+    /** 渲染 main 下载管理页面（不记 selectPanel 调用）。 */
+    renderManager,
+    /**
+     * main slot 本身（供 `mountWithManage` 在渲染前替换注入面上的 manage）。
+     * 暴露它是为了让「替换」发生在 `renderManager()` 之前 —— 页面的 inspectAll
+     * 在挂载时跑，晚一步替换就打在了默认桩上。
+     */
+    __mainSlot: slots.get(MAIN_SLOT) as CapturedSlot,
+    /** main 页面注入面上的 manage（默认桩） */
+    manage: mainInject.manage,
+    reveal: mainInject.reveal,
+    panelCalls,
     clickClose() {
       const tree = renderPanel()
       const close = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'close')[0]
@@ -498,6 +578,9 @@ function mountPanel(
     },
     publish(tasks) {
       store.publish(tasks)
+    },
+    setPresence(id, verdict) {
+      store.setPresence(id, verdict)
     },
     dispose() {
       // 卸载语义：**所有组件**的 effect 槽清理函数都要跑（面板的轮询计时器就在其中），
@@ -890,12 +973,27 @@ test('面板：title 用完整名字（行内仍是截断的），没有任何�
   assert.equal(emptyTitle.length, 0, '无标识的任务不该挂 title')
 })
 
-test('面板：apply 注册了 overlay 面板 + 会话头部入口 + 字典（effect 标签不变）', () => {
+/**
+ * t32 改写说明（原用例名为「apply 注册了 overlay 面板 + 会话头部入口 + 字典」）：
+ *
+ * 改什么、为什么：
+ * 1. **桩的 `inject` 现在同时接受 generator 与非 generator 两种形态。**
+ *    侧边栏入口按 `dsh-client-ui-sidebar` 的惯例用 `inject(slot, () => register(...))`
+ *    （返回单个 registration，不是 generator；官方插件管理器就是这么写的），
+ *    而 `main` / `shell.overlay` 仍是 `function* () { yield register(...) }`。
+ *    原桩只会 `for (const step of fn())`，遇到前者直接抛 TypeError。
+ *    这不是放宽断言 —— 下面照旧逐条断言「注册了哪几个 slot、哪个 id」。
+ * 2. **期望的 slot 集合从「overlay + 会话头部」改成「overlay + main + sidebar」。**
+ *    会话头部入口（`smartdl.progress-entry`）按用户明确要求**移除**（那个位置不对），
+ *    它的职能由侧边栏入口 + main 全局面板接替。断言改成**正向**列出新集合，
+ *    并额外断言头部 slot 不再出现（防止以后有人把它加回来）。
+ */
+test('面板：apply 注册了 overlay 面板 + main 页面 + 侧边栏入口 + 字典（会话头部入口已移除）', () => {
   const labels: string[] = []
   const spec = getSpec()
   const rig = createRig()
   const react = makeReact(rig)
-  const registered: Array<{ name: string; id: string }> = []
+  const registered: Array<{ name: string; id?: string; key?: string }> = []
   const mod = spec.factory((name) => {
     if (name === 'react') return react
     throw new Error(`unexpected require: ${name}`)
@@ -903,10 +1001,17 @@ test('面板：apply 注册了 overlay 面板 + 会话头部入口 + 字典（ef
   mod.apply({
     locale: { register: () => () => undefined },
     slots: {
-      inject: (_name: string, fn: () => Generator<unknown, void, unknown>) => {
-        for (const step of fn()) {
-          const options = (step as { options: { name: string; id: string } }).options
-          registered.push({ name: options.name, id: options.id })
+      inject: (_name: string, fn: () => Generator<unknown, void, unknown> | unknown) => {
+        // 两种形态都走同一条归集路径：generator 逐个 yield，非 generator 直接就是
+        // 那一个 registration。
+        const produced = fn() as Generator<unknown, void, unknown>
+        const steps: unknown[] =
+          produced && typeof (produced as Generator)[Symbol.iterator] === 'function'
+            ? [...(produced as Generator<unknown, void, unknown>)]
+            : [produced]
+        for (const step of steps) {
+          const options = (step as { options: { name: string; id?: string; key?: string } }).options
+          registered.push({ name: options.name, id: options.id, key: options.key })
         }
         return () => undefined
       },
@@ -918,47 +1023,91 @@ test('面板：apply 注册了 overlay 面板 + 会话头部入口 + 字典（ef
       return () => undefined
     },
     connection: { rpc: { call: () => Promise.resolve({ ok: true }) } },
+    remote: { session: { openWorkspacePath: () => Promise.resolve({ ok: true }) } },
+    layout: { selectPanel: () => undefined },
   })
-  // 两个 slot 都要在：面板（浮层）与固定入口（会话头部）。
+
+  // 三个 slot 都要在：浮层（只播报）、main 页面（管理器）、侧边栏入口。
   assert.deepEqual(
-    registered.map((r) => `${r.name}#${r.id}`),
-    ['shell.overlay#smartdl.progress', 'conversation.session.header.actions#smartdl.progress-entry'],
-    'overlay 条目 id 必须保持不变，入口按钮走会话头部槽位',
+    registered.map((r) => `${r.name}#${r.id ?? r.key ?? ''}`),
+    [
+      'shell.overlay#smartdl.progress',
+      'main#smartdl.downloads',
+      'sidebar.panellist#smartdl.downloads',
+    ],
+    'overlay 条目 id 必须保持不变；管理器走 main keyed slot；入口走侧边栏',
+  )
+  // main 的 key 必须与侧边栏入口的 id 相同 —— 这是「点入口能选中这个面板」的前提
+  // （dsh-client-ui-layout：selectPanel(key)，key 不存在会抛错并保留当前面板）。
+  const main = registered.find((r) => r.name === 'main')
+  const sidebar = registered.find((r) => r.name === 'sidebar.panellist')
+  assert.ok(main && sidebar, 'main 与 sidebar.panellist 都必须注册')
+  assert.equal(main.key, sidebar.id, 'main 的 key 必须与侧边栏入口的 id 相同')
+  // 会话头部入口必须已经不在（用户明确说那个位置不对）
+  assert.equal(
+    registered.some((r) => r.name === 'conversation.session.header.actions'),
+    false,
+    '会话头部入口必须已移除',
+  )
+  assert.equal(
+    registered.some((r) => r.id === 'smartdl.progress-entry'),
+    false,
+    'progress-entry 这个 id 不应再出现',
   )
   assert.ok(labels.includes('dsh-smart-dl: shell.overlay progress pill'))
-  assert.ok(labels.includes('dsh-smart-dl: session header entry'))
+  assert.ok(labels.includes('dsh-smart-dl: main downloads page'))
+  assert.ok(labels.includes('dsh-smart-dl: sidebar downloads entry'))
   assert.ok(labels.includes('dsh-smart-dl: dictionaries'))
+  assert.equal(
+    labels.includes('dsh-smart-dl: session header entry'),
+    false,
+    '会话头部入口的 effect 标签必须一并消失',
+  )
 })
 
 /* ==================== t26：固定入口 / 完整历史 / 主动关闭 / 5 秒消失 ==================== */
 
-test('入口：会话头部按钮可点、带 aria-label，打开后面板是 dialog 且空列表给空态', async () => {
+/**
+ * t32 改写说明（原用例名「入口：会话头部按钮可点、带 aria-label，打开后面板是
+ * dialog 且空列表给空态」）：
+ *
+ * 改什么、为什么：
+ * - **入口从「会话头部按钮」改为「侧边栏图标」**：用户明确说头部那个位置不对。
+ *   侧边栏按官方约定自己渲染按钮（点击 / aria / 选中态都在它那儿，见
+ *   `dsh-client-ui-sidebar/lib/client.js:173-199`），我们只提供图标 ——
+ *   所以断言从「button + onClick + aria-label + aria-expanded」改成
+ *   「svg 图标存在、aria-hidden、跟随 size 绘制」。这不是删断言，是把断言
+ *   移到**我们真正负责的那一层**。
+ * - **「打开」的观测点从「点入口按钮」改为「selectPanel(id)」**：开合契约是
+ *   `ctx.layout.selectPanel(PANEL_ID)`（方案 §1.4），这是本次改造的正面契约，
+ *   必须被断言。
+ * - overlay 浮层的 dialog / 空态 / × 三条断言**原样保留**（浮层职责不变）。
+ */
+test('入口：侧边栏只提供图标（按钮由侧边栏渲染），打开走 selectPanel(id)，浮层仍是 dialog', async () => {
   const { request } = serve([])
   const panel = mountPanel(request)
-  // try/finally：断言失败时也必须 dispose。否则 2 秒轮询计时器没人清，
-  // 子进程永远不退出 —— 一次「假红」会把整条测试命令挂死（本任务踩过一次）。
   try {
     panel.render()
     await settle()
 
     const entry = panel.renderEntry()
-    assert.ok(entry.button, '入口必须渲染一个 button 元素')
-    assert.equal(entry.button.type, 'button')
-    assert.equal(typeof entry.button.props.onClick, 'function', '入口必须可点')
-    assert.equal(entry.button.props['aria-label'], 'entry', '入口必须有可读标签（字典键原样返回）')
-    assert.equal(entry.button.props['aria-expanded'], false, '关着时 aria-expanded 必须是 false')
+    assert.ok(entry.svg, '侧边栏入口必须渲染一个图标元素')
+    assert.equal(entry.svg.type, 'svg')
+    assert.equal(entry.svg.props['aria-hidden'], true, '图标必须对读屏隐藏（按钮的可读名由侧边栏给）')
+    assert.equal(entry.svg.props.width, 18, '未指定 size 时用默认尺寸')
+    // 我们**不**自己写 onClick：写了也是死代码（侧边栏不调它）
+    assert.equal(entry.svg.props.onClick, undefined, '入口图标不应自带 onClick（那是侧边栏的职责）')
 
     assert.equal(panel.render(), null, '没有任务时自动层不该显示')
 
-    const openedTree = panel.clickEntry()
-    assert.ok(openedTree, '点击入口后必须渲染出面板')
+    panel.openManager()
+    assert.deepEqual(panel.panelCalls, ['smartdl.downloads'], '打开必须走 selectPanel(PANEL_ID)')
     const root = panel.render()
     assert.ok(root, '打开状态下面板必须持续渲染')
     const dialogs = findAll(root, (el) => el.props.role === 'dialog')
     assert.equal(dialogs.length, 1, '用户主动打开的面板在无障碍语义上是 dialog')
     assert.equal(dialogs[0].props['aria-label'], 'title', 'dialog 必须带可读标签')
     assert.match(textOf(root), /empty/, '没有任何任务时给出空态文案，而不是空白面板')
-    assert.equal(panel.renderEntry().button?.props['aria-expanded'], true, '打开后 aria-expanded 必须为 true')
     // × 关闭控件本身也要有可读标签（不依赖 title 悬停）
     const close = findAll(root, (el) => el.props?.['data-dsh-smart-dl'] === 'close')
     assert.equal(close.length, 1, '打开的面板必须有且只有一个关闭控件')
@@ -968,6 +1117,13 @@ test('入口：会话头部按钮可点、带 aria-label，打开后面板是 di
   }
 })
 
+/**
+ * t32 改写说明（原用例名「入口：打开后列出已完成的历史任务（超出回执期也看得到）」）：
+ * 「打开」的驱动从 `clickEntry()` 换成 `openManager()`（等价于侧边栏按钮被点），
+ * 其余断言（历史文件名可见 / 终态标签 / 非空态 / progressbar 语义）**逐条保留** ——
+ * 这条本来是 t26 为「入口要能看到完整历史」立的，现在历史改由 main 页面承担，
+ * 浮层这条仍然成立（它自己也走 panelRows）。
+ */
 test('入口：打开后列出已完成的历史任务（超出回执期也看得到）', async () => {
   const longAgo = Date.now() - 10 * 60 * 1000
   const { request } = serve([
@@ -980,7 +1136,7 @@ test('入口：打开后列出已完成的历史任务（超出回执期也看�
 
     assert.equal(panel.render(), null, '终态早就超过回执期，自动层必须已经不显示')
 
-    panel.clickEntry()
+    panel.openManager()
     const root = panel.render()
     assert.ok(root, '打开后必须显示完整历史')
     const text = textOf(root)
@@ -997,7 +1153,7 @@ test('入口：打开后列出已完成的历史任务（超出回执期也看�
   }
 })
 
-test('关闭：× 关掉后不会被轮询弹回（同一批任务），新任务或再次点入口才回来', async () => {
+test('关闭：× 关掉后不会被轮询弹回（同一批任务），新任务才回来', async () => {
   const live = [task({ id: 'r1', name: 'running.bin', status: 'running', updatedAt: Date.now() })]
   const { request } = serve(live)
   const panel = mountPanel(request)
@@ -1011,12 +1167,9 @@ test('关闭：× 关掉后不会被轮询弹回（同一批任务），新任�
     panel.publish(live)
     assert.equal(panel.render(), null, '同一批任务不得把面板弹回来')
 
-    // ② 用户再次点入口 → 又能打开
-    assert.ok(panel.clickEntry(), '再次点入口必须能打开')
-    panel.clickClose()
-    assert.equal(panel.render(), null, '再关一次同样生效')
-
-    // ① 出现新任务 → 自动层重新武装
+    // ② t32 改写：原来这里断言「再次点入口能打开」（入口按钮有自己的 onClick）。
+    //    现在入口是侧边栏图标，开合由 selectPanel 承担，浮层的重开语义改为
+    //    「新任务 id 出现时自动层重新武装」—— 这正是 t26 立的同一条不变量。
     panel.publish([
       ...live,
       task({ id: 'r2', name: 'second.bin', status: 'running', updatedAt: Date.now() }),
@@ -1240,7 +1393,9 @@ test('提示音：默认开着，开关在打开的面板里，关掉后不响�
     )
 
     // 打开面板 → 开关出现，默认是「开着」
-    panel.clickEntry()
+    // （t32：`clickEntry()` → `openManager()`，只为「把面板打开」这一个意图换驱动方式，
+    //  声音相关的断言一条未动。）
+    panel.openManager()
     const open = findAll(panel.render(), (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle')
     assert.equal(open.length, 1, '打开的面板必须有静音开关')
     assert.equal(open[0].props.checked, true, '首次使用默认开着')
@@ -1269,7 +1424,8 @@ test('提示音：默认开着，开关在打开的面板里，关掉后不响�
 test('提示音：刷新后沿用上次的选择（localStorage 里是静音就还是静音）', () => {
   const { panel, page, timers } = mountSoundPanel({ stored: { 'dsh-smart-dl.muted': '1' } })
   try {
-    panel.clickEntry()
+    // t32：clickEntry() → openManager()（只为「打开面板」换驱动，声音断言未动）
+    panel.openManager()
     const box = findAll(panel.render(), (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle')
     assert.equal(box[0].props.checked, false, '上次选了静音，刷新后必须还是静音')
 
@@ -1392,3 +1548,386 @@ test('面板：收尾 —— 面板轮询计时器全部被 dispose 清掉', asy
     '还有活着的轮询计时器，说明某个面板没有被 dispose',
   )
 })
+
+/* ==================== t32：下载管理器（侧边栏入口 + main 页面 + 删除） ==================== */
+
+/**
+ * 造一个「记住调用、返回给定结果」的 manage 替身。
+ *
+ * 为什么要可编程：删除的三条路径（只删记录 / 同时删文件 / 取消）必须各自断言
+ * 「发了什么 body」，而 body 里的 `op` / `taskId` / `confirm` 正是服务端契约。
+ */
+function manageStub(handler: (body: Record<string, unknown>) => unknown) {
+  const calls: Array<Record<string, unknown>> = []
+  const fn = (body: Record<string, unknown>) => {
+    calls.push(body)
+    return Promise.resolve(handler(body))
+  }
+  return { fn, calls }
+}
+
+/** 一条带输出路径与尺寸的管理器任务快照。 */
+function managedTask(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'm1',
+    name: 'report.pdf',
+    pct: 100,
+    msg: '下载完成',
+    status: 'completed',
+    spd: '',
+    eta: '',
+    updatedAt: Date.now(),
+    outPath: 'D:\\Downloads\\report.pdf',
+    size: 5242880,
+    ...over,
+  }
+}
+
+/**
+ * 把注入面上的 manage 换成可编程替身。
+ *
+ * 必须换在 `renderManager()` **之前**：页面的 `inspectAll()` 在挂载 effect 里跑，
+ * 晚一步替换就打在了默认桩上（presence 永远 unknown）。第一版把替换写在渲染之后，
+ * 三条用例因此断言的是 unknown 而不是它们想测的 present/missing。
+ */
+function replaceManage(panel: Panel, manage: (body: Record<string, unknown>) => Promise<unknown>): void {
+  ;(panel.__mainSlot.inject as { manage: unknown }).manage = manage
+}
+
+/**
+ * 渲染一次 main 页面并**等 inspect 落定**，返回刷新后的树。
+ *
+ * 为什么必须「渲染 → await → 再渲染」：`inspectAll()` 是 async 的（每条任务一次
+ * Host 调用），而桩的 `useEffect` 在渲染时同步执行。所以渲染完立刻读树，读到的是
+ * inspect **之前**的状态。第一版就是这么写的，presence 徽标断言因此看到 unknown。
+ */
+/**
+ * 点一个元素（按 data 属性找），找不到就断言失败。
+ *
+ * 单独一个 helper 而不是在每条用例里写 `as (() => void) | undefined`：
+ * `FakeElement['props']` 是 `Record<string, unknown>`，直接调 `el.props.onClick()`
+ * 过不了 `pnpm check`（TS18046）。既有用例（:574）用的是就地强转，这里改成
+ * helper 只是不想在同一文件里混两种写法。
+ */
+function clickByData(node: unknown, dataAttr: string, label: string): void {
+  const el = findAll(node, (e) => e.props?.['data-dsh-smart-dl'] === dataAttr)[0]
+  assert.ok(el, `${label}：必须找到 data-dsh-smart-dl=${dataAttr} 的元素`)
+  const onClick = el.props.onClick as (() => void) | undefined
+  assert.equal(typeof onClick, 'function', `${label}：必须可点`)
+  onClick?.()
+}
+
+/**
+ * 渲染一次 main 页面并**等 inspect 落定**，返回刷新后的树。
+ *
+ * 为什么必须「渲染 → await → 再渲染」：`inspectAll()` 是 async 的（每条任务一次
+ * Host 调用），而桩的 `useEffect` 在渲染时同步执行。所以渲染完立刻读树，读到的是
+ * inspect **之前**的状态。第一版就是这么写的，presence 徽标断言因此看到 unknown。
+ */
+async function renderManagerSettled(panel: Panel): Promise<unknown> {
+  panel.renderManager() // 触发挂载 effect（首轮 inspect）
+  await settle() // 等 inspect 的 promise 落地
+  return panel.renderManager() // 读刷新后的树
+}
+
+test('管理器：页面占满主区、每行显示文件名/状态/进度/时间/大小/presence 徽标', async () => {
+  // 固定时间戳（本地时区构造 → 格式化结果与 TZ 无关）：验收要求行内能看见「时间」
+  const fixed = new Date(2026, 9, 12, 14, 40).getTime()
+  const { request } = serve([managedTask({ updatedAt: fixed })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const text = textOf(tree)
+    assert.match(text, /report\.pdf/, '文件名必须可见')
+    assert.match(text, /completed/, '状态必须可见')
+    assert.match(text, /100%/, '进度必须可见')
+    assert.match(text, /presencePresent|文件在原位/, 'presence 徽标必须可见')
+    assert.match(text, /5\.0 MB/, '文件大小必须可见（验收要求行内有大小）')
+    assert.match(text, /10-12 14:40/, '更新时间必须可见（验收要求行内有时间）')
+    // 时间那一格必须是它自己的元素，并带可读标签（悬停/读屏都能知道这是什么时间）
+    const when = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'updated-at')
+    assert.equal(when.length, 1, '每行有且只有一个时间元素')
+    assert.equal(when[0].props.title, 'updatedAt', '时间元素必须带 i18n 标签')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：没有可用时间戳时不渲染时间格（不留空位）', async () => {
+  const { request } = serve([managedTask({ updatedAt: 0 })])
+  const manage = manageStub(() => ({ ok: true, value: { presence: 'present', outPath: 'x', size: 1 } }))
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'updated-at').length,
+      0,
+      'updatedAt=0 时不该渲染一个空的时间格',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：打开时对每条任务 inspect 一次（presence 来自 Host，不在浏览器里猜）', async () => {
+  const { request } = serve([managedTask({ id: 'a' }), managedTask({ id: 'b' })])
+  const manage = manageStub(() => ({ ok: true, value: { presence: 'present', outPath: 'x', size: 1 } }))
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    await renderManagerSettled(panel)
+    const inspects = manage.calls.filter((c) => c.op === 'inspect')
+    assert.equal(inspects.length, 2, '每条任务都要 inspect 一次')
+    assert.deepEqual(
+      inspects.map((c) => c.taskId).sort(),
+      ['a', 'b'],
+      'inspect 必须带上 taskId',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：present → 同时提供「只删记录」与「同时删除本地文件」', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+
+    const del = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'delete')[0]
+    assert.ok(del, '每行必须有「删除记录」按钮')
+    clickByData(tree, 'delete', '删除按钮')
+    // 二次确认：完整绝对路径 + 大小 + 不可恢复声明都必须出现
+    const dialog = await renderManagerSettled(panel)
+    const text = textOf(dialog)
+    assert.match(text, /D:\\Downloads\\report\.pdf/, '确认框必须显示完整绝对路径（不得截断）')
+    assert.match(text, /5\.0 MB|5 MB/, '确认框必须显示文件大小')
+    assert.match(text, /confirmIrreversible|不进回收站|recycle bin/, '必须明写删除不可恢复、不进回收站')
+
+    const withFile = findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file')[0]
+    const recordOnly = findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only')[0]
+    assert.ok(withFile, 'present 必须提供「同时删除本地文件」')
+    assert.ok(recordOnly, 'present 也必须提供「只删记录」')
+
+    // 点「同时删除」→ 发 delete + confirm:true
+    clickByData(dialog, 'confirm-with-file', '同时删除按钮')
+    await settle()
+    const del2 = manage.calls.find((c) => c.op === 'delete')
+    assert.ok(del2, '必须发出 delete')
+    assert.equal(del2.confirm, true, 'delete 必须带 confirm:true')
+    assert.equal(del2.taskId, 'm1')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：missing（文件已移走）→ 只给「删除记录」，不给「同时删除本地文件」', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'missing', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+
+    clickByData(tree, 'delete', '删除按钮')
+    const dialog = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file').length,
+      0,
+      'missing 时不得提供「同时删除本地文件」（用户：移走便只有删除记录）',
+    )
+    assert.ok(
+      findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only').length === 1,
+      'missing 时仍必须提供「只删记录」',
+    )
+    assert.match(
+      textOf(dialog),
+      /confirmPresenceMissing|已不在原位置|no longer at/,
+      '必须说明为什么不能删文件',
+    )
+
+    // 只删记录走 forget，且**不带** confirm
+    clickByData(dialog, 'confirm-record-only', '只删记录按钮')
+    await settle()
+    const forget = manage.calls.find((c) => c.op === 'forget')
+    assert.ok(forget, '只删记录必须发 forget')
+    assert.ok(!Object.hasOwn(forget, 'confirm'), 'forget 不应带 confirm')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：changed / blocked / unknown 一律只给删记录（白名单式判定，不枚举失败）', async () => {
+  for (const presence of ['changed', 'blocked', 'unknown']) {
+    const { request } = serve([managedTask()])
+    const manage = manageStub((body) =>
+      body.op === 'inspect'
+        ? { ok: true, value: { presence, outPath: 'D:\\Downloads\\report.pdf', size: 1 } }
+        : { ok: true, value: { recordRemoved: ['x'] } },
+    )
+    const panel = mountPanel(request)
+    try {
+      panel.render()
+      await settle()
+      replaceManage(panel, manage.fn)
+      const tree = await renderManagerSettled(panel)
+      clickByData(tree, 'delete', '删除按钮')
+      const dialog = await renderManagerSettled(panel)
+      assert.equal(
+        findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file').length,
+        0,
+        `presence=${presence} 不得提供「同时删除本地文件」`,
+      )
+    } finally {
+      panel.dispose()
+    }
+  }
+})
+
+/**
+ * 反证记录（t32）：把 `canReveal` 的 `presence !== 'unknown'` 判据删掉，这条断言
+ * **第一版是绿的** —— 因为当时用例的任务 `outPath: ''`，`outPath !== ''` 那道门
+ * 照样把它挡住，等于测的是另一条判据。所以这里补一个「有路径 + unknown」的任务：
+ * 老记录（1.4.0 之前）没有 outPath，但**有** outPath 而 inspect 判 unknown 的
+ * 组合（Host 判定失败 / 记录与磁盘不一致到无法判断）同样必须置灰。
+ */
+test('管理器：unknown 判定 → 「在文件夹中显示」置灰（有路径也置灰）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub(() => ({
+    ok: true,
+    value: { presence: 'unknown', outPath: 'D:\\Downloads\\report.pdf', size: 0 },
+  }))
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const reveal = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'reveal')[0]
+    assert.ok(reveal, '按钮仍要渲染（置灰），不是消失')
+    assert.equal(reveal.props.disabled, true, 'presence=unknown 时即使有路径也必须置灰')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：unknown（老记录无路径）→ 「在文件夹中显示」置灰', async () => {
+  const { request } = serve([managedTask({ outPath: '' })])
+  const manage = manageStub(() => ({ ok: true, value: { presence: 'unknown', outPath: '', size: 0 } }))
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const reveal = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'reveal')[0]
+    assert.ok(reveal, '按钮仍要渲染（置灰），不是消失')
+    assert.equal(reveal.props.disabled, true, '没有路径时「在文件夹中显示」必须置灰')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：「在文件夹中显示」走注入的 reveal，参数是记录里的绝对路径', async () => {
+  const { request } = serve([managedTask()])
+  const revealed: string[] = []
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    ;(panel.__mainSlot.inject as { reveal: unknown }).reveal = (outPath: string) => {
+      revealed.push(outPath)
+      return Promise.resolve({ ok: true })
+    }
+    const tree = await renderManagerSettled(panel)
+    const revealBtn = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'reveal')[0]
+    assert.equal(revealBtn.props.disabled, false, 'present 时「在文件夹中显示」必须可用')
+    clickByData(tree, 'reveal', '在文件夹中显示按钮')
+    await settle()
+    assert.deepEqual(revealed, ['D:\\Downloads\\report.pdf'], '必须用记录里的绝对路径调 reveal')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：关闭走 selectPanel(null)（回到会话界面）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub(() => ({ ok: true, value: { presence: 'present', outPath: 'x', size: 1 } }))
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const close = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'manager-close')[0]
+    assert.ok(close, '管理器必须有「返回会话」按钮')
+    clickByData(tree, 'manager-close', '返回会话按钮')
+    assert.deepEqual(panel.panelCalls, [null], '关闭必须调 selectPanel(null)')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：inspect 失败 → 该行保持 conservative（不给删文件选项），页面不崩', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) => {
+    if (body.op === 'inspect') throw new Error('host down')
+    return { ok: true, value: {} }
+  })
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    // 页面照常渲染
+    assert.match(textOf(tree), /report\.pdf/)
+    clickByData(tree, 'delete', '删除按钮')
+    const dialog = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file').length,
+      0,
+      'inspect 失败时不得提供「同时删除本地文件」',
+    )
+    assert.ok(
+      findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only').length === 1,
+      'inspect 失败时仍必须允许删记录',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+

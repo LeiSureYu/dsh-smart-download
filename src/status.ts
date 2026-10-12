@@ -51,6 +51,25 @@ export interface TaskStatus {
    * schema 允许的值（`type: string`），不会让 download_status 的返回校验失败。
    */
   batch: string
+  /**
+   * 输出文件的绝对路径（1.4.0 新增），来自记录的 `outPath`。
+   *
+   * 老记录没有该字段时收敛成**空串**（与 `batch` 完全同一套手法）：1.4.0 之前
+   * 写下的记录必须照常可读，面板据此把「在文件管理器中显示」与「删除本地文件」
+   * 置灰，只留下「删除记录」。空串同时是 schema 允许的值（`type: string`）。
+   */
+  outPath: string
+  /**
+   * 记录里的字节数（1.4.0 新增）；`0` 表示**没有记录**（不是「零字节文件」）。
+   *
+   * 为什么用 0 而不是可选字段：`download_status` 的 tasks 项是
+   * `additionalProperties: false`，字段清单要么逐个声明、要么整个不写；这里照
+   * `batch` 的先例声明成必填并给哨兵值，读取端（管理端点）把 0 当作「无法核对
+   * 尺寸」——那只是少一道核对，不会让它更宽松地删东西。
+   */
+  size: number
+  /** 记录里的 mtime（毫秒，1.4.0 新增）；`0` 表示没有记录。 */
+  fileMtimeMs: number
   /** 最近更新时间戳（毫秒） */
   updatedAt: number
 }
@@ -107,6 +126,20 @@ const EMPTY = ''
 /** 只保留受支持的字符串字段，且必须返回 string（不能是 undefined / null） */
 function str(value: unknown): string {
   return typeof value === 'string' ? value : EMPTY
+}
+
+/**
+ * 只保留**正**的有限数字，其余收敛成 0（0 = 没有记录）。
+ *
+ * 刻意**不做字符串强制转换**（`Number(value)`）：与旁边的 `str()` 保持同一种
+ * 严格口径。`size: "12"` 这种类型错乱的记录只会来自手改或损坏，而尺寸正是删除
+ * 前的核对依据 —— 「几乎对」的字符串被悄悄转成 12 会让那道核对看起来通过。
+ *
+ * 与 `str()` 同一个理由：`download_status` 的 tasks 项是
+ * `additionalProperties: false`，字段的**类型**必须在任何输入下都成立。
+ */
+function num(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 }
 
 /** 解析 JSONL 的最后一行有效记录 */
@@ -202,6 +235,11 @@ function collectFromDir(
         eta: str(rec.eta),
         // 老记录没有 batch：`str()` 收敛成空串，解析结果与 1.2.0 逐字段相同
         batch: str(rec.batch),
+        // 1.4.0：老记录没有 outPath / size / fileMtimeMs 时分别收敛成 '' / 0 / 0，
+        // 与 1.3.0 的记录逐字段相同（这条硬回归项的落点）
+        outPath: str(rec.outPath),
+        size: num(rec.size),
+        fileMtimeMs: num(rec.fileMtimeMs),
         updatedAt: mtimeMs,
       })
       continue
@@ -236,6 +274,10 @@ function collectFromDir(
       eta: str(rec.eta),
       // 与轨道一同理：老任务文件没有 batch 时为 ''
       batch: str(rec.batch),
+      // 1.4.0：轨道二的输出路径与产物指纹，缺失时收敛（老任务文件逐字段不受影响）
+      outPath: str(rec.outPath),
+      size: num(rec.size),
+      fileMtimeMs: num(rec.fileMtimeMs),
       updatedAt: Number.isFinite(updatedRaw) && updatedRaw > 0 ? updatedRaw : mtimeMs,
     })
   }
@@ -277,6 +319,8 @@ export function readDownloadStatus(
       // 轨道一的 name / batch 可能为空（老版本进度文件没有这些字段），此时保留
       // 轨道二给出的值：与 name 完全同一个理由 —— 让「老文件 + 新文件」合并后
       // 仍然拿得到较新的那个轨道已经写下来的信息。
+      // 1.4.0 的 outPath / size / fileMtimeMs 同理：任一轨道缺就在另一条里找，
+      // 否则「轨道一先写、轨道二还没写」的瞬间会让管理端点误判成「没记录路径」。
       merged.set(
         id,
         existing
@@ -285,6 +329,9 @@ export function readDownloadStatus(
               ...task,
               name: task.name || existing.name,
               batch: task.batch || existing.batch,
+              outPath: task.outPath || existing.outPath,
+              size: task.size || existing.size,
+              fileMtimeMs: task.fileMtimeMs || existing.fileMtimeMs,
             }
           : task,
       )

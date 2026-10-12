@@ -272,7 +272,12 @@ test('URL 路径穿越不会写到输出目录之外', async () => {
     try {
       const result = await run({ url: `${base}/..%2F..%2F..%2Fescaped.txt` })
       assert.equal(result.success, true)
-      assert.equal(result.path, 'escaped.txt', '推导结果必须是单段文件名')
+      // 1.4.0：结果里的路径改为**绝对路径**（下载管理器要拿它删除/打开文件，
+      // 所以全链路共用同一个绝对值；相对路径的含义取决于 cwd，不能外传给 UI）。
+      // 原断言「必须是单段文件名」的意图在这里拆成更强的两条：文件名仍是单段，
+      // 而且必须正好解析在**当前目录**下 —— 一旦穿越到上层，第二条立刻变红。
+      assert.equal(path.basename(result.path), 'escaped.txt', '推导结果必须是单段文件名')
+      assert.equal(path.dirname(result.path), process.cwd(), '必须正好落在当前目录，而非上层')
       // 文件应落在 tmpRoot 内，而不是上层目录
       assert.ok(existsSync(path.join(tmpRoot, 'escaped.txt')), '应写在当前目录内')
       assert.equal(existsSync(path.join(cwdBefore, 'escaped.txt')), false, '不得写到 cwd 之外')
@@ -1438,6 +1443,92 @@ test('批量：没有会话也没有 DSH_PROGRESS_DIR 时只写轨道二（缺�
       }
     } finally {
       if (savedTask !== undefined) process.env.DSH_PROGRESS_DIR = savedTask
+    }
+  })
+})
+
+test('1.4.0：下载完成后两条轨道都记下绝对 outPath 与 size（下载管理器的数据源）', async () => {
+  // 本文件共享一个 tmpRoot（见 before()），进度目录要等第一条下载才被创建 ——
+  // 单独跑这条用例时目录还不存在。用 filesInOrEmpty 而不是 filesIn，是为了让
+  // 「单独跑」时的失败落在真正的断言上，而不是一个 filesIn 的 ENOENT。
+  const filesInOrEmpty = (dir: string, ext: string): Set<string> =>
+    existsSync(dir) ? filesIn(dir, ext) : new Set<string>()
+  const body = Buffer.alloc(2048, 0x5a)
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'managed.bin')
+    const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+    const progressDir = process.env.DSH_PROGRESS_DIR!
+    const beforeJson = filesInOrEmpty(dlDir, '.json')
+    const beforeJsonl = filesInOrEmpty(progressDir, '.jsonl')
+    const result = await run({ url: `${base}/managed.bin`, output: out })
+    assert.equal(result.success, true)
+
+    // 轨道二：产物路径与尺寸都要落盘
+    const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+    assert.equal(newJson.length, 1, '本次任务应在轨道二留下一条记录')
+    const task = JSON.parse(readFileSync(path.join(dlDir, newJson[0]!), 'utf-8')) as {
+      outPath?: string
+      size?: number
+      status?: string
+    }
+    assert.equal(task.outPath, out, '记录的必须是产物绝对路径')
+    assert.equal(task.size, body.length, '终态必须记下真实字节数')
+    assert.equal(task.status, 'completed')
+
+    // 轨道一：最后一条（终态）同样带路径与尺寸
+    const newJsonl = newFiles(beforeJsonl, filesIn(progressDir, '.jsonl'))
+    assert.equal(newJsonl.length, 1)
+    const lines = readFileSync(path.join(progressDir, newJsonl[0]!), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { state?: string; outPath?: string; size?: number })
+    const terminal = lines[lines.length - 1]!
+    assert.equal(terminal.state, 'done')
+    assert.equal(terminal.outPath, out, '轨道一也要能定位到产物')
+    assert.equal(terminal.size, body.length)
+  })
+})
+
+test('1.4.0：调用方给相对 output 时，记录里仍是绝对路径（spawn 没有 cwd 的那个坑）', async () => {
+  const body = Buffer.alloc(512, 0x6b)
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }, async (base) => {
+    const cwdBefore = process.cwd()
+    // 相对 output 的落点取决于进程 cwd（aria2/curl 子进程没有指定 cwd，
+    // 继承的就是这个 cwd）—— 记录里必须把同一件事写成绝对值，否则下载管理器
+    // 拿到的路径在别的 cwd 下会指向完全不同的文件。
+    process.chdir(tmpRoot)
+    try {
+      const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+      const beforeJson = dlDir.length > 0 && existsSync(dlDir) ? filesIn(dlDir, '.json') : new Set<string>()
+      const result = await run({ url: `${base}/relative-record.bin`, output: 'relative-record.bin' })
+      assert.equal(result.success, true)
+      assert.equal(result.path, path.join(tmpRoot, 'relative-record.bin'), '返回的路径也必须是绝对路径')
+      const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+      const task = JSON.parse(readFileSync(path.join(dlDir, newJson[0]!), 'utf-8')) as {
+        outPath?: string
+      }
+      assert.equal(
+        task.outPath,
+        path.join(tmpRoot, 'relative-record.bin'),
+        '记录必须是绝对路径（否则删除时会按另一个 cwd 去猜）',
+      )
+      assert.equal(existsSync(path.join(tmpRoot, 'relative-record.bin')), true)
+    } finally {
+      process.chdir(cwdBefore)
     }
   })
 })

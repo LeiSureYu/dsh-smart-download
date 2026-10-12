@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { registerStatusRpc } from '../src/rpc.js'
@@ -221,15 +221,17 @@ test('registerStatusRpc: 依赖缺失时 cordis 不会调用注入回调', () =>
   assert.equal(out.routes.length, 0, '依赖缺失时不应注册路由')
 })
 
-test('registerStatusRpc: 注册两条路由（status 读 + cleanup 清理），路径与方法各自正确', () => {
+test('registerStatusRpc: 注册三条路由（status 读 + cleanup 清理 + manage 管理），路径与方法各自正确', () => {
   const conn = stubConnection()
   const out = runRegister(conn)
-  assert.equal(out.routes.length, 2, 'status 与 cleanup 各要一条路由')
+  assert.equal(out.routes.length, 3, 'status、cleanup、manage 各要一条路由')
   const status = out.routes.find((r) => r.path === '/api/smartdl.status')
   const cleanup = out.routes.find((r) => r.path === '/api/smartdl.cleanup')
+  const manage = out.routes.find((r) => r.path === '/api/smartdl.manage')
   assert.ok(status, '缺少 /api/smartdl.status')
   assert.ok(cleanup, '缺少 /api/smartdl.cleanup')
-  for (const route of [status, cleanup]) {
+  assert.ok(manage, '缺少 /api/smartdl.manage')
+  for (const route of [status, cleanup, manage]) {
     assert.deepEqual(route.methods, ['POST'])
     assert.equal(route.requestBody, 'buffered')
   }
@@ -551,6 +553,480 @@ test('handler: 端到端 —— 能真的读到轨道二的任务快照', async 
     assert.equal(value.tasks[0].pct, 42, 'progress 0.42 必须被换算成 42，而不是落成 0')
     assert.equal(value.tasks[0].spd, '1.2MB/s', 'speed 字段必须映射到 spd')
     assert.equal(value.tasks[0].status, 'running')
+  })
+})
+
+/* ==================== /api/smartdl.manage（1.4.0 下载管理器） ==================== */
+
+/** 造一个 manage 端点请求（method 固定为 smartdl.manage）。 */
+function manageRequest(payload: unknown, rpcId = 'm1'): Request {
+  return rpcRequest({ type: 'client-request', rpcId, method: 'smartdl.manage', payload })
+}
+
+/** manage 端点的 handler。 */
+function manageHandler(): (r: Request) => Promise<Response> {
+  return handlerOf(stubConnection(), 'smartdl.manage')
+}
+
+/** 在下载目录里造一条任务记录（轨道二），并可选地造出它指向的产物文件。 */
+function seedTask(
+  downloadDir: string,
+  id: string,
+  extra: Record<string, unknown> = {},
+): string {
+  const file = path.join(downloadDir, `${id}.json`)
+  writeFileSync(
+    file,
+    JSON.stringify({
+      id,
+      name: `${id}.bin`,
+      status: 'completed',
+      progress: 1,
+      updatedAt: Date.now(),
+      ...extra,
+    }),
+  )
+  return file
+}
+
+/** 造一个真实存在的产物文件，返回它的绝对路径与字节数组。 */
+function seedProduct(dir: string, name: string, bytes = 'x'.repeat(32)): string {
+  const file = path.join(dir, name)
+  writeFileSync(file, bytes)
+  return file
+}
+
+test('manage：注册了端点，且 status 路由拒绝 manage 的 method（三条路由不互相串门）', async () => {
+  const statusHandler = handlerOf(stubConnection(), 'smartdl.status')
+  const env = await readEnvelope(await statusHandler(manageRequest({ op: 'inspect', taskId: 'a1' })))
+  assert.equal(env.body.result?.ok, false)
+  assert.match(env.body.result?.error?.message ?? '', /smartdl\.manage/)
+})
+
+test('manage/inspect：产物还在且尺寸一致 -> presence=present，并回报记录里的路径与尺寸', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'big.zip', 'y'.repeat(64))
+      seedTask(downloadDir, 'dl-present', {
+        outPath: out,
+        size: 64,
+        fileMtimeMs: 1234,
+      })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'inspect', taskId: 'dl-present' })),
+      )
+      assert.equal(env.body.result?.ok, true)
+      const value = env.body.result?.value as Record<string, unknown>
+      assert.equal(value.presence, 'present')
+      assert.equal(value.found, true)
+      assert.equal(value.outPath, out)
+      assert.equal(value.size, 64, '记录的尺寸必须原样回报')
+      assert.equal(value.fileSize, 64, '磁盘上的当前尺寸也要回报（UI 用它显示文件大小）')
+      assert.equal(value.fileMtimeMs, 1234)
+      assert.equal(value.state, 'completed')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/inspect：尺寸不一致 -> presence=changed（同名占位的文件不能被当成我们的产物）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'big.zip', 'z'.repeat(10))
+      seedTask(downloadDir, 'dl-changed', { outPath: out, size: 999 })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'inspect', taskId: 'dl-changed' })),
+      )
+      const value = env.body.result?.value as Record<string, unknown>
+      assert.equal(value.presence, 'changed')
+      assert.equal(value.fileSize, 10, '实际尺寸必须如实回报')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/inspect：老记录没有 outPath -> presence=unknown（只允许删记录）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    seedTask(downloadDir, 'old-record', { name: 'old.bin' })
+    const env = await readEnvelope(
+      await manageHandler()(manageRequest({ op: 'inspect', taskId: 'old-record' })),
+    )
+    assert.equal(env.body.result?.ok, true)
+    const value = env.body.result?.value as Record<string, unknown>
+    assert.equal(value.presence, 'unknown', '无路径的老记录必须是 unknown')
+    assert.equal(value.outPath, '')
+    assert.equal(value.size, undefined, '没记录尺寸时不要编一个出来')
+    assert.equal(value.found, true, '记录本身是存在的 —— 与「没有这条记录」要能分开')
+  })
+})
+
+test('manage/inspect：没有这条记录 -> found=false（与「有记录但没路径」区分开）', async () => {
+  await withDirs(async () => {
+    const env = await readEnvelope(
+      await manageHandler()(manageRequest({ op: 'inspect', taskId: 'nope' })),
+    )
+    const value = env.body.result?.value as Record<string, unknown>
+    assert.equal(value.found, false)
+    assert.equal(value.presence, 'unknown')
+    assert.equal(value.state, '')
+  })
+})
+
+test('manage/inspect：产物已不在 -> presence=missing', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'gone.bin')
+      seedTask(downloadDir, 'dl-missing', { outPath: out, size: 32 })
+      rmSync(out)
+      const value = (
+        await readEnvelope(await manageHandler()(manageRequest({ op: 'inspect', taskId: 'dl-missing' })))
+      ).body.result?.value as Record<string, unknown>
+      assert.equal(value.presence, 'missing')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/inspect：产物变成目录 -> presence=blocked（不区分目录与链接，都是「不去动它」）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = path.join(products, 'was-a-file')
+      mkdirSync(out, { recursive: true })
+      seedTask(downloadDir, 'dl-dir', { outPath: out, size: 32 })
+      const value = (
+        await readEnvelope(await manageHandler()(manageRequest({ op: 'inspect', taskId: 'dl-dir' })))
+      ).body.result?.value as Record<string, unknown>
+      assert.equal(value.presence, 'blocked')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage：未知 op / 非法 taskId / 非对象 payload 一律 ok:false，且不碰任何文件', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const product = seedProduct(downloadDir, 'keep.bin')
+    seedTask(downloadDir, 'keep', { outPath: product, size: 32 })
+    const handler = manageHandler()
+    const cases: Array<{ payload: unknown; match: RegExp }> = [
+      { payload: null, match: /必须是一个对象|拒绝管理请求/ },
+      { payload: { op: 'destroy', taskId: 'keep' }, match: /op 必须是 inspect \/ forget \/ delete/ },
+      { payload: { op: 'inspect' }, match: /taskId/ },
+      { payload: { op: 'inspect', taskId: '../evil' }, match: /taskId/ },
+      { payload: { op: 'delete', taskId: 'a\\b', confirm: true }, match: /taskId/ },
+      { payload: { op: 'forget', taskId: 'x'.repeat(65) }, match: /taskId/ },
+    ]
+    for (const c of cases) {
+      const env = await readEnvelope(await handler(manageRequest(c.payload)))
+      assert.equal(env.body.result?.ok, false, `payload=${JSON.stringify(c.payload)} 必须被拒绝`)
+      assert.match(env.body.result?.error?.message ?? '', c.match)
+    }
+    assert.equal(existsSync(product), true, '参数被拒时一个文件都不能删')
+    assert.equal(existsSync(path.join(downloadDir, 'keep.json')), true, '记录也不能删')
+  })
+})
+
+test('manage/delete：需要 confirm:true —— 缺失时整个拒绝（不静默降级成只删记录）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'need-confirm.bin')
+      seedTask(downloadDir, 'dl-nc', { outPath: out, size: 32 })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-nc' })),
+      )
+      assert.equal(env.body.result?.ok, false, '没有 confirm 必须拒绝')
+      assert.match(env.body.result?.error?.message ?? '', /confirm:true/)
+      assert.equal(existsSync(out), true, '未确认时产物必须还在')
+      assert.equal(existsSync(path.join(downloadDir, 'dl-nc.json')), true, '未确认时记录也必须还在')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：confirm:true 时先删产物、再删记录，返回两者结果与不可逆提示', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir, taskDir }) => {
+    try {
+      const out = seedProduct(products, 'doomed.bin', 'd'.repeat(48))
+      const dlRecord = seedTask(downloadDir, 'dl-del', { outPath: out, size: 48 })
+      const taskRecord = path.join(taskDir, 'dl-del.jsonl')
+      writeFileSync(taskRecord, '{"v":1,"task":"dl-del","pct":100,"msg":"下载完成","state":"done"}\n')
+
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-del', confirm: true })),
+      )
+      assert.equal(env.body.result?.ok, true)
+      const value = env.body.result?.value as {
+        fileDeleted: boolean
+        reason?: string
+        recordRemoved: string[]
+        irreversible: string
+      }
+      assert.equal(value.fileDeleted, true, '产物必须被删掉')
+      assert.equal(value.reason, undefined, '成功时不该带 reason')
+      assert.deepEqual(
+        value.recordRemoved.slice().sort(),
+        [dlRecord, taskRecord].sort(),
+        '两条轨道的记录都要删掉',
+      )
+      assert.match(value.irreversible, /永久删除/)
+      assert.equal(existsSync(out), false)
+      assert.equal(existsSync(dlRecord), false)
+      assert.equal(existsSync(taskRecord), false)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：产物已被移走 -> reason=gone 且记录照删（没什么可重试的）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'moved.bin')
+      const dlRecord = seedTask(downloadDir, 'dl-gone', { outPath: out, size: 32 })
+      rmSync(out)
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-gone', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+      assert.equal(value.fileDeleted, false, '没删到东西就不能报成功')
+      assert.equal(value.reason, 'gone')
+      assert.deepEqual(value.recordRemoved, [dlRecord], '文件本来就不在了 -> 记录该删')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：无 outPath 的老记录 -> reason=no-path 且只删记录（③↔④ 降级）', async () => {
+  await withDirs(async ({ downloadDir, taskDir }) => {
+    const dlRecord = seedTask(downloadDir, 'dl-nopath', { name: 'legacy.bin' })
+    const taskRecord = path.join(taskDir, 'dl-nopath.jsonl')
+    writeFileSync(taskRecord, '{"v":1,"task":"dl-nopath","pct":100,"msg":"下载完成","state":"done"}\n')
+    const value = (
+      await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-nopath', confirm: true })),
+      )
+    ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+    assert.equal(value.fileDeleted, false, '没有路径就不可能删产物')
+    assert.equal(value.reason, 'no-path')
+    assert.deepEqual(value.recordRemoved.slice().sort(), [dlRecord, taskRecord].sort(), '只删记录')
+  })
+})
+
+test('manage/delete：任务还在跑 -> reason=running，记录与产物都不动', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'running.bin', 'r'.repeat(8))
+      const dlRecord = seedTask(downloadDir, 'dl-run', {
+        outPath: out,
+        size: 8,
+        status: 'running',
+        progress: 0.5,
+      })
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-run', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+      assert.equal(value.fileDeleted, false)
+      assert.equal(value.reason, 'running')
+      assert.deepEqual(value.recordRemoved, [], '还在跑的任务不能被从面板上抹掉')
+      assert.equal(existsSync(out), true, '正在写的产物更不能删')
+      assert.equal(existsSync(dlRecord), true)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：尺寸不符 -> reason=changed，产物与记录都保留（守住「不删错东西」）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'swapped.bin', 's'.repeat(7))
+      const dlRecord = seedTask(downloadDir, 'dl-swap', { outPath: out, size: 4096 })
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-swap', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+      assert.equal(value.fileDeleted, false)
+      assert.equal(value.reason, 'changed')
+      assert.deepEqual(value.recordRemoved, [], '保留记录 = 保留重试入口')
+      assert.equal(existsSync(out), true, '尺寸不符的文件绝不能删')
+      assert.equal(existsSync(dlRecord), true)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：产物是目录 -> reason=is-dir，目录与记录都保留', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = path.join(products, 'became-a-dir')
+      mkdirSync(out, { recursive: true })
+      const dlRecord = seedTask(downloadDir, 'dl-dir2', { outPath: out, size: 32 })
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-dir2', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+      assert.equal(value.reason, 'is-dir')
+      assert.deepEqual(value.recordRemoved, [])
+      assert.equal(existsSync(out), true, '目录必须原样留着')
+      assert.equal(existsSync(dlRecord), true)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：产物是符号链接 -> reason=is-link，链接与它指向的目标都不能被删', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const target = seedProduct(products, 'real-target.bin', 't'.repeat(64))
+      const link = path.join(products, 'link.bin')
+      symlinkSync(target, link)
+      // 记录里的尺寸与**目标**一致：如果实现用 stat 而不是 lstat，它会认为
+      // 「这就是我的文件」然后把链接的目标删掉 —— 那正是这条用例要抓的。
+      const dlRecord = seedTask(downloadDir, 'dl-link', { outPath: link, size: 64 })
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-link', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; recordRemoved: string[] }
+      assert.equal(value.fileDeleted, false)
+      assert.equal(value.reason, 'is-link')
+      assert.deepEqual(value.recordRemoved, [])
+      assert.equal(existsSync(link), true, '链接本身要留着')
+      assert.equal(existsSync(target), true, '链接指向的文件更必须留着')
+      assert.equal(existsSync(dlRecord), true)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：记录里的相对路径 -> reason=denied（R3 绝对路径）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      // 用相对路径记录：删除规则必须拒绝，而不是按 cwd 猜一个位置去删
+      seedTask(downloadDir, 'dl-rel', { outPath: 'relative.bin', size: 32 })
+      const cwd = process.cwd()
+      seedProduct(cwd, 'relative.bin')
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-rel', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; errorCode?: string }
+      assert.equal(value.fileDeleted, false)
+      assert.equal(value.reason, 'denied')
+      assert.equal(value.errorCode, 'BAD_PATH')
+      assert.equal(existsSync(path.join(cwd, 'relative.bin')), true, '相对路径的目标不能被删')
+      rmSync(path.join(cwd, 'relative.bin'), { force: true })
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：记录里带 .. 的路径 -> reason=denied（R4 归一化比较）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'victim.bin')
+      // 归一化后与上面是同一个文件，但记录里的字符串带 ..：必须拒绝。
+      // 注意**不能用 path.join 拼**：它会自己把 .. 折叠掉，测试就变成了
+      // 「一条合法路径」（这条用例的第一版正是这样写错的，红在了断言上）。
+      const dotted = `${products}${path.sep}sub${path.sep}..${path.sep}victim.bin`
+      assert.notEqual(path.normalize(dotted), dotted, '前置条件：这个字符串必须是未归一化的')
+      seedTask(downloadDir, 'dl-dotdot', { outPath: dotted, size: 32 })
+      const value = (
+        await readEnvelope(
+          await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-dotdot', confirm: true })),
+        )
+      ).body.result?.value as { fileDeleted: boolean; reason?: string; errorCode?: string }
+      assert.equal(value.fileDeleted, false)
+      assert.equal(value.reason, 'denied')
+      assert.equal(value.errorCode, 'BAD_PATH')
+      assert.equal(existsSync(out), true, '带 .. 的路径不能被当成删除目标')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：目标是本插件自己的记录目录 -> reason=denied（R9 不许用产物入口删记录）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    // 把某条记录的 outPath 指向**另一个任务的记录文件**：这条路径真实存在、
+    // 尺寸也能对上，只有 R9 能拦住它。
+    const victim = seedTask(downloadDir, 'victim-record', { name: 'v.bin' })
+    const size = readFileSync(victim).length
+    seedTask(downloadDir, 'dl-attacker', { outPath: victim, size })
+    const value = (
+      await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-attacker', confirm: true })),
+      )
+    ).body.result?.value as { fileDeleted: boolean; reason?: string; errorCode?: string }
+    assert.equal(value.fileDeleted, false)
+    assert.equal(value.reason, 'denied')
+    assert.equal(value.errorCode, 'BAD_PATH')
+    assert.equal(existsSync(victim), true, '别的任务的记录文件不能被产物入口删掉')
+  })
+})
+
+test('manage/forget：只删记录，绝不碰产物', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir, taskDir }) => {
+    try {
+      const out = seedProduct(products, 'keep-me.bin')
+      const dlRecord = seedTask(downloadDir, 'dl-forget', { outPath: out, size: 32 })
+      const taskRecord = path.join(taskDir, 'dl-forget.jsonl')
+      writeFileSync(taskRecord, '{"v":1,"task":"dl-forget","pct":100,"msg":"下载完成","state":"done"}\n')
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'forget', taskId: 'dl-forget' })),
+      )
+      assert.equal(env.body.result?.ok, true)
+      const value = env.body.result?.value as { recordRemoved: string[] }
+      assert.deepEqual(value.recordRemoved.slice().sort(), [dlRecord, taskRecord].sort())
+      assert.equal(existsSync(out), true, 'forget 绝不能碰产物')
+      assert.equal(existsSync(dlRecord), false)
+      assert.equal(existsSync(taskRecord), false)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/forget：幂等（第二次没有记录可删也返回 ok，且不报错）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const record = seedTask(downloadDir, 'dl-idem')
+    const first = await readEnvelope(
+      await manageHandler()(manageRequest({ op: 'forget', taskId: 'dl-idem' }, 'f1')),
+    )
+    const second = await readEnvelope(
+      await manageHandler()(manageRequest({ op: 'forget', taskId: 'dl-idem' }, 'f2')),
+    )
+    assert.deepEqual((first.body.result?.value as { recordRemoved: string[] }).recordRemoved, [record])
+    assert.deepEqual((second.body.result?.value as { recordRemoved: string[] }).recordRemoved, [])
+    assert.equal(second.body.result?.ok, true)
   })
 })
 

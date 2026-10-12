@@ -12,6 +12,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import * as path from 'node:path'
 import { probeUrl } from './probe.js'
 import {
   downloadWithAria2,
@@ -429,6 +430,12 @@ export function apply(ctx: Context): void {
                   // 1.3.0：批次 ID。tasks 项是 additionalProperties:false，
                   // 少了这一行，任何带批次 ID 的任务都会让 tool 输出校验失败。
                   batch: { type: 'string' },
+                  // 1.4.0：输出路径与产物指纹。同一处陷阱：tasks 项是
+                  // additionalProperties:false，StatusSnapshot 里多出这三个字段
+                  // 而 schema 没补，下载管理器要用的任务就会让 tool 输出校验失败。
+                  outPath: { type: 'string' },
+                  size: { type: 'number' },
+                  fileMtimeMs: { type: 'number' },
                   updatedAt: { type: 'number' },
                 },
               },
@@ -564,11 +571,18 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   let mirrorSkipped: string | undefined
 
   // 输出文件名始终按原始 URL 推导，避免把镜像域名带进文件名
-  const outputPath = item.output ?? deriveFilenameFromUrl(item.url)
+  //
+  // 1.4.0：这里就把路径**解析成绝对路径**，后续所有消费点（aria2 的 `-o`、
+  // 建目录、续传指纹、校验、以及记录进进度文件的 outPath）共用同一个字符串。
+  // 为什么必须在这里定死：子进程**没有**指定 cwd（见 downloader.ts 的 spawn），
+  // 相对路径的含义取决于 Host 进程的 cwd —— 完成时再 resolve 一次，一旦 cwd
+  // 变了就会指向另一个文件，而下载管理器会拿这个路径去删除。解析一次、复用，
+  // 是这个风险唯一的收口点。`resolve` 对已经是绝对路径的输入是幂等的。
+  const outputPath = path.resolve(item.output ?? deriveFilenameFromUrl(item.url))
   const taskId = makeTaskId()
   // 会话上下文（轨道一的落点）由**调用**构造一次并放在 ctx 里：每一批的条目
   // 共用同一份，条目之间不会出现「同一批写了两个会话目录」的分叉。
-  const reporter = new ProgressReporter(taskId, outputPath, ctx.session, ctx.batchId)
+  const reporter = new ProgressReporter(taskId, outputPath, ctx.session, ctx.batchId, outputPath)
 
   // 单条目的超时信号：与整批信号合并（AbortSignal.any），因此超时只终止这一条，
   // 同批其它条目照常跑。为什么不用 Promise.race：子进程必须**真的**被结束
@@ -1052,11 +1066,18 @@ function recordObservedThroughput(url: string, observation: Aria2Observation | u
   })
 }
 
-/** 该条目最终会落到哪个路径（失败时也要答得出来，因此对非法 URL 兜底成空串）。 */
+/**
+ * 该条目最终会落到哪个路径（失败时也要答得出来，因此对非法 URL 兜底成空串）。
+ *
+ * 1.4.0：与单条目路径同样解析成**绝对路径**。理由不是风格统一，而是同一份
+ * 「相对路径的含义取决于进程 cwd」的坑：批量结果里报相对路径、而实际落盘用的是
+ * 绝对路径，调用方复制 `output` 去删除/打开时就会指到别的地方。
+ * 兜底空串保持空串（`path.resolve('')` 会变成 cwd，那是个危险的“看起来有值”）。
+ */
 function targetOutputPath(target: DownloadItem): string {
-  if (target.output !== undefined) return target.output
   try {
-    return deriveFilenameFromUrl(target.url)
+    const raw = target.output ?? deriveFilenameFromUrl(target.url)
+    return raw === '' ? '' : path.resolve(raw)
   } catch {
     return ''
   }
@@ -1102,7 +1123,16 @@ function toFailedItem(target: DownloadItem, message: string, cancelled: boolean)
  */
 async function cancelTarget(target: DownloadItem, ctx: ItemContext): Promise<BatchItemResult> {
   const output = targetOutputPath(target)
-  const reporter = new ProgressReporter(makeTaskId(), output, ctx.session, ctx.batchId)
+  // 未开工的条目也要能定位到产物：这里同样把路径解析成绝对路径再交给 reporter
+  // （它只接受绝对路径，相对路径会被忽略）。`output` 可能是空串（URL 非法），
+  // 那种情况下不传，记录里就不会出现 outPath —— 管理端点据此只允许「删除记录」。
+  const reporter = new ProgressReporter(
+    makeTaskId(),
+    output,
+    ctx.session,
+    ctx.batchId,
+    output === '' ? undefined : path.resolve(output),
+  )
   reporter.cancel()
   await reporter.awaitFlush()
   return toFailedItem(target, BATCH_CANCELLED, true)

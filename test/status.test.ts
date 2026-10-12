@@ -117,6 +117,115 @@ test('轨道二 JSON：解析 progress/status/updatedAt', () => {
   })
 })
 
+/* ---------------- 1.4.0：输出路径 / 尺寸 / mtime（下载管理器的读取端） ---------------- */
+
+test('输出路径：两条轨道都能读出 outPath / size / fileMtimeMs', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    writeJsonl(taskDir, 'dl-out-1', [
+      {
+        v: 1,
+        task: 'dl-out-1',
+        pct: 100,
+        msg: '下载完成',
+        state: 'done',
+        outPath: 'D:\\Downloads\\a.zip',
+        size: 1024,
+        fileMtimeMs: 1700000000000,
+      },
+    ])
+    writeJson(downloadDir, 'dl-out-2', {
+      id: 'dl-out-2',
+      name: 'b.zip',
+      status: 'completed',
+      progress: 1,
+      outPath: 'D:\\Downloads\\b.zip',
+      size: 2048,
+      fileMtimeMs: 1700000001000,
+    })
+    const byId = new Map(readDownloadStatus().tasks.map((t) => [t.id, t]))
+    assert.equal(byId.get('dl-out-1')?.outPath, 'D:\\Downloads\\a.zip')
+    assert.equal(byId.get('dl-out-1')?.size, 1024)
+    assert.equal(byId.get('dl-out-1')?.fileMtimeMs, 1700000000000)
+    assert.equal(byId.get('dl-out-2')?.outPath, 'D:\\Downloads\\b.zip')
+    assert.equal(byId.get('dl-out-2')?.size, 2048)
+    assert.equal(byId.get('dl-out-2')?.fileMtimeMs, 1700000001000)
+  })
+})
+
+test('输出路径：老记录缺这三个字段 -> 空串与 0，且其它字段解析结果一字不变（硬回归项）', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 1.3.0 及更早写下的记录：没有 outPath / size / fileMtimeMs
+    writeJsonl(taskDir, 'dl-legacy', [{ v: 1, task: 'dl-legacy', pct: 30, msg: '失败: 连接超时' }])
+    writeJson(downloadDir, 'dl-legacy-json', {
+      id: 'dl-legacy-json',
+      name: 'old.zip',
+      status: 'failed',
+      progress: 0.3,
+    })
+    const byId = new Map(readDownloadStatus().tasks.map((t) => [t.id, t]))
+
+    const fromJsonl = byId.get('dl-legacy')
+    assert.ok(fromJsonl)
+    assert.equal(fromJsonl.outPath, '', '缺字段必须是空串（schema 要求 string）')
+    assert.equal(fromJsonl.size, 0, '缺字段收敛成 0 = 「没有记录」')
+    assert.equal(fromJsonl.fileMtimeMs, 0)
+    // 既有字段一个字都不能变
+    assert.equal(fromJsonl.pct, 30)
+    assert.equal(fromJsonl.msg, '失败: 连接超时')
+    assert.equal(fromJsonl.status, 'failed')
+
+    const fromJson = byId.get('dl-legacy-json')
+    assert.ok(fromJson)
+    assert.equal(fromJson.outPath, '')
+    assert.equal(fromJson.size, 0)
+    assert.equal(fromJson.name, 'old.zip')
+    assert.equal(fromJson.pct, 30)
+  })
+})
+
+test('输出路径：一条轨道缺字段时，合并结果保留另一条轨道写下的值', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 轨道二先写了产物信息；轨道一（老写入端/更早的记录）没有 —— 合并后不得丢
+    writeJson(downloadDir, 'dl-out-merge', {
+      id: 'dl-out-merge',
+      name: 'm.zip',
+      status: 'completed',
+      progress: 1,
+      outPath: 'D:\\Downloads\\m.zip',
+      size: 4096,
+      fileMtimeMs: 1700000002000,
+    })
+    writeJsonl(taskDir, 'dl-out-merge', [
+      { v: 1, task: 'dl-out-merge', pct: 100, msg: '下载完成', state: 'done' },
+    ])
+    const task = readDownloadStatus().tasks[0]
+    assert.ok(task)
+    assert.equal(task.outPath, 'D:\\Downloads\\m.zip', '轨道一没有路径时应保留轨道二的')
+    assert.equal(task.size, 4096)
+    assert.equal(task.fileMtimeMs, 1700000002000)
+    assert.equal(task.msg, '下载完成', '其余字段仍由轨道一覆盖')
+  })
+})
+
+test('输出路径：脏记录（size 是字符串 / 负数）被收敛成 0，不让 tool 输出校验失败', () => {
+  withDirs(({ downloadDir }) => {
+    writeJson(downloadDir, 'dl-dirty', {
+      id: 'dl-dirty',
+      name: 'dirty.zip',
+      status: 'completed',
+      progress: 1,
+      outPath: 42, // 类型错了：不是字符串
+      size: '12', // 类型错了：不是数字
+      fileMtimeMs: -5, // 负数
+    })
+    const task = readDownloadStatus().tasks[0]
+    assert.ok(task)
+    assert.equal(task.outPath, '', '非字符串路径收敛成空串')
+    assert.equal(task.size, 0, '非数字尺寸收敛成 0')
+    assert.equal(task.fileMtimeMs, 0, '负数收敛成 0')
+  })
+})
+
 /* ---------------- 1.3.0：批次 ID（P0-5 的读取端） ---------------- */
 
 test('批次 ID：两条轨道都能读出（P0-5 贯通四层）', () => {

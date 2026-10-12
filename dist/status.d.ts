@@ -27,6 +27,25 @@ export interface TaskStatus {
      * schema 允许的值（`type: string`），不会让 download_status 的返回校验失败。
      */
     batch: string;
+    /**
+     * 输出文件的绝对路径（1.4.0 新增），来自记录的 `outPath`。
+     *
+     * 老记录没有该字段时收敛成**空串**（与 `batch` 完全同一套手法）：1.4.0 之前
+     * 写下的记录必须照常可读，面板据此把「在文件管理器中显示」与「删除本地文件」
+     * 置灰，只留下「删除记录」。空串同时是 schema 允许的值（`type: string`）。
+     */
+    outPath: string;
+    /**
+     * 记录里的字节数（1.4.0 新增）；`0` 表示**没有记录**（不是「零字节文件」）。
+     *
+     * 为什么用 0 而不是可选字段：`download_status` 的 tasks 项是
+     * `additionalProperties: false`，字段清单要么逐个声明、要么整个不写；这里照
+     * `batch` 的先例声明成必填并给哨兵值，读取端（管理端点）把 0 当作「无法核对
+     * 尺寸」——那只是少一道核对，不会让它更宽松地删东西。
+     */
+    size: number;
+    /** 记录里的 mtime（毫秒，1.4.0 新增）；`0` 表示没有记录。 */
+    fileMtimeMs: number;
     /** 最近更新时间戳（毫秒） */
     updatedAt: number;
 }

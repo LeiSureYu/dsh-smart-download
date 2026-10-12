@@ -28,6 +28,33 @@ export declare function resolveTaskProgressDir(session?: ProgressSession): strin
  * 设置了 `$DSH_DOWNLOAD_PROGRESS_DIR` 时优先使用，否则为 `<DSH_HOME>/downloads/tasks`。
  */
 export declare function resolveDownloadProgressDir(): string;
+/** 判定一个 taskId 是否可以安全地拼进文件名。 */
+export declare function isSafeTaskId(taskId: unknown): taskId is string;
+/**
+ * 本插件为某个 taskId 写的两条进度文件路径（轨道一 JSONL + 轨道二 JSON）。
+ *
+ * 只返回**确实存在且是普通文件**的那些（`lstat`，不跟进符号链接）：调用方
+ * 拿到的路径要么能删，要么干脆不在列表里，不需要再各自判一遍。
+ *
+ * 为什么用 `lstat` 而不是 `stat`：符号链接要按链接本身判断。跟进目标会让
+ * 「删除本插件记录的进度文件」变成「删除链接指向的任意文件」。
+ *
+ * @param taskId 任务 ID；不在白名单内时返回空数组（不抛错）
+ * @param session 当前会话；用于定位轨道一目录，缺省时只考虑轨道二
+ */
+export declare function taskRecordFiles(taskId: string, session?: ProgressSession): string[];
+/**
+ * 删除本插件为某个 taskId 写的两条进度文件，返回**真正删掉**的路径。
+ *
+ * 与 `ProgressReporter.cleanup()` 的区别：那个删的是「这个实例自己刚写的两条」，
+ * 路径在构造时就定了；这个按 `taskId` 重新解析路径，供管理端点（`smartdl.manage`
+ * 的 `forget` / `delete`）在没有 reporter 实例的情况下使用。两者共用同一套
+ * 目录规则（`resolveDownloadProgressDir` / `resolveTaskProgressDir`）。
+ *
+ * 删不掉的（占用 / 权限）如实**不进**返回列表：调用方必须能区分「删了」与
+ * 「以为删了」。
+ */
+export declare function removeTaskRecords(taskId: string, session?: ProgressSession): string[];
 export declare class ProgressReporter {
     private readonly taskId;
     private readonly label;
@@ -36,6 +63,14 @@ export declare class ProgressReporter {
      * 只做分组标签，任何执行/并发决策都不看它。
      */
     private readonly batch;
+    /**
+     * 输出文件的**绝对路径**（1.4.0 新增），缺省为 undefined。
+     *
+     * 只有绝对路径才会被记录：删除规则（见 rpc.ts）要求绝对路径，记一个相对路径
+     * 只会让管理端点拿到一个必然被拒绝的值 —— 那不如不记，让 `inspect` 如实报
+     * `unknown`（UI 据此只允许「删除记录」）。
+     */
+    private readonly outPath;
     private taskProgressFile;
     private downloadProgressFile;
     private lastPct;
@@ -69,8 +104,11 @@ export declare class ProgressReporter {
      * @param batch 批次 ID，可选；同一次调用产生的所有条目共用一个值。
      *   缺省时不写该字段（老行为逐字节相同），而不是写一个空串 —— 空串会占着
      *   字段位，让读取端以为「有批次但不知道是哪批」。
+     * @param outPath 输出文件的绝对路径，可选（1.4.0 新增）。调用方**必须**传
+     *   `path.resolve(...)` 的结果：子进程没有指定 cwd，相对路径的含义取决于
+     *   进程 cwd，记下来也无法安全地用于删除。相对路径会被忽略（不记录）。
      */
-    constructor(taskId: string, label?: string, session?: ProgressSession, batch?: string);
+    constructor(taskId: string, label?: string, session?: ProgressSession, batch?: string, outPath?: string);
     /**
      * 上报进度。
      * @param pct 0-100 的进度（会四舍五入为整数）

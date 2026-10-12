@@ -118,6 +118,76 @@ function ensureDir(dir) {
     }
 }
 /**
+ * 任务 ID 的白名单：只允许文件名安全字符，且必须以字母/数字开头。
+ *
+ * 为什么需要它：`taskId` 会被拼进文件名（`<taskId>.json` / `<taskId>.jsonl`）。
+ * 一个带 `/`、`\`、`..` 或驱动器号的 id 能让 `path.join` 指到记录目录之外 ——
+ * 删除记录与删除本地文件都是不可逆操作，那里必须先过这道闸。这里与
+ * 轨道一目录名的规则（`SESSION_SEGMENT_RE`）一致：都是「能被当作单个文件名」。
+ */
+const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** 判定一个 taskId 是否可以安全地拼进文件名。 */
+export function isSafeTaskId(taskId) {
+    return typeof taskId === 'string' && TASK_ID_RE.test(taskId);
+}
+/**
+ * 本插件为某个 taskId 写的两条进度文件路径（轨道一 JSONL + 轨道二 JSON）。
+ *
+ * 只返回**确实存在且是普通文件**的那些（`lstat`，不跟进符号链接）：调用方
+ * 拿到的路径要么能删，要么干脆不在列表里，不需要再各自判一遍。
+ *
+ * 为什么用 `lstat` 而不是 `stat`：符号链接要按链接本身判断。跟进目标会让
+ * 「删除本插件记录的进度文件」变成「删除链接指向的任意文件」。
+ *
+ * @param taskId 任务 ID；不在白名单内时返回空数组（不抛错）
+ * @param session 当前会话；用于定位轨道一目录，缺省时只考虑轨道二
+ */
+export function taskRecordFiles(taskId, session) {
+    if (!isSafeTaskId(taskId))
+        return [];
+    const candidates = [];
+    const dlDir = resolveDownloadProgressDir();
+    candidates.push(path.join(dlDir, `${taskId}.json`));
+    const taskDir = resolveTaskProgressDir(session);
+    if (taskDir)
+        candidates.push(path.join(taskDir, `${taskId}.jsonl`));
+    const found = [];
+    for (const file of candidates) {
+        try {
+            if (fs.lstatSync(file).isFile())
+                found.push(file);
+        }
+        catch {
+            // 不存在 / 读不到：不进列表（调用方据此如实报告「没删到」）
+        }
+    }
+    return found;
+}
+/**
+ * 删除本插件为某个 taskId 写的两条进度文件，返回**真正删掉**的路径。
+ *
+ * 与 `ProgressReporter.cleanup()` 的区别：那个删的是「这个实例自己刚写的两条」，
+ * 路径在构造时就定了；这个按 `taskId` 重新解析路径，供管理端点（`smartdl.manage`
+ * 的 `forget` / `delete`）在没有 reporter 实例的情况下使用。两者共用同一套
+ * 目录规则（`resolveDownloadProgressDir` / `resolveTaskProgressDir`）。
+ *
+ * 删不掉的（占用 / 权限）如实**不进**返回列表：调用方必须能区分「删了」与
+ * 「以为删了」。
+ */
+export function removeTaskRecords(taskId, session) {
+    const removed = [];
+    for (const file of taskRecordFiles(taskId, session)) {
+        try {
+            fs.unlinkSync(file);
+            removed.push(file);
+        }
+        catch {
+            // 删不掉就跳过：一个文件失败不该让整次操作失败，但也不能计入成功
+        }
+    }
+    return removed;
+}
+/**
  * 从状态文案兜底推断终态。
  *
  * 只在调用方没有显式给 `state` 时使用，属于对老调用点的兼容垫片：
@@ -138,6 +208,14 @@ export class ProgressReporter {
      * 只做分组标签，任何执行/并发决策都不看它。
      */
     batch;
+    /**
+     * 输出文件的**绝对路径**（1.4.0 新增），缺省为 undefined。
+     *
+     * 只有绝对路径才会被记录：删除规则（见 rpc.ts）要求绝对路径，记一个相对路径
+     * 只会让管理端点拿到一个必然被拒绝的值 —— 那不如不记，让 `inspect` 如实报
+     * `unknown`（UI 据此只允许「删除记录」）。
+     */
+    outPath;
     taskProgressFile = null;
     downloadProgressFile = null;
     lastPct = -1;
@@ -171,11 +249,18 @@ export class ProgressReporter {
      * @param batch 批次 ID，可选；同一次调用产生的所有条目共用一个值。
      *   缺省时不写该字段（老行为逐字节相同），而不是写一个空串 —— 空串会占着
      *   字段位，让读取端以为「有批次但不知道是哪批」。
+     * @param outPath 输出文件的绝对路径，可选（1.4.0 新增）。调用方**必须**传
+     *   `path.resolve(...)` 的结果：子进程没有指定 cwd，相对路径的含义取决于
+     *   进程 cwd，记下来也无法安全地用于删除。相对路径会被忽略（不记录）。
      */
-    constructor(taskId, label, session, batch) {
+    constructor(taskId, label, session, batch, outPath) {
         this.taskId = taskId;
         this.label = label;
         this.batch = batch;
+        this.outPath =
+            typeof outPath === 'string' && outPath.length > 0 && path.isAbsolute(outPath)
+                ? outPath
+                : undefined;
         const taskDir = resolveTaskProgressDir(session);
         if (taskDir) {
             const ready = ensureDir(taskDir);
@@ -222,6 +307,26 @@ export class ProgressReporter {
         // 批次 ID 只在真的有时才写：缺省路径上轨道一记录与 1.2.0 逐字节相同
         if (this.batch)
             rec.batch = this.batch;
+        // 输出路径同理：只在调用方给了绝对路径时写，老记录与缺省路径逐字节不受影响
+        if (this.outPath)
+            rec.outPath = this.outPath;
+        // 尺寸与 mtime **只在终态那一条**记录上写：进行中的尺寸是中间值，写下来会
+        // 让「文件是否还是当初那一个」的判定拿着一个永远对不上的数字。
+        // 只 stat 一次（终态一条记录一次系统调用），且必须是普通文件 —— 目录/链接
+        // 不该被当作「我们下载出来的产物」。
+        if (effectiveState !== 'running' && this.outPath) {
+            try {
+                const st = fs.lstatSync(this.outPath);
+                if (st.isFile()) {
+                    rec.size = st.size;
+                    rec.fileMtimeMs = st.mtimeMs;
+                }
+            }
+            catch {
+                // 已经不在（被移走/删掉）就只记路径：管理端点据此报 missing，
+                // 而不是让这里抛错把下载收尾流程带崩。
+            }
+        }
         this.pending.push(rec);
         this.scheduleFlush();
     }
@@ -274,6 +379,14 @@ export class ProgressReporter {
             // 与轨道一同理：缺省不写，老读取端拿到的 JSON 与 1.2.0 逐字节相同
             if (this.batch)
                 task.batch = this.batch;
+            // 输出路径 / 尺寸 / mtime 同样从本批最后一条记录透传，两条轨道保持一致：
+            // 任一轨道单独存活时（会话缺失、或只写了轨道二）都还能定位到产物。
+            if (rec.outPath)
+                task.outPath = rec.outPath;
+            if (rec.size !== undefined)
+                task.size = rec.size;
+            if (rec.fileMtimeMs !== undefined)
+                task.fileMtimeMs = rec.fileMtimeMs;
             const file = this.downloadProgressFile;
             jobs.push(fsp.writeFile(file, JSON.stringify(task, null, 2), 'utf-8').catch(() => { }));
         }

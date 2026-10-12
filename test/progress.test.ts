@@ -12,6 +12,7 @@ import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -21,9 +22,11 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   ProgressReporter,
+  removeTaskRecords,
   resolveDshHome,
   resolveDownloadProgressDir,
   resolveTaskProgressDir,
+  taskRecordFiles,
 } from '../src/progress.js'
 
 let tmpRoot = ''
@@ -467,4 +470,94 @@ test('批次 ID：不同批次互不相同（单条目调用也要有唯一值�
 
   assert.equal(readJsonl(path.join(taskDir, 'task-batch-a.jsonl'))[0]!.batch, 'b-one')
   assert.equal(readJsonl(path.join(taskDir, 'task-batch-b.jsonl'))[0]!.batch, 'b-two')
+})
+
+/* ------------------ 1.4.0：输出路径 / 尺寸 / mtime（两条轨道） ------------------ */
+
+test('输出路径：每条记录都带 outPath，只有终态那条带 size/fileMtimeMs', async () => {
+  const product = path.join(tmpRoot, 'out', 'big.bin')
+  mkdirSync(path.dirname(product), { recursive: true })
+  writeFileSync(product, 'x'.repeat(1234))
+
+  const r = new ProgressReporter('task-out-1', 'big.bin', undefined, undefined, product)
+  r.report(10, '下载中')
+  await r.awaitFlush()
+  // 进行中的那条：有路径，但没有尺寸/ mtime（尺寸是中间值，写下来会误导判据）
+  const running = readJsonl(path.join(taskDir, 'task-out-1.jsonl'))[0]!
+  assert.equal(running.outPath, product, '进行中也要能定位到产物')
+  assert.equal(Object.hasOwn(running, 'size'), false, '进行中不得写尺寸')
+  assert.equal(Object.hasOwn(running, 'fileMtimeMs'), false, '进行中不得写 mtime')
+
+  r.done()
+  await r.awaitFlush()
+  const lines = readJsonl(path.join(taskDir, 'task-out-1.jsonl'))
+  const terminal = lines[lines.length - 1]!
+  assert.equal(terminal.state, 'done')
+  assert.equal(terminal.outPath, product)
+  assert.equal(terminal.size, 1234, '终态必须记下真实字节数')
+  assert.ok(typeof terminal.fileMtimeMs === 'number' && terminal.fileMtimeMs > 0, '终态要记 mtime')
+
+  // 轨道二同步带上同样的三个字段（任一轨道单独存活都能定位产物）
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-out-1.json'), 'utf-8'))
+  assert.equal(task.outPath, product)
+  assert.equal(task.size, 1234)
+  assert.equal(task.status, 'completed')
+})
+
+test('输出路径：不传 outPath 时两条轨道都不出现该字段（老行为逐字节不变）', async () => {
+  const r = new ProgressReporter('task-out-2', 'f.bin')
+  r.done()
+  await r.awaitFlush()
+  const line = readJsonl(path.join(taskDir, 'task-out-2.jsonl'))[0]!
+  assert.equal(Object.hasOwn(line, 'outPath'), false, '轨道一不得凭空多出 outPath')
+  assert.equal(Object.hasOwn(line, 'size'), false)
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-out-2.json'), 'utf-8')) as object
+  assert.equal(Object.hasOwn(task, 'outPath'), false, '轨道二不得凭空多出 outPath')
+})
+
+test('输出路径：相对路径被忽略（记下来也删不得，不如不记）', async () => {
+  const r = new ProgressReporter('task-out-3', 'rel.bin', undefined, undefined, 'relative.bin')
+  r.done()
+  await r.awaitFlush()
+  const line = readJsonl(path.join(taskDir, 'task-out-3.jsonl'))[0]!
+  assert.equal(Object.hasOwn(line, 'outPath'), false, '相对路径不得写进记录')
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-out-3.json'), 'utf-8')) as object
+  assert.equal(Object.hasOwn(task, 'outPath'), false)
+})
+
+test('输出路径：产物已经不在时不写 size（如实只留路径，管理端据此报 missing）', async () => {
+  const missing = path.join(tmpRoot, 'never-existed.bin')
+  const r = new ProgressReporter('task-out-4', 'm.bin', undefined, undefined, missing)
+  r.done()
+  await r.awaitFlush()
+  const line = readJsonl(path.join(taskDir, 'task-out-4.jsonl'))[0]!
+  assert.equal(line.outPath, missing, '路径照记')
+  assert.equal(Object.hasOwn(line, 'size'), false, '拿不到尺寸就不要编一个')
+})
+
+test('taskRecordFiles / removeTaskRecords：只认普通文件，且 taskId 必须过白名单', async () => {
+  const r = new ProgressReporter('task-rec-1', 'a.bin')
+  r.done()
+  await r.awaitFlush()
+
+  const files = taskRecordFiles('task-rec-1')
+  assert.deepEqual(
+    files.slice().sort(),
+    [path.join(taskDir, 'task-rec-1.jsonl'), path.join(dlDir, 'task-rec-1.json')].sort(),
+    '两条轨道的记录都要被找到',
+  )
+  // 白名单：带分隔符 / .. 的 id 一律返回空（拼进文件名就是路径穿越）
+  for (const bad of ['../evil', 'a/b', 'a\\b', '', '.hidden', 'x'.repeat(65)]) {
+    assert.deepEqual(taskRecordFiles(bad), [], `非法 taskId ${JSON.stringify(bad)} 不得产生路径`)
+    assert.deepEqual(removeTaskRecords(bad), [], `非法 taskId ${JSON.stringify(bad)} 不得删任何东西`)
+  }
+  assert.deepEqual(removeTaskRecords('task-rec-1').slice().sort(), files.slice().sort())
+  assert.equal(existsSync(path.join(taskDir, 'task-rec-1.jsonl')), false, '记录必须被删掉')
+  assert.equal(existsSync(path.join(dlDir, 'task-rec-1.json')), false)
+  assert.deepEqual(taskRecordFiles('task-rec-1'), [], '删完之后不再有候选')
+})
+
+test('taskRecordFiles：目录（而不是文件）同名时不进候选（删不掉的目录不该被当作记录）', () => {
+  mkdirSync(path.join(dlDir, 'task-dir.json'), { recursive: true })
+  assert.deepEqual(taskRecordFiles('task-dir'), [], '目录不是记录文件')
 })

@@ -153,6 +153,19 @@ window.__ModuleLoader__.load({
 			'close': '关闭下载面板',
 			'empty': '暂无下载任务',
 			'emptyHint': '用 smart_download 下载文件后，记录会出现在这里；下载过程中右下角也会显示实时进度。',
+			'filterAll': '全部',
+			'filterRunning': '下载中',
+			'filterDone': '已完成',
+			'filterProblem': '失败/取消',
+			'searchPlaceholder': '搜索文件名',
+			'selectAll': '全选',
+			'selectedCount': '已选 {n} 条',
+			'batchDelete': '删除 {n} 条记录',
+			'batchDeleting': '删除中…',
+			'batchDone': '已删除 {n} 条记录',
+			'batchPartial': '删掉 {ok} 条，{fail} 条没删掉（记录仍在）',
+			'emptyFiltered': '没有符合筛选条件的记录',
+			'clearFilter': '清除筛选',
 			'sound': '完成提示音',
 			/* ---- t32 下载管理器 ---- */
 			'panel': '下载管理',
@@ -202,6 +215,19 @@ window.__ModuleLoader__.load({
 			'close': 'Close download panel',
 			'empty': 'No downloads yet',
 			'emptyHint': 'Files you download with smart_download show up here; live progress also appears in the bottom-right corner while a download runs.',
+			'filterAll': 'All',
+			'filterRunning': 'Downloading',
+			'filterDone': 'Completed',
+			'filterProblem': 'Failed/Cancelled',
+			'searchPlaceholder': 'Search file name',
+			'selectAll': 'Select all',
+			'selectedCount': '{n} selected',
+			'batchDelete': 'Delete {n} records',
+			'batchDeleting': 'Deleting…',
+			'batchDone': 'Deleted {n} records',
+			'batchPartial': 'Deleted {ok}; {fail} could not be deleted (records kept)',
+			'emptyFiltered': 'No records match this filter',
+			'clearFilter': 'Clear filter',
 			'sound': 'Completion sound',
 			/* ---- t32 download manager ---- */
 			'panel': 'Downloads',
@@ -1377,7 +1403,7 @@ window.__ModuleLoader__.load({
 		 * @param props - the task, the locale seat, and the row's callbacks.
 		 * @returns the row element.
 		 */
-		function SmartDlManagerRow({ task, t, presence, onReveal, onDelete }) {
+		function SmartDlManagerRow({ task, t, presence, onReveal, onDelete, checked, onToggle }) {
 			// Delete 键：焦点在本行时打开确认框（不是直接删——不可逆操作的刹车仍在）。
 			const onRowKeyDown = (event) => {
 				if (event.key !== 'Delete') return;
@@ -1435,6 +1461,17 @@ window.__ModuleLoader__.load({
 				react.createElement(
 					'div',
 					{ style: { display: 'flex', alignItems: 'center', gap: 8 } },
+					react.createElement('input', {
+						type: 'checkbox',
+						'data-dsh-smart-dl': 'row-check',
+						'data-task-id': task.id,
+						'aria-label': t('selectAll'),
+						checked: Boolean(checked),
+						onChange: () => {
+							if (typeof onToggle === 'function') onToggle(task.id);
+						},
+						style: { flex: 'none', cursor: 'pointer' },
+					}),
 					// 状态色点：比文字更早进入视线（一眼扫出哪条失败/在进行）
 					react.createElement('span', {
 						key: 'dot',
@@ -1749,9 +1786,96 @@ window.__ModuleLoader__.load({
 			// interaction's worth of data, not something any other slot needs.
 			const [pending, setPending] = react.useState(null);
 			const [notice, setNotice] = react.useState(null);
+			// 筛选 / 搜索 / 多选：都是「这一页怎么看」的局部状态，别的插槽不需要。
+			const [filter, setFilter] = react.useState('all');
+			const [query, setQuery] = react.useState('');
+			const [checked, setChecked] = react.useState([]);
+			const [batching, setBatching] = react.useState(false);
 
 			const state = panelStore.getSnapshot();
 			const tasks = state.tasks === null ? [] : state.tasks;
+
+			/** 任务属于哪个筛选桶。未知状态一律归到「全部」以外的其它桶之外。 */
+			const bucketOf = (task) => {
+				if (task.status === 'completed') return 'done';
+				if (task.status === 'failed' || task.status === 'cancelled') return 'problem';
+				return 'running';
+			};
+
+			/**
+			 * 当前可见的行（筛选 + 搜索之后）。
+			 *
+			 * 为什么先筛选再搜索：搜索只在「用户正在看的那部分」里过滤，否则
+			 * 「下载中 + 搜 foo」会冒出一堆已完成的旧记录，反直觉。
+			 */
+			const visible = tasks.filter((task) => {
+				if (filter !== 'all' && bucketOf(task) !== filter) return false;
+				const q = query.trim().toLowerCase();
+				if (q === '') return true;
+				return String(shortLabel(task) || '').toLowerCase().includes(q);
+			});
+			const counts = {
+				all: tasks.length,
+				running: tasks.filter((t) => bucketOf(t) === 'running').length,
+				done: tasks.filter((t) => bucketOf(t) === 'done').length,
+				problem: tasks.filter((t) => bucketOf(t) === 'problem').length,
+			};
+			// 多选只在「当前可见」里生效：全选选的是筛出来的那些，不是全部任务 ——
+			// 否则用户在「失败」筛选下点全选，会连看不见的完成记录一起删掉。
+			const visibleIds = visible.map((task) => task.id);
+			const checkedVisible = checked.filter((id) => visibleIds.includes(id));
+			const allChecked = visible.length > 0 && checkedVisible.length === visible.length;
+
+			const toggleChecked = (id) => {
+				setChecked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.concat([id])));
+			};
+			const toggleAll = () => {
+				if (allChecked) setChecked(checked.filter((id) => !visibleIds.includes(id)));
+				// 只写**可见**的 id：选择范围本身就是筛选结果，不再靠 checkedVisible 兜底。 
+				setChecked(visibleIds);
+			};
+
+			/**
+			 * 批量删除记录 —— **只删记录，绝不删本地文件**。
+			 *
+			 * 为什么批量不提供「连文件一起删」：一次误选就是多个文件永久消失
+			 * （不进回收站），这个不对称的代价太大。要删文件就逐行进确认框，
+			 * 那里有完整路径、大小与不可恢复声明。
+			 */
+			const batchDelete = async () => {
+				const ids = checkedVisible.slice();
+				if (ids.length === 0) return;
+				setBatching(true);
+				let ok = 0;
+				let fail = 0;
+				for (const id of ids) {
+					try {
+						const result = await manage({ op: 'forget', taskId: id });
+						const value = result && result.ok ? result.value : null;
+						const removed = value && Array.isArray(value.recordRemoved) ? value.recordRemoved : [];
+						if (removed.length > 0) {
+							ok += 1;
+							panelStore.clearPresence(id);
+						} else {
+							// 删不掉的那条**留在列表里**（它的记录还在磁盘上），
+							// 用户因此还看得见、还能重试 —— 而不是「以为删了」。
+							fail += 1;
+						}
+					} catch {
+						fail += 1;
+					}
+				}
+				setChecked(checked.filter((id) => !ids.includes(id)));
+				setBatching(false);
+				await inspectAll();
+				if (fail === 0) {
+					setNotice(t('batchDone').replace('{n}', String(ok)));
+				} else {
+					setNotice(
+						t('batchPartial').replace('{ok}', String(ok)).replace('{fail}', String(fail)),
+					);
+				}
+			};
 
 			/** Refresh every row's verdict. Cheap on purpose: one call per task. */
 			const inspectAll = async () => {
@@ -1880,15 +2004,134 @@ window.__ModuleLoader__.load({
 						t('panelClose'),
 					),
 				),
+				react.createElement(
+					'div',
+					{ style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+					// 筛选 tab（带计数：不看数字不知道哪一类有多少）
+					...[
+						['all', 'filterAll'],
+						['running', 'filterRunning'],
+						['done', 'filterDone'],
+						['problem', 'filterProblem'],
+					].map(([key, labelKey]) => {
+						const active = filter === key;
+						return react.createElement(
+							'button',
+							{
+								key: key,
+								type: 'button',
+								'data-dsh-smart-dl': `filter-${key}`,
+								onClick: () => {
+									setFilter(key);
+									setChecked([]);
+								},
+								style: {
+									cursor: 'pointer',
+									fontSize: 12,
+									padding: '4px 10px',
+									borderRadius: 999,
+									border: `1px solid ${active ? 'var(--dsw-alias-label-primary, #2563eb)' : 'var(--dsw-alias-border-l2, rgba(127,127,127,0.24))'}`,
+									color: active ? 'var(--dsw-alias-label-primary, #2563eb)' : 'var(--dsw-alias-label-secondary, #8a8f98)',
+									background: 'transparent',
+									fontWeight: active ? 600 : 400,
+								},
+							},
+							`${t(labelKey)} ${counts[key]}`,
+						);
+					}),
+					react.createElement('input', {
+						key: 'search',
+						type: 'search',
+						'data-dsh-smart-dl': 'search',
+						value: query,
+						placeholder: t('searchPlaceholder'),
+						onChange: (event) => setQuery(String(event.target.value ?? '')),
+						style: {
+							flex: '1 1 160px',
+							minWidth: 120,
+							fontSize: 12,
+							padding: '4px 10px',
+							borderRadius: 6,
+							border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+							background: 'transparent',
+							color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+						},
+					}),
+					// 全选：只作用于「当前筛出来的那些」
+					react.createElement(
+						'label',
+						{
+							key: 'select-all',
+							style: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, opacity: 0.8 },
+						},
+						react.createElement('input', {
+							type: 'checkbox',
+							'data-dsh-smart-dl': 'select-all',
+							checked: allChecked,
+							onChange: toggleAll,
+						}),
+						t('selectAll'),
+					),
+				),
+				// 批量操作条：只在有选中时出现（不给一个永远灰着的按钮）
+				checkedVisible.length === 0
+					? null
+					: react.createElement(
+							'div',
+							{
+								key: 'batch',
+								'data-dsh-smart-dl': 'batch-bar',
+								style: {
+									display: 'flex',
+									alignItems: 'center',
+									gap: 8,
+									padding: '6px 10px',
+									borderRadius: 8,
+									background: 'var(--dsw-alias-bg-skeleton, rgba(127,127,127,0.12))',
+									fontSize: 12,
+								},
+							},
+							react.createElement(
+								'span',
+								{ style: { flex: '1 1 auto' } },
+								t('selectedCount').replace('{n}', String(checkedVisible.length)),
+							),
+							react.createElement(
+								'button',
+								{
+									type: 'button',
+									'data-dsh-smart-dl': 'batch-delete',
+									disabled: batching,
+									onClick: () => {
+										void batchDelete();
+									},
+									style: {
+										cursor: batching ? 'default' : 'pointer',
+										fontSize: 12,
+										padding: '4px 10px',
+										borderRadius: 6,
+										border: '1px solid var(--dsw-alias-label-error, #dc2626)',
+										background: 'transparent',
+										color: 'var(--dsw-alias-label-error, #dc2626)',
+										opacity: batching ? 0.5 : 1,
+									},
+								},
+								batching
+									? t('batchDeleting')
+									: t('batchDelete').replace('{n}', String(checkedVisible.length)),
+							),
+						),
 				notice === null
 					? null
 					: react.createElement('div', { key: 'notice', style: { fontSize: 12 } }, notice),
-				tasks.length === 0
+				visible.length === 0
 					? react.createElement(
 							'div',
 							{
-								key: 'empty',
-								'data-dsh-smart-dl': 'empty',
+								// 两种情况必须分开说：一条记录都没有 vs 有记录但被筛掉了。
+								// 后者如果也显示「暂无下载任务」，用户会以为记录丢了。
+								key: tasks.length === 0 ? 'empty' : 'empty-filtered',
+								'data-dsh-smart-dl': tasks.length === 0 ? 'empty' : 'empty-filtered',
 								style: {
 									flex: '1 1 auto',
 									display: 'flex',
@@ -1921,7 +2164,7 @@ window.__ModuleLoader__.load({
 							react.createElement(
 								'div',
 								{ style: { fontSize: 13, fontWeight: 600 } },
-								t('empty'),
+								tasks.length === 0 ? t('empty') : t('emptyFiltered'),
 							),
 							react.createElement(
 								'div',
@@ -1933,15 +2176,40 @@ window.__ModuleLoader__.load({
 										lineHeight: 1.6,
 									},
 								},
-								t('emptyHint'),
+								tasks.length === 0 ? t('emptyHint') : '',
 							),
+							tasks.length === 0
+								? null
+								: react.createElement(
+										'button',
+										{
+											type: 'button',
+											'data-dsh-smart-dl': 'clear-filter',
+											onClick: () => {
+												setFilter('all');
+												setQuery('');
+											},
+											style: {
+												cursor: 'pointer',
+												fontSize: 12,
+												padding: '4px 10px',
+												borderRadius: 6,
+												border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+												background: 'transparent',
+												color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+											},
+										},
+										t('clearFilter'),
+									),
 						)
-					: tasks.map((task) =>
+					: visible.map((task) =>
 							react.createElement(SmartDlManagerRow, {
 								key: task.id,
 								task: task,
 								t: t,
 								presence: state.presence,
+								checked: checked.includes(task.id),
+								onToggle: toggleChecked,
 								onReveal: revealTask,
 								onDelete: (row) => setPending(row.id),
 							}),

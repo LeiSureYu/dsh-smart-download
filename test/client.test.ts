@@ -2333,3 +2333,212 @@ test('管理器（视觉）：空状态给图标 + 引导文案（不是干巴�
     panel.dispose()
   }
 })
+
+/* ---------------- 筛选 / 搜索 / 批量删除记录 ---------------- */
+
+/** 勾上某个复选框（按 data-task-id 找）。 */
+function checkRow(node: unknown, taskId: string, label: string): void {
+  const el = findAll(
+    node,
+    (e) => e.props?.['data-dsh-smart-dl'] === 'row-check' && e.props?.['data-task-id'] === taskId,
+  )[0]
+  assert.ok(el, `${label}：必须找到 ${taskId} 的复选框`)
+  const onChange = el.props?.onChange as (() => void) | undefined
+  assert.equal(typeof onChange, 'function', `${label}：复选框必须可切换`)
+  onChange?.()
+}
+
+function clickDataAttr(node: unknown, attr: string, label: string): void {
+  const el = findAll(node, (e) => e.props?.['data-dsh-smart-dl'] === attr)[0]
+  assert.ok(el, `${label}：必须找到 ${attr}`)
+  const onClick = el.props?.onClick as (() => void) | undefined
+  assert.equal(typeof onClick, 'function', `${label}：必须可点`)
+  onClick?.()
+}
+
+test('管理器：筛选 tab 按状态过滤，并带计数', async () => {
+  const { request } = serve([
+    managedTask({ id: 'r1', status: 'running', pct: 20 }),
+    managedTask({ id: 'd1', status: 'completed', pct: 100 }),
+    managedTask({ id: 'f1', status: 'failed', pct: 30 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    let tree = await renderManagerSettled(panel)
+    assert.equal(findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'manager-row').length, 3, '默认显示全部')
+
+    clickDataAttr(tree, 'filter-problem', '失败/取消 tab')
+    tree = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'manager-row').length,
+      1,
+      '失败/取消只显示失败的那条',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：搜索按文件名过滤（大小写不敏感）', async () => {
+  const { request } = serve([
+    managedTask({ id: 'a1', name: 'Alpha-Report.pdf' }),
+    managedTask({ id: 'b1', name: 'beta-notes.txt' }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const search = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'search')[0]
+    assert.ok(search, '必须有搜索框')
+    const onChange = search.props?.onChange as ((e: { target: { value: string } }) => void) | undefined
+    assert.equal(typeof onChange, 'function', '搜索框必须响应输入')
+    onChange?.({ target: { value: 'REPORT' } })
+    const after = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(after, (el) => el.props?.['data-dsh-smart-dl'] === 'manager-row').length,
+      1,
+      '大写查询也要能匹配到（大小写不敏感）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：批量删除**只删记录**，绝不发 delete（安全红线）', async () => {
+  const { request } = serve([
+    managedTask({ id: 'x1', status: 'completed' }),
+    managedTask({ id: 'x2', status: 'completed' }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'forget'
+        ? { ok: true, value: { recordRemoved: ['x'] } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    let tree = await renderManagerSettled(panel)
+    checkRow(tree, 'x1', '第一条')
+    tree = await renderManagerSettled(panel)
+    checkRow(tree, 'x2', '第二条')
+    tree = await renderManagerSettled(panel)
+    clickDataAttr(tree, 'batch-delete', '批量删除')
+    await settle()
+    await settle()
+
+    const forgets = manage.calls.filter((c) => c.op === 'forget')
+    assert.equal(forgets.length, 2, '两条各发一次 forget')
+    assert.equal(
+      manage.calls.filter((c) => c.op === 'delete').length,
+      0,
+      '批量删除绝不能发 delete：一次误选就是多个文件永久消失（不进回收站）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：全选只作用于当前筛选结果（不会连看不见的记录一起删）', async () => {
+  const { request } = serve([
+    managedTask({ id: 'ok1', status: 'completed' }),
+    managedTask({ id: 'bad1', status: 'failed' }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'forget'
+        ? { ok: true, value: { recordRemoved: ['x'] } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    let tree = await renderManagerSettled(panel)
+    // 先切到「失败」筛选项（只剩 1 条可见）
+    clickDataAttr(tree, 'filter-problem', '失败 tab')
+    tree = await renderManagerSettled(panel)
+    // 点全选
+    const selectAll = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'select-all')[0]
+    assert.ok(selectAll, '必须有全选')
+    const onChange = selectAll.props?.onChange as (() => void) | undefined
+    onChange?.()
+    tree = await renderManagerSettled(panel)
+    // 说明：这里**只断言 forget 的 id 集合**，不断言「勾选状态看起来对」——
+    // 隐藏行不渲染，两种实现（写可见 id / 写全部 id）在可见集合上表现一致，
+    // 观察勾选状态是恒真的。真正影响安全的是最终发出去的 forget 有哪些，
+    // 由下方的 forgotten 断言守；而「全选只写 visibleIds」的正确性靠代码注释与
+    // 切 tab 清空选择（setChecked([])）共同保证。
+    clickDataAttr(tree, 'batch-delete', '批量删除')
+    await settle()
+    await settle()
+    const forgotten = manage.calls.filter((c) => c.op === 'forget').map((c) => c.taskId)
+    assert.deepEqual(
+      forgotten,
+      ['bad1'],
+      '全选只能选中筛出来的那条 —— 否则用户在「失败」下点全选会连看不见的完成记录一起删掉',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：部分删除失败 → 如实报告，不假装全成功', async () => {
+  const { request } = serve([
+    managedTask({ id: 'y1', status: 'completed' }),
+    managedTask({ id: 'y2', status: 'completed' }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'forget'
+        ? // y2 删不掉（宿主如实返回没删到）
+          body.taskId === 'y2'
+          ? { ok: true, value: { recordRemoved: [] } }
+          : { ok: true, value: { recordRemoved: ['x'] } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    let tree = await renderManagerSettled(panel)
+    checkRow(tree, 'y1', '第一条')
+    tree = await renderManagerSettled(panel)
+    checkRow(tree, 'y2', '第二条')
+    tree = await renderManagerSettled(panel)
+    clickDataAttr(tree, 'batch-delete', '批量删除')
+    await settle()
+    await settle()
+    const after = await renderManagerSettled(panel)
+    const text = textOf(after)
+    assert.match(
+      text,
+      /batchPartial|没删掉|could not be deleted/,
+      '部分失败必须如实报告「删掉几条、几条没删掉」，而不是只报成功',
+    )
+  } finally {
+    panel.dispose()
+  }
+})

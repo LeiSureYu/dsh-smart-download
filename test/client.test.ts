@@ -67,18 +67,34 @@ interface EffectSlot {
 }
 
 /** 最小 hook 环境：状态槽 + effect 槽（effect 按 hook 序号存，稀疏也不怕）。 */
-interface Rig {
+interface ComponentRig {
   states: unknown[]
   effects: Map<number, EffectSlot>
 }
 
+/**
+ * 测试用的 hook 环境，**按组件隔离**。
+ *
+ * 为什么必须隔离：面板（`shell.overlay`）与入口按钮（会话头部）是同一份
+ * `src/client.js` 里的两个函数组件，它们共用 factory 里那一个 `react`；
+ * 若 state/effect 槽仍按「一个数组」编号，两个组件的 hook 0/1 会互相覆盖
+ * （表现成「点入口按钮改了面板的 state」这种假象），断言也就不可信了。
+ * 真实 React 靠 fiber 的组件实例隔离，这里用 `components` 映射表达同一件事。
+ */
+interface Rig {
+  components: Map<string, ComponentRig>
+  active: ComponentRig
+}
+
 /** 测试用的 React 桩：hook API 之外还带一个「新一次渲染开始」的标记。 */
 interface ReactStub {
-  markRender(): void
+  markRender(componentKey?: string): void
   createElement(type: unknown, props: Record<string, unknown> | null, ...children: unknown[]): FakeElement
   useState(initial: unknown): [unknown, (next: unknown) => void]
   useEffect(fn: () => void | (() => void), deps?: unknown[]): void
   useMemo(fn: () => unknown): unknown
+  /** 订阅式 store 的 `useEffect` 清理用不上，但组件可能传函数回来；保持签名宽松 */
+  useRef(initial: unknown): { current: unknown }
 }
 
 /** 本文件跑过的所有面板轮询计时器（仍然活着的会留在集合里）。 */
@@ -116,7 +132,17 @@ function createRig(): Rig {
   // effects 用 Map（不是数组）：hook 序号会因为 useMemo 这类不占槽的调用而出现空洞，
   // 数组遍历空洞会拿到 undefined，`dispose()` 一句 `slot.cleanup` 就崩 —— 崩了
   // 计时器就没人清，进程又不会退（这条踩过一次）。
-  return { states: [], effects: new Map() }
+  return { components: new Map(), active: { states: [], effects: new Map() } }
+}
+
+/** 取（必要时创建）某个组件的 hook 环境。 */
+function componentRig(rig: Rig, key: string): ComponentRig {
+  let found = rig.components.get(key)
+  if (!found) {
+    found = { states: [], effects: new Map() }
+    rig.components.set(key, found)
+  }
+  return found
 }
 
 /**
@@ -134,8 +160,9 @@ function createRig(): Rig {
 function makeReact(rig: Rig): ReactStub {
   let sequence = 0
   return {
-    markRender() {
+    markRender(componentKey) {
       sequence = 0
+      rig.active = componentRig(rig, componentKey ?? 'default')
     },
     createElement(type, props, ...children) {
       return { type, props: { ...(props ?? {}), children } }
@@ -143,20 +170,22 @@ function makeReact(rig: Rig): ReactStub {
     useState(initial) {
       const index = sequence
       sequence += 1
-      if (index >= rig.states.length) {
-        rig.states[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial
+      const states = rig.active.states
+      if (index >= states.length) {
+        states[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial
       }
       const set = (next: unknown): void => {
-        rig.states[index] =
-          typeof next === 'function' ? (next as (prev: unknown) => unknown)(rig.states[index]) : next
+        states[index] =
+          typeof next === 'function' ? (next as (prev: unknown) => unknown)(states[index]) : next
       }
-      return [rig.states[index], set]
+      return [states[index], set]
     },
     useEffect(fn, deps) {
       const index = sequence
       sequence += 1
-      const slot = rig.effects.get(index) ?? {}
-      rig.effects.set(index, slot)
+      const effects = rig.active.effects
+      const slot = effects.get(index) ?? {}
+      effects.set(index, slot)
       const next = deps ? [...deps] : undefined
       // React 语义：没有依赖数组 => 每次渲染都跑；给了数组 => 浅比较相等就跳过。
       // 「跳过」正是这里的关键：否则 settle 之后的再一次渲染会重复建轮询计时器。
@@ -175,17 +204,24 @@ function makeReact(rig: Rig): ReactStub {
     useMemo(fn) {
       return fn()
     },
+    useRef(initial) {
+      return { current: initial }
+    },
   }
 }
 
 /* ------------------------- __ModuleLoader__ / slot 桩 ------------------------- */
 
 interface CapturedSlot {
-  inject: {
-    requestStatus: (payload: unknown, signal?: AbortSignal) => Promise<unknown>
-  }
+  slotName: string
+  id: string
+  inject: Record<string, unknown>
   component: (props: Record<string, unknown>) => unknown
 }
+
+/** 两个 slot 的 id（与 src/client.js 的常量一致；测试里显式写死，防止被悄悄改名）。 */
+const OVERLAY_SLOT = 'shell.overlay'
+const HEADER_SLOT = 'conversation.session.header.actions'
 
 /** 翻译替身：字典键原样返回，`eta` 插值保留成 `eta:<值>` 便于断言。 */
 function translator(): (key: string, vars?: Record<string, string>) => string {
@@ -315,16 +351,28 @@ let loadedSpec: unknown = null
 /** 一个测试用的面板装配：apply 一次、渲染一次、读结果。 */
 interface Panel {
   rig: Rig
-  /** 渲染面板并返回元素树（null 表示「按设计不显示」） */
+  /** 渲染面板（overlay）并返回元素树（null 表示「按设计不显示」） */
   render: (sessionState?: { byId: Record<string, unknown> }) => unknown
-  /** 读一次渲染产出的正文文本 */
+  /** 读一次面板渲染产出的正文文本 */
   text: () => string
+  /** 渲染会话头部入口按钮，返回它的元素树与按钮元素 */
+  renderEntry: () => { tree: unknown; text: string; button: FakeElement | undefined }
+  /** 点击入口按钮（调它的 onClick），返回点击后重新渲染的入口元素树 */
+  clickEntry: () => unknown
+  /** 点击面板上的 × 关闭按钮（调它的 onClick），返回点击后重新渲染的面板树 */
+  clickClose: () => unknown
+  /** 直接往共享 store 里灌一份快照（等价于面板轮询拿到新数据） */
+  publish: (tasks: Array<Record<string, unknown>>) => void
   /** 卸载（清理 interval，避免拖住测试进程） */
   dispose: () => void
 }
 
 /**
- * 装配面板。
+ * 装配面板与入口按钮。
+ *
+ * 两个 slot 都要接住：`shell.overlay`（面板）与
+ * `conversation.session.header.actions`（固定入口）。它们的 `inject` 都会**真跑一次**
+ * （业务面在那里构造），组件拿到的是同一份注入对象 + 框架 prop。
  *
  * @param requestStatus 面板向 Host 取快照的替身
  */
@@ -334,7 +382,8 @@ function mountPanel(
   const spec = getSpec()
   const rig = createRig()
   const react = makeReact(rig)
-  const componentRef: { current: CapturedSlot['component'] | null } = { current: null }
+  const slots = new Map<string, CapturedSlot>()
+  const pluginCleanups: Array<() => void> = []
 
   const mod = spec.factory((name) => {
     if (name === 'react') return react
@@ -344,14 +393,21 @@ function mountPanel(
   const ctx = {
     locale: { register: () => () => undefined },
     slots: {
-      inject: (_name: string, fn: () => Generator<unknown, void, unknown>) => {
+      inject: (slotName: string, fn: () => Generator<unknown, void, unknown>) => {
         for (const step of fn()) {
           const registered = step as {
-            options: { inject: () => CapturedSlot['inject'] }
+            options: { name: string; id: string; inject?: () => Record<string, unknown> }
             component: CapturedSlot['component']
           }
-          void registered.options.inject()
-          componentRef.current = registered.component
+          // 业务面必须真的构造一次：漏跑它，组件拿到的是「取数函数是 undefined」
+          // 的世界，表现为永远不显示（测试里就是「状态更新了但树是 null」）。
+          const injected = registered.options.inject ? registered.options.inject() : {}
+          slots.set(registered.options.name, {
+            slotName: slotName,
+            id: registered.options.id,
+            inject: injected,
+            component: registered.component,
+          })
         }
         return () => undefined
       },
@@ -361,21 +417,29 @@ function mountPanel(
       }),
     },
     effect: (fn: () => unknown) => {
-      fn()
+      const cleanup = fn()
+      // 插件级 effect 的清理函数要留着：`dispose()` 时跑一遍，等价于「插件被停用」。
+      // 提示音的待响计时器就在其中（不跑的话那一声会留在测试进程里）。
+      if (typeof cleanup === 'function') pluginCleanups.push(cleanup as () => void)
       return () => undefined
     },
     connection: { rpc: { call: () => Promise.resolve({ ok: true, value: { tasks: [] } }) } },
   }
   mod.apply(ctx)
-  assert.ok(componentRef.current, 'apply 必须注册 overlay 组件')
+  assert.ok(slots.has(OVERLAY_SLOT), 'apply 必须注册 shell.overlay 面板')
+  assert.ok(slots.has(HEADER_SLOT), 'apply 必须注册会话头部入口按钮')
 
-  const render = (sessionState?: { byId: Record<string, unknown> }): unknown => {
-    react.markRender()
-    // `requestStatus` 是 slot 的业务面（statusInjected）注入进来的 **prop**，
-    // 不是 hook：漏了它组件会 render 出一个「取数函数是 undefined」的世界，
-    // 表现为永远不显示（测试里就是「状态更新了但树是 null」）。
-    const element = componentRef.current!({
-      requestStatus,
+  const renderSlot = (
+    slotName: string,
+    sessionState?: { byId: Record<string, unknown> },
+  ): unknown => {
+    const slot = slots.get(slotName)
+    assert.ok(slot, `slot 未注册：${slotName}`)
+    // 每个 slot 用**自己的** hook 环境：两个组件共用一份 state 槽会互相覆盖。
+    react.markRender(slotName)
+    const element = slot.component({
+      ...slot.inject,
+      // requestStatus 面板自己会覆盖（下面的 render 里注入替身），入口按钮不需要它
       useSessions: sessionsOf(sessionState),
       t: translator(),
     })
@@ -383,23 +447,258 @@ function mountPanel(
     return renderHostTree(element)
   }
 
+  const renderPanel = (sessionState?: { byId: Record<string, unknown> }): unknown => {
+    const slot = slots.get(OVERLAY_SLOT)
+    assert.ok(slot)
+    react.markRender(OVERLAY_SLOT)
+    const element = slot.component({
+      ...slot.inject,
+      requestStatus: requestStatus,
+      useSessions: sessionsOf(sessionState),
+      t: translator(),
+    })
+    return renderHostTree(element)
+  }
+
+  const store = (slots.get(OVERLAY_SLOT) as CapturedSlot).inject.panelStore as {
+    publish: (tasks: Array<Record<string, unknown>>) => void
+  }
+
   let last: unknown = null
   return {
     rig,
     render(sessionState) {
-      last = render(sessionState)
+      last = renderPanel(sessionState)
       return last
     },
     text() {
       return textOf(last)
     },
+    renderEntry() {
+      const tree = renderSlot(HEADER_SLOT)
+      const buttons = findAll(tree, (el) => el.type === 'button')
+      return { tree, text: textOf(tree), button: buttons[0] }
+    },
+    clickEntry() {
+      const { button } = this.renderEntry()
+      assert.ok(button, '入口必须是一个 button 元素')
+      const onClick = button.props.onClick as (() => void) | undefined
+      assert.equal(typeof onClick, 'function', '入口按钮必须可点（onClick 必须是函数）')
+      onClick?.()
+      return this.renderEntry().tree
+    },
+    clickClose() {
+      const tree = renderPanel()
+      const close = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'close')[0]
+      assert.ok(close, '打开的面板必须有一个关闭控件')
+      const onClick = close.props.onClick as (() => void) | undefined
+      assert.equal(typeof onClick, 'function', '关闭控件必须可点')
+      onClick?.()
+      return renderPanel()
+    },
+    publish(tasks) {
+      store.publish(tasks)
+    },
     dispose() {
-      // 卸载语义：每个 effect 槽的清理函数都要跑（面板的轮询计时器就在其中），
+      // 卸载语义：**所有组件**的 effect 槽清理函数都要跑（面板的轮询计时器就在其中），
       // 否则 2 秒一次的 interval 会一直把测试进程拖住不让它退出。
-      for (const slot of rig.effects.values()) {
-        slot.cleanup?.()
-        slot.cleanup = undefined
+      for (const component of rig.components.values()) {
+        for (const slot of component.effects.values()) {
+          slot.cleanup?.()
+          slot.cleanup = undefined
+        }
       }
+      // 再跑插件级 effect 的清理（音频解锁监听 + 待响提示音）。
+      for (const cleanup of pluginCleanups.splice(0)) cleanup()
+    },
+  }
+}
+
+/* ------------------------- 音频 / localStorage / 定时器桩（t28） ------------------------- */
+
+/** 一次 `osc.start()` + `osc.stop()` 排出来的音。 */
+interface ScheduledNote {
+  wave: string
+  freq: number
+  start: number
+  end: number
+}
+
+/** AudioContext 桩的记账。 */
+interface FakeAudio {
+  /** 创建过几个 AudioContext（自动播放策略要求复用，不是每次播放新建） */
+  contexts: number
+  resumes: number
+  /** 排出来的音符（按上下文累计） */
+  notes: ScheduledNote[]
+}
+
+interface FakePageOptions {
+  /** 不给 AudioContext（老浏览器）：播放必须静默退化。 */
+  withoutAudio?: boolean
+  /** `resume()` 返回被拒绝的 promise（模拟自动播放策略拒绝）。 */
+  resumeRejects?: boolean
+  /** 预置 localStorage 内容（模拟「上次的选择被记住了」）。 */
+  stored?: Record<string, string>
+  /** 不给 localStorage（隐私模式） */
+  withoutStorage?: boolean
+}
+
+interface FakePage {
+  audio: FakeAudio
+  storage: Map<string, string>
+  /** 记录到的 addEventListener 调用（断言 capture/once）。 */
+  listeners: Array<{ type: string; options: unknown }>
+  /** 触发一次「首次用户交互」。 */
+  gesture: () => void
+  restore: () => void
+}
+
+/**
+ * 给测试用的全局 `window` 补上音频/存储/事件三件套。
+ *
+ * `src/client.js` 的 apply 只碰这三个（AudioContext、localStorage、
+ * pointerdown/keydown），所以桩只补这些；`__ModuleLoader__` 原样保留。
+ * 必须在 `mountPanel()` **之前**装好：store 创建时就读 localStorage。
+ */
+function installFakePage(options: FakePageOptions = {}): FakePage {
+  const win = (globalThis as unknown as { window: Record<string, unknown> }).window
+  const audio: FakeAudio = { contexts: 0, resumes: 0, notes: [] }
+  const storage = new Map<string, string>(Object.entries(options.stored ?? {}))
+  const listeners: FakePage['listeners'] = []
+  const handlers = new Map<string, (event?: unknown) => void>()
+  const had = new Map<string, unknown>()
+  for (const key of ['AudioContext', 'localStorage', 'addEventListener', 'removeEventListener']) {
+    had.set(key, win[key])
+  }
+
+  if (!options.withoutAudio) {
+    class AudioContextStub {
+      state = 'suspended'
+      currentTime = 0
+      destination = { name: 'destination' }
+      constructor() {
+        audio.contexts += 1
+      }
+      resume(): Promise<void> {
+        audio.resumes += 1
+        if (options.resumeRejects) return Promise.reject(new Error('NotAllowedError'))
+        this.state = 'running'
+        return Promise.resolve()
+      }
+      createGain(): Record<string, unknown> {
+        return {
+          gain: {
+            setValueAtTime: () => undefined,
+            linearRampToValueAtTime: () => undefined,
+            exponentialRampToValueAtTime: () => undefined,
+          },
+          connect: () => undefined,
+        }
+      }
+      createOscillator(): Record<string, unknown> {
+        const osc: Record<string, unknown> = {
+          type: 'sine',
+          frequency: { setValueAtTime: (freq: number) => (osc.freq = freq) },
+          freq: 0,
+          start: (at: number) => (osc.startedAt = at),
+          stop: (at: number) =>
+            audio.notes.push({
+              wave: String(osc.type),
+              freq: Number(osc.freq),
+              start: Number(osc.startedAt),
+              end: at,
+            }),
+          connect: () => undefined,
+        }
+        return osc
+      }
+    }
+    win.AudioContext = AudioContextStub
+    win.webkitAudioContext = undefined
+  } else {
+    win.AudioContext = undefined
+    win.webkitAudioContext = undefined
+  }
+
+  if (!options.withoutStorage) {
+    win.localStorage = {
+      getItem: (key: string) => (storage.has(key) ? (storage.get(key) as string) : null),
+      setItem: (key: string, value: string) => void storage.set(key, String(value)),
+      removeItem: (key: string) => void storage.delete(key),
+    }
+  } else {
+    win.localStorage = undefined
+  }
+  win.addEventListener = (type: string, handler: (event?: unknown) => void, opts: unknown) => {
+    listeners.push({ type, options: opts })
+    handlers.set(type, handler)
+  }
+  win.removeEventListener = (type: string) => {
+    handlers.delete(type)
+  }
+
+  return {
+    audio,
+    storage,
+    listeners,
+    gesture() {
+      // capture + once：真实浏览器里一次交互后 handlers 会被摘掉，这里同样处理。
+      for (const [type, handler] of [...handlers]) {
+        handler({ type })
+        handlers.delete(type)
+      }
+    },
+    restore() {
+      for (const [key, value] of had) {
+        if (value === undefined) delete win[key]
+        else win[key] = value
+      }
+    },
+  }
+}
+
+interface FakeTimers {
+  pending: Array<{ fn: () => void; delay: number }>
+  /** 触发所有待跑的 setTimeout（合流窗口到期）。 */
+  fireAll: () => void
+  restore: () => void
+}
+
+/**
+ * 只截 `setTimeout`（`setInterval` 留给真实实现）。
+ *
+ * 为什么必须截：合流窗口是「1 秒后响」，真等一秒会让每条音频断言都变慢；而
+ * `clearTimeout` 也要一起截，否则「卸载时清掉待响的一声」没法断言。
+ * 注意本文件里 `settle()`（10ms）与真实轮询等待（2200ms）用的也是 setTimeout ——
+ * 所以装了假计时器的用例**不能再 await settle/真实等待**，数据要走 `publish()`。
+ */
+function installFakeTimers(): FakeTimers {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const pending: FakeTimers['pending'] = []
+  const cancelled = new Set<number>()
+
+  globalThis.setTimeout = ((fn: () => void, delay?: number) => {
+    pending.push({ fn, delay: Number(delay ?? 0) })
+    return pending.length as unknown as NodeJS.Timeout
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((handle: unknown) => {
+    cancelled.add(Number(handle))
+  }) as unknown as typeof clearTimeout
+
+  return {
+    pending,
+    fireAll() {
+      const due = [...pending]
+      pending.length = 0
+      due.forEach((entry, index) => {
+        if (!cancelled.has(index + 1)) entry.fn()
+      })
+    },
+    restore() {
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
     },
   }
 }
@@ -408,6 +707,14 @@ function mountPanel(
 function settle(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 10))
 }
+
+/**
+ * 等一次真实轮询计时器跳（POLL_INTERVAL_MS = 2000）。
+ *
+ * 用它而不是直接调 store.publish 的地方，要的就是「定时器真的会驱动可见性变化」
+ * 这条链路：只灌数据不跳表，等于把被测的那根导线短路掉。
+ */
+const POLL_WAIT_MS = 2200
 
 /** 一条面板任务快照；缺省字段按「正在下载」补齐。 */
 function task(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -583,12 +890,12 @@ test('面板：title 用完整名字（行内仍是截断的），没有任何�
   assert.equal(emptyTitle.length, 0, '无标识的任务不该挂 title')
 })
 
-test('面板：apply 注册了 overlay 入口与字典（effect 标签不变）', () => {
+test('面板：apply 注册了 overlay 面板 + 会话头部入口 + 字典（effect 标签不变）', () => {
   const labels: string[] = []
   const spec = getSpec()
   const rig = createRig()
   const react = makeReact(rig)
-  let registeredId: string | null = null
+  const registered: Array<{ name: string; id: string }> = []
   const mod = spec.factory((name) => {
     if (name === 'react') return react
     throw new Error(`unexpected require: ${name}`)
@@ -598,7 +905,8 @@ test('面板：apply 注册了 overlay 入口与字典（effect 标签不变）'
     slots: {
       inject: (_name: string, fn: () => Generator<unknown, void, unknown>) => {
         for (const step of fn()) {
-          registeredId = (step as { options: { id: string } }).options.id
+          const options = (step as { options: { name: string; id: string } }).options
+          registered.push({ name: options.name, id: options.id })
         }
         return () => undefined
       },
@@ -611,9 +919,411 @@ test('面板：apply 注册了 overlay 入口与字典（effect 标签不变）'
     },
     connection: { rpc: { call: () => Promise.resolve({ ok: true }) } },
   })
-  assert.equal(registeredId, 'smartdl.progress', 'overlay 条目 id 必须保持不变')
+  // 两个 slot 都要在：面板（浮层）与固定入口（会话头部）。
+  assert.deepEqual(
+    registered.map((r) => `${r.name}#${r.id}`),
+    ['shell.overlay#smartdl.progress', 'conversation.session.header.actions#smartdl.progress-entry'],
+    'overlay 条目 id 必须保持不变，入口按钮走会话头部槽位',
+  )
   assert.ok(labels.includes('dsh-smart-dl: shell.overlay progress pill'))
+  assert.ok(labels.includes('dsh-smart-dl: session header entry'))
   assert.ok(labels.includes('dsh-smart-dl: dictionaries'))
+})
+
+/* ==================== t26：固定入口 / 完整历史 / 主动关闭 / 5 秒消失 ==================== */
+
+test('入口：会话头部按钮可点、带 aria-label，打开后面板是 dialog 且空列表给空态', async () => {
+  const { request } = serve([])
+  const panel = mountPanel(request)
+  // try/finally：断言失败时也必须 dispose。否则 2 秒轮询计时器没人清，
+  // 子进程永远不退出 —— 一次「假红」会把整条测试命令挂死（本任务踩过一次）。
+  try {
+    panel.render()
+    await settle()
+
+    const entry = panel.renderEntry()
+    assert.ok(entry.button, '入口必须渲染一个 button 元素')
+    assert.equal(entry.button.type, 'button')
+    assert.equal(typeof entry.button.props.onClick, 'function', '入口必须可点')
+    assert.equal(entry.button.props['aria-label'], 'entry', '入口必须有可读标签（字典键原样返回）')
+    assert.equal(entry.button.props['aria-expanded'], false, '关着时 aria-expanded 必须是 false')
+
+    assert.equal(panel.render(), null, '没有任务时自动层不该显示')
+
+    const openedTree = panel.clickEntry()
+    assert.ok(openedTree, '点击入口后必须渲染出面板')
+    const root = panel.render()
+    assert.ok(root, '打开状态下面板必须持续渲染')
+    const dialogs = findAll(root, (el) => el.props.role === 'dialog')
+    assert.equal(dialogs.length, 1, '用户主动打开的面板在无障碍语义上是 dialog')
+    assert.equal(dialogs[0].props['aria-label'], 'title', 'dialog 必须带可读标签')
+    assert.match(textOf(root), /empty/, '没有任何任务时给出空态文案，而不是空白面板')
+    assert.equal(panel.renderEntry().button?.props['aria-expanded'], true, '打开后 aria-expanded 必须为 true')
+    // × 关闭控件本身也要有可读标签（不依赖 title 悬停）
+    const close = findAll(root, (el) => el.props?.['data-dsh-smart-dl'] === 'close')
+    assert.equal(close.length, 1, '打开的面板必须有且只有一个关闭控件')
+    assert.equal(close[0].props['aria-label'], 'close', '关闭控件必须有 aria-label')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('入口：打开后列出已完成的历史任务（超出回执期也看得到）', async () => {
+  const longAgo = Date.now() - 10 * 60 * 1000
+  const { request } = serve([
+    task({ id: 'h1', name: 'old.iso', status: 'completed', pct: 100, msg: '下载完成', updatedAt: longAgo }),
+  ])
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+
+    assert.equal(panel.render(), null, '终态早就超过回执期，自动层必须已经不显示')
+
+    panel.clickEntry()
+    const root = panel.render()
+    assert.ok(root, '打开后必须显示完整历史')
+    const text = textOf(root)
+    assert.match(text, /old\.iso/, '历史任务的文件名必须可见')
+    assert.match(text, /completed/, '终态标签必须可见')
+    assert.doesNotMatch(text, /empty/, '有历史时不该显示空态')
+    assert.equal(
+      findAll(root, (el) => el.props.role === 'progressbar').length,
+      1,
+      '打开态下既有进度条语义（role=progressbar）不得丢失',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('关闭：× 关掉后不会被轮询弹回（同一批任务），新任务或再次点入口才回来', async () => {
+  const live = [task({ id: 'r1', name: 'running.bin', status: 'running', updatedAt: Date.now() })]
+  const { request } = serve(live)
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    assert.ok(panel.render(), '进行中必须自动出现')
+
+    // × 关闭：同时压住自动层，否则下一轮轮询会立刻把它弹回来（那按钮等于没用）
+    assert.equal(panel.clickClose(), null, '× 关闭后必须立刻消失')
+    panel.publish(live)
+    assert.equal(panel.render(), null, '同一批任务不得把面板弹回来')
+
+    // ② 用户再次点入口 → 又能打开
+    assert.ok(panel.clickEntry(), '再次点入口必须能打开')
+    panel.clickClose()
+    assert.equal(panel.render(), null, '再关一次同样生效')
+
+    // ① 出现新任务 → 自动层重新武装
+    panel.publish([
+      ...live,
+      task({ id: 'r2', name: 'second.bin', status: 'running', updatedAt: Date.now() }),
+    ])
+    assert.ok(panel.render(), '出现新任务后自动层必须重新显示')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('自动消失：全部任务终态后 5 秒自动层消失（走真实轮询计时器，注入时钟）', async () => {
+  const realNow = Date.now
+  const base = realNow()
+  const done = [
+    task({ id: 'd1', name: 'done.bin', status: 'completed', pct: 100, updatedAt: base - 1000 }),
+  ]
+  const { request } = serve(done)
+  const panel = mountPanel(request)
+  try {
+    Date.now = () => base
+    panel.render()
+    await settle()
+    assert.ok(panel.render(), '刚结束 1 秒时必须还显示（旧行为 30 秒，本轮改成 5 秒）')
+
+    // 时钟前进到「结束后 6 秒」，等真实轮询计时器（2 秒一跳）跑一次
+    Date.now = () => base + 6000
+    await new Promise((resolve) => setTimeout(resolve, POLL_WAIT_MS))
+    assert.equal(panel.render(), null, '全部终态 5 秒后自动层必须消失')
+  } finally {
+    Date.now = realNow
+    panel.dispose()
+  }
+})
+
+/* ==================== t28：提示音（合成 / 去重 / 合流 / 静音开关） ==================== */
+
+/**
+ * 声音相关的公共装配：装桩 → apply → 手势解锁 → 首屏播种。
+ *
+ * `first` 是**页面加载后的第一份快照**（默认空）。刷新场景要专门传历史任务进来：
+ * 那一份快照里的终态一条都不该响，所以它必须是「第一份」。
+ */
+function mountSoundPanel(
+  options: FakePageOptions & { first?: Array<Record<string, unknown>> } = {},
+) {
+  const timers = installFakeTimers()
+  const page = installFakePage(options)
+  const { request } = serve([])
+  const panel = mountPanel(request)
+  page.gesture() // 用户交互过：音频上下文已解锁
+  panel.publish(options.first ?? []) // 首屏
+  return { panel, page, timers }
+}
+
+test('提示音：成功与失败是两段不同的音（音高走向与波形都不同）', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    panel.publish([task({ id: 'ok1', status: 'running' })])
+    panel.publish([task({ id: 'ok1', status: 'completed', msg: '下载完成' })])
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 2, '成功音是两个音（上行两音）')
+    const ok = page.audio.notes.map((n) => ({ wave: n.wave, freq: n.freq }))
+    assert.deepEqual(ok, [
+      { wave: 'sine', freq: 659.25 },
+      { wave: 'sine', freq: 987.77 },
+    ], '成功音：正弦 + 上行 E5→B5')
+
+    panel.publish([
+      task({ id: 'ok1', status: 'completed', msg: '下载完成' }),
+      task({ id: 'bad1', status: 'failed', msg: '失败: 网络中断' }),
+    ])
+    timers.fireAll()
+    const after = page.audio.notes.slice(2)
+    assert.equal(after.length, 2, '失败音也是两个音')
+    assert.deepEqual(after.map((n) => ({ wave: n.wave, freq: n.freq })), [
+      { wave: 'triangle', freq: 392 },
+      { wave: 'triangle', freq: 261.63 },
+    ], '失败音：三角波 + 下行 G4→C4')
+    assert.notDeepEqual(
+      after.map((n) => n.freq),
+      ok.map((n) => n.freq),
+      '两种音必须在音高上就能分辨',
+    )
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：同一任务被反复轮询只响一次（id + 终态去重）', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    const done = [task({ id: 'same', status: 'completed', msg: '下载完成' })]
+    panel.publish(done)
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 2, '第一次进终态要响')
+
+    // 2 秒轮询会把同一份快照一遍遍送进来：一次都不该再响
+    for (let i = 0; i < 3; i += 1) panel.publish(done)
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 2, '同一任务重复轮询必须只响一次')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：1 秒窗口内多条完成只响一次，且失败优先', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    // 一批同时结束：两条成功 + 一条失败，都在同一个窗口内到达
+    panel.publish([task({ id: 'b1', status: 'completed', msg: '下载完成' })])
+    panel.publish([
+      task({ id: 'b1', status: 'completed', msg: '下载完成' }),
+      task({ id: 'b2', status: 'completed', msg: '下载完成' }),
+    ])
+    panel.publish([
+      task({ id: 'b1', status: 'completed', msg: '下载完成' }),
+      task({ id: 'b2', status: 'completed', msg: '下载完成' }),
+      task({ id: 'b3', status: 'failed', msg: '失败: 校验不通过' }),
+    ])
+    assert.equal(page.audio.notes.length, 0, '窗口没到之前不该先响（否则就是连响）')
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 2, '三条一起完成只响一次（两个音的一段）')
+    assert.deepEqual(
+      page.audio.notes.map((n) => n.wave),
+      ['triangle', 'triangle'],
+      '窗口内有失败 → 响失败音（失败优先）',
+    )
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：取消不响（用户自己取消的不需要提醒）', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    panel.publish([task({ id: 'c1', status: 'running' })])
+    panel.publish([task({ id: 'c1', status: 'cancelled', msg: '已取消' })])
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 0, 'cancelled 不该出声')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：刷新页面后首屏的历史终态任务不会被补播一遍', () => {
+  const longAgo = Date.now() - 60 * 60 * 1000
+  const history = [
+    task({ id: 'h1', status: 'completed', updatedAt: longAgo, msg: '下载完成' }),
+    task({ id: 'h2', status: 'failed', updatedAt: longAgo, msg: '失败: 超时' }),
+    task({ id: 'h3', status: 'cancelled', updatedAt: longAgo }),
+  ]
+  // 关键在「第一份快照就是历史」：刷新后的页面看到的正是这个
+  const { panel, page, timers } = mountSoundPanel({ first: history })
+  try {
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 0, '历史任务一条都不该响')
+
+    // 之后真的有新任务结束 → 照常响（首屏播种不能把后续也一起哑掉）
+    panel.publish([...history, task({ id: 'n1', status: 'completed', msg: '下载完成' })])
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 2, '首屏之后的真终态要响')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：默认开着，开关在打开的面板里，关掉后不响并把选择写进 localStorage', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    // 自动浮现的面板不放设置项
+    panel.publish([task({ id: 's1', status: 'running' })])
+    assert.equal(
+      findAll(panel.render(), (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle').length,
+      0,
+      '自动浮现时不该出现静音开关（那是设置，不是播报）',
+    )
+
+    // 打开面板 → 开关出现，默认是「开着」
+    panel.clickEntry()
+    const open = findAll(panel.render(), (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle')
+    assert.equal(open.length, 1, '打开的面板必须有静音开关')
+    assert.equal(open[0].props.checked, true, '首次使用默认开着')
+    assert.equal(open[0].props['aria-label'], 'sound')
+
+    // 关掉
+    ;(open[0].props.onChange as () => void)()
+    assert.equal(page.storage.get('dsh-smart-dl.muted'), '1', '选择必须写进 localStorage')
+
+    panel.publish([task({ id: 's1', status: 'completed', msg: '下载完成' })])
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 0, '静音后不得调用播放')
+
+    const after = findAll(
+      panel.render(),
+      (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle',
+    )
+    assert.equal(after[0].props.checked, false, '关掉后开关状态要跟着变')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：刷新后沿用上次的选择（localStorage 里是静音就还是静音）', () => {
+  const { panel, page, timers } = mountSoundPanel({ stored: { 'dsh-smart-dl.muted': '1' } })
+  try {
+    panel.clickEntry()
+    const box = findAll(panel.render(), (el) => el.props?.['data-dsh-smart-dl'] === 'sound-toggle')
+    assert.equal(box[0].props.checked, false, '上次选了静音，刷新后必须还是静音')
+
+    panel.publish([task({ id: 'm1', status: 'failed', msg: '失败: 超时' })])
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 0, '记住的静音同样不能响')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：AudioContext 在首次用户交互时创建一次并复用，不每次播放新建', () => {
+  const timers = installFakeTimers()
+  const page = installFakePage()
+  const { request } = serve([])
+  const panel = mountPanel(request)
+  try {
+    assert.equal(page.audio.contexts, 0, '还没交互就不该建 AudioContext（建了也会被挂起）')
+    panel.publish([])
+    panel.publish([task({ id: 'p1', status: 'completed', msg: '下载完成' })])
+    timers.fireAll()
+    assert.equal(page.audio.contexts, 0, '没有手势时不该建上下文')
+    assert.equal(page.audio.notes.length, 0, '没有手势时不出声（浏览器也不会允许）')
+
+    // 首次交互：capture + once 的 pointerdown
+    const pointer = page.listeners.filter((l) => l.type === 'pointerdown')
+    assert.equal(pointer.length, 1, '必须注册一个 pointerdown 监听')
+    assert.deepEqual(
+      pointer[0].options,
+      { capture: true, once: true },
+      '解锁监听必须是 capture + once',
+    )
+    assert.ok(
+      page.listeners.some((l) => l.type === 'keydown'),
+      '键盘交互同样要解锁（键盘用户也要听得到）',
+    )
+    page.gesture()
+    assert.equal(page.audio.contexts, 1, '首次交互应创建一个 AudioContext')
+
+    // 之后两次独立的完成事件 → 还是同一个上下文
+    panel.publish([task({ id: 'p1', status: 'completed' }), task({ id: 'p2', status: 'failed' })])
+    timers.fireAll()
+    panel.publish([
+      task({ id: 'p1', status: 'completed' }),
+      task({ id: 'p2', status: 'failed' }),
+      task({ id: 'p3', status: 'completed' }),
+    ])
+    timers.fireAll()
+    assert.equal(page.audio.contexts, 1, '播放必须复用同一个 AudioContext')
+    assert.ok(page.audio.notes.length >= 4, '解锁后的终态应当出声')
+  } finally {
+    panel.dispose()
+    timers.restore()
+    page.restore()
+  }
+})
+
+test('提示音：没有 AudioContext / resume 被拒时静默退化，面板照常渲染', () => {
+  for (const options of [{ withoutAudio: true }, { resumeRejects: true }]) {
+    const { panel, page, timers } = mountSoundPanel(options)
+    try {
+      panel.publish([task({ id: 'x1', status: 'failed', msg: '失败: 网络中断' })])
+      timers.fireAll()
+      const root = panel.render()
+      assert.ok(root, '播放失败不能让面板消失或报错')
+      assert.match(textOf(root), /失败|failed/, '面板内容照旧')
+      if (options.withoutAudio) assert.equal(page.audio.notes.length, 0)
+    } finally {
+      panel.dispose()
+      timers.restore()
+      page.restore()
+    }
+  }
+})
+
+test('提示音：卸载时清掉待响的那一声（插件停用后不该再出声）', () => {
+  const { panel, page, timers } = mountSoundPanel()
+  try {
+    panel.publish([task({ id: 'd9', status: 'completed', msg: '下载完成' })])
+    assert.equal(timers.pending.length, 1, '终态应排一个待响的窗口计时器')
+    panel.dispose() // = 插件被停用
+    timers.fireAll()
+    assert.equal(page.audio.notes.length, 0, '被清掉的待响音不该再响')
+  } finally {
+    timers.restore()
+    page.restore()
+  }
 })
 
 /**

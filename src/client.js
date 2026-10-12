@@ -158,6 +158,7 @@ window.__ModuleLoader__.load({
 			'panelClose': '返回会话',
 			'reveal': '在文件夹中显示',
 			'revealDisabled': '文件已不在原位置',
+			'revealFailed': '打不开文件夹位置（宿主未提供 remote.session，或路径已不可用）',
 			'deleteRecord': '删除记录',
 			'confirmTitle': '删除这条下载记录？',
 			'confirmRecordOnly': '只删除记录',
@@ -205,6 +206,7 @@ window.__ModuleLoader__.load({
 			'panelClose': 'Back to chat',
 			'reveal': 'Show in folder',
 			'revealDisabled': 'File is no longer where it was downloaded',
+			'revealFailed': 'Could not show it in a folder (the host has no remote.session, or the path is unusable)',
 			'deleteRecord': 'Delete record',
 			'confirmTitle': 'Delete this download record?',
 			'confirmRecordOnly': 'Delete record only',
@@ -1618,9 +1620,13 @@ window.__ModuleLoader__.load({
 				const outPath = verdict.outPath !== '' ? verdict.outPath : task.outPath;
 				if (typeof outPath !== 'string' || outPath === '') return;
 				try {
-					await reveal(outPath);
+					// `reveal` 在「宿主没有 remote.session」「调用抛错」「宿主拒绝」三种
+					// 情况下都是**返回 { ok:false }** 而不是抛异常 —— 所以只靠 try/catch
+					// 会让「点了没反应」变成静默失败，用户不知道发生了什么。
+					const result = await reveal(outPath);
+					if (result && result.ok === false) setNotice(t('revealFailed'));
 				} catch {
-					setNotice(t('actionFailed'));
+					setNotice(t('revealFailed'));
 				}
 			};
 

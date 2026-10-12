@@ -2189,3 +2189,44 @@ test('管理器：manage 真实发出的载荷必须带 session（否则轨道�
     panel.dispose()
   }
 })
+
+/* ---------------- reveal 失败必须如实告知（不能静默） ---------------- */
+
+test('管理器：reveal 返回 ok:false（宿主没有 remote.session）→ 必须提示，不能静默', async () => {
+  installFakePage()
+  const { request } = serve([managedTask()])
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    // 注入一个「宿主不支持」的 reveal：返回 ok:false 而不抛异常
+    ;(panel.__mainSlot.inject as { reveal: unknown }).reveal = () => Promise.resolve({ ok: false })
+    const tree = await renderManagerSettled(panel)
+    clickByData(tree, 'reveal', '在文件夹中显示')
+    const after = await renderManagerSettled(panel)
+    assert.match(
+      textOf(after),
+      /revealFailed|打不开文件夹|Could not show/,
+      'reveal 失败必须给出提示 —— 只靠 try/catch 抓不住「返回 ok:false」，那正是静默失败的来源',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：reveal 抛异常 → 必须提示（既有的兜底路径不回退）', async () => {
+  installFakePage()
+  const { request } = serve([managedTask()])
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    ;(panel.__mainSlot.inject as { reveal: unknown }).reveal = () => Promise.reject(new Error('boom'))
+    const tree = await renderManagerSettled(panel)
+    clickByData(tree, 'reveal', '在文件夹中显示')
+    const after = await renderManagerSettled(panel)
+    assert.match(textOf(after), /revealFailed|打不开文件夹|Could not show/, '抛异常也要提示')
+  } finally {
+    panel.dispose()
+  }
+})

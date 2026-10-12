@@ -297,9 +297,20 @@ export const EXIT_CODE_DESCRIPTIONS: Readonly<
   }),
 })
 
-/** 从命令行取可执行文件名（去掉目录与 `.exe`）：用户不需要看到绝对路径 */
+/**
+ * 从命令行取可执行文件名（去掉目录与 `.exe`）：用户不需要看到绝对路径。
+ *
+ * 为什么不用 `path.basename`：**它是平台相关的**。Linux 上的 `basename` 不认
+ * 反斜杠，`C:\Users\u\.dsh\runtimes\aria2c.exe` 会整串留下来 —— 绝对路径就
+ * 泄漏进用户可见的文案里（CI 上就是这样挂的）。Windows 上因为认反斜杠而
+ * 看不出来，于是这个 bug 只在 Linux 暴露。
+ *
+ * 两种分隔符都切，行为与平台无关：不论路径来自哪个平台，文案里只出现工具名。
+ */
 function executableName(command: string): string {
-  return basename(command).replace(/\.exe$/i, '')
+  const parts = command.split(/[\\/]/).filter((segment) => segment !== '')
+  const last = parts.length > 0 ? parts[parts.length - 1] : command
+  return last.replace(/\.exe$/i, '')
 }
 
 /**

@@ -2028,3 +2028,124 @@ test('管理器：删除成功 → 行移除（沿用既有语义，作为对照
   }
 })
 
+/* ---------------- ① Delete 键 + ② 记住上次的删除选项 ---------------- */
+
+/** 对「聚焦的那一行」模拟按 Delete 键（走的是行根元素上的 onKeyDown，不是直灌 store）。 */
+function pressDeleteOnRow(node: unknown, label: string): void {
+  const row = findAll(node, (e) => e.props?.['data-dsh-smart-dl'] === 'manager-row')[0]
+  assert.ok(row, `${label}：必须找到 manager-row`)
+  const onKeyDown = row.props?.onKeyDown as
+    | ((event: { key: string; preventDefault: () => void }) => void)
+    | undefined
+  assert.equal(typeof onKeyDown, 'function', `${label}：行必须监听键盘（onKeyDown）`)
+  onKeyDown!({ key: 'Delete', preventDefault: () => {} })
+}
+
+test('管理器：Delete 键 → 打开该行的确认框（刹车仍在，不是直接删）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    pressDeleteOnRow(await renderManagerSettled(panel), 'Delete 键')
+    const dialog = await renderManagerSettled(panel)
+    // 对话框出现（刹车仍在），且恰好一个按钮拿到默认焦点（native Enter 即可确认）
+    const withFile = findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file')[0]
+    const recordOnly = findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only')[0]
+    assert.ok(withFile || recordOnly, '确认框必须出现')
+    const focused = withFile?.props?.autoFocus === true || recordOnly?.props?.autoFocus === true
+    assert.ok(focused, '必须有恰好一个按钮带 autoFocus（默认焦点 = 上次选项）')
+    const destructive = manage.calls.filter((c) => c.op === 'delete' || c.op === 'forget').length
+    assert.equal(destructive, 0, '按 Delete 只是打开确认框，不得直接删')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：记住上次的删除选项 —— file 之后默认焦点落在「同时删除」', async () => {
+  const fake = installFakePage()
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'delete'
+        ? { ok: true, value: { fileDeleted: true, recordRemoved: ['x'], irreversible: 'x' } }
+        : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+
+    // 第一次：走「同时删除本地文件」→ 记住 'file'
+    const after = await deleteAndExpectStay(panel)
+    assert.equal(
+      findAll(after, (el) => el.props?.['data-dsh-smart-dl'] === 'delete').length,
+      0,
+      '成功后行移除',
+    )
+    assert.equal(
+      fake.storage.get('dsh-smart-dl.last-delete'),
+      'file',
+      '必须把 "file" 写进 localStorage',
+    )
+
+    // 重新挂一次面板（模拟刷新后回看）：默认焦点必须落在「同时删除」上
+    const panel2 = mountPanel(request)
+    try {
+      panel2.render()
+      await settle()
+      replaceManage(panel2, manage.fn)
+      const tree2 = await renderManagerSettled(panel2)
+      clickByData(tree2, 'delete', '删除按钮')
+      const dialog2 = await renderManagerSettled(panel2)
+      const withFile = findAll(dialog2, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file')[0]
+      const recordOnly = findAll(dialog2, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only')[0]
+      assert.equal(withFile?.props?.autoFocus, true, '上次用了 file → 默认焦点在「同时删除」上')
+      assert.notEqual(recordOnly?.props?.autoFocus, true, '另一侧不得同时抢焦点')
+    } finally {
+      panel2.dispose()
+    }
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：上次用了 file，但这次文件已不在原位 → 默认焦点落回「只删记录」', async () => {
+  installFakePage({ stored: { 'dsh-smart-dl.last-delete': 'file' } })
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'missing', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: { recordRemoved: ['x'] } },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    clickByData(tree, 'delete', '删除按钮')
+    const dialog = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-with-file').length,
+      0,
+      '文件已移走时根本没有「同时删除」按钮',
+    )
+    const recordOnly = findAll(dialog, (el) => el.props?.['data-dsh-smart-dl'] === 'confirm-record-only')[0]
+    assert.equal(
+      recordOnly?.props?.autoFocus,
+      true,
+      '默认焦点必须落回「只删记录」（不能因为记住 file 就没了焦点）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})

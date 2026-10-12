@@ -510,6 +510,34 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		const LAST_DELETE_STORAGE_KEY = 'dsh-smart-dl.last-delete';
+
+		/**
+		 * 上一次删除用的是哪个选项（`'record'` | `'file'`）。
+		 *
+		 * 为什么记这个：删除是高频操作，而确认框的两个按钮每次都要重新选一遍 ——
+		 * 连删几条时，那一步选择是纯重复劳动。记住它并把它设为确认框的**默认焦点**
+		 * （Enter 即确认），刹车仍在（对话框还在、内容仍展示），但路径从三次点击
+		 * 变成两次按键。
+		 */
+		function readLastDelete(storage) {
+			try {
+				return storage && storage.getItem(LAST_DELETE_STORAGE_KEY) === 'file' ? 'file' : 'record';
+			} catch {
+				return 'record';
+			}
+		}
+
+		function writeLastDelete(storage, value) {
+			try {
+				if (storage && (value === 'file' || value === 'record')) {
+					storage.setItem(LAST_DELETE_STORAGE_KEY, value);
+				}
+			} catch {
+				// 记不住就算了。
+			}
+		}
+
 		/**
 		 * 合成提示音播放器。
 		 *
@@ -1277,7 +1305,13 @@ window.__ModuleLoader__.load({
 		 * @returns the row element.
 		 */
 		function SmartDlManagerRow({ task, t, presence, onReveal, onDelete }) {
-			const label = shortLabel(task) || t('untitled');
+			// Delete 键：焦点在本行时打开确认框（不是直接删——不可逆操作的刹车仍在）。
+			const onRowKeyDown = (event) => {
+				if (event.key !== 'Delete') return;
+				event.preventDefault();
+				onDelete(task);
+			};
+			void onRowKeyDown;			const label = shortLabel(task) || t('untitled');
 			const state = panelStore_PresenceOf(presence, task.id);
 			const deletable = canDeleteLocalFile(state.presence);
 			const revealable = canReveal(task, state.presence);
@@ -1290,6 +1324,8 @@ window.__ModuleLoader__.load({
 				{
 					'data-dsh-smart-dl': 'manager-row',
 					'data-task-id': task.id,
+				tabIndex: 0,
+				onKeyDown: onRowKeyDown,
 					style: {
 						display: 'flex',
 						flexDirection: 'column',
@@ -1404,7 +1440,7 @@ window.__ModuleLoader__.load({
 		 * @param props - the task, its verdict, the locale seat, and callbacks.
 		 * @returns the dialog element.
 		 */
-		function SmartDlConfirmDialog({ task, t, verdict, onRecordOnly, onWithFile, onCancel }) {
+		function SmartDlConfirmDialog({ task, t, verdict, onRecordOnly, onWithFile, onCancel, defaultAction }) {
 			const deletable = canDeleteLocalFile(verdict.presence);
 			const blocker = presenceBlockerKey(verdict.presence);
 			const outPath = verdict.outPath !== '' ? verdict.outPath : '(no path recorded)';
@@ -1483,6 +1519,8 @@ window.__ModuleLoader__.load({
 								type: 'button',
 								'data-dsh-smart-dl': 'confirm-record-only',
 								onClick: onRecordOnly,
+				// 默认焦点 = 上次用的选项（Enter 即确认）。file 不可用时焦点仍落在这。
+				autoFocus: defaultAction === 'file' && deletable ? false : true,
 								style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
 							},
 							t('confirmRecordOnly'),
@@ -1494,6 +1532,7 @@ window.__ModuleLoader__.load({
 										type: 'button',
 										'data-dsh-smart-dl': 'confirm-with-file',
 										onClick: onWithFile,
+					autoFocus: defaultAction === 'file' && deletable,
 										style: { cursor: 'pointer', fontSize: 12, padding: '6px 12px' },
 									},
 									t('confirmWithFile'),
@@ -1522,12 +1561,17 @@ window.__ModuleLoader__.load({
 		 * @param props - the shared store, the manage caller, and the locale seat.
 		 * @returns the page element.
 		 */
-		function SmartDlManagerPage({ panelStore, manage, reveal, t, onClose }) {
+		function SmartDlManagerPage({ panelStore, manage, reveal, t, onClose, storage: storageProp }) {
 			const [, setRevision] = react.useState(0);
 			react.useEffect(
 				() => panelStore.subscribe(() => setRevision((n) => n + 1)),
 				[panelStore],
 			);
+			// 记住上次的删除选项：删除是高频操作，确认框的两个按钮每次重选是纯重复
+			// 劳动。记住它并作为确认框的默认焦点（Enter 即确认），刹车仍在（对话框
+			// 还在、内容仍展示），但路径从三次点击变成两次按键。
+			const storage = storageProp !== undefined ? storageProp : pageStorage();
+			const lastDelete = readLastDelete(storage);
 			// The task awaiting confirmation, kept as local UI state: it is one
 			// interaction's worth of data, not something any other slot needs.
 			const [pending, setPending] = react.useState(null);
@@ -1599,6 +1643,8 @@ window.__ModuleLoader__.load({
 				// and the pill's next poll may be up to 2 seconds away.
 				panelStore.publish(tasks.filter((row) => row.id !== task.id));
 				await inspectAll();
+				// 记住这次用的是哪个选项，下次确认框默认焦点就在它上。
+				writeLastDelete(storage, withFile ? 'file' : 'record');
 				// PANEL-DL-2：记录已删但产物没删成时（只在 withFile 的竞态下可能，
 				// 例如点击后文件被移走），也要说清楚——记录没了但文件还在磁盘上。
 				if (withFile && value.fileDeleted === false) {
@@ -1663,6 +1709,7 @@ window.__ModuleLoader__.load({
 					: react.createElement(SmartDlConfirmDialog, {
 							task: tasks.find((row) => row.id === pending) ?? { id: pending },
 							t: t,
+				defaultAction: lastDelete,
 							verdict: panelStore_PresenceOf(state.presence, pending),
 							onCancel: () => setPending(null),
 							onRecordOnly: () => {

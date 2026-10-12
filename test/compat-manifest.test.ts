@@ -234,8 +234,20 @@ test('发布包内容：只带面向用户的文件，内部规划/评审文档�
     shell: process.platform === 'win32',
   })
   assert.equal(out.status, 0, `npm pack --dry-run 失败：${out.stderr || out.error?.message || ''}`)
-  const parsed = JSON.parse(out.stdout) as Array<{ files: Array<{ path: string }> }>
-  const paths = parsed[0].files.map((f) => f.path)
+  // npm 11 的 `--json` 顶层是**数组**，npm 12 改成**按包名索引的对象** —— 两种都接受。
+  // 为什么必须兼容：CI 的 publish job 会 `npm install -g npm@latest`，check job 用 runner
+  // 自带的版本，同一份代码要同时面对两个大版本（v1.4.1 就是这样在 publish job 上挂的）。
+  // 形状都不认识时**明确失败**，绝不静默当成「空清单」—— 那会让下面的断言恒真。
+  const raw = out.stdout.slice(Math.max(0, out.stdout.search(/[[{]/)))
+  const parsed: unknown = JSON.parse(raw)
+  const entry = (Array.isArray(parsed) ? parsed[0] : Object.values(parsed as object)[0]) as
+    | { files?: Array<{ path: string }> }
+    | undefined
+  assert.ok(
+    entry && Array.isArray(entry.files),
+    `npm pack --json 的输出形状不认识（顶层是 ${Array.isArray(parsed) ? '数组' : typeof parsed}）`,
+  )
+  const paths = entry.files.map((f) => f.path)
 
   // 正向：该在的必须在（用户装完要能加载、要能看到说明）
   for (const required of [

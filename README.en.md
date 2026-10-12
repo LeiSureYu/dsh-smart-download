@@ -529,6 +529,7 @@ fine, but can only have their record deleted** — without a reliable path there
 
 > The 1.3.0 session-header entry has been removed; the overlay keeps only its reporting duty (live progress,
 > receipts, sound).
+
 ## Guarding against silent failures
 
 Three **silent failures of the same kind** were found during development:

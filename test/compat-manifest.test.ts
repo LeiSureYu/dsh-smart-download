@@ -187,6 +187,8 @@ test('compat: 客户端清单只用平台基线，不额外声明 external', () 
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-slots',
     // remote.session 的两半：客户端代理 + 宿主服务
+    // remotes 自己依赖 gateway（它的 inject 里声明了，且 immediately:true）
+    '@deepseek-ai/dsh-api-gateway',
     '@deepseek-ai/dsh-api-remotes',
     '@deepseek-ai/dsh-api-session-controller',
     // ctx.layout.selectPanel（面板开合）

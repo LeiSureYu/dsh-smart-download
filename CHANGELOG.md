@@ -11,6 +11,31 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-13
+
+**文档与打包**：补齐 1.4.0 的更新日志与 README（此前**缺了 12 个提交**的内容：筛选/搜索/批量、速度与 ETA、
+`Delete` 键、服务端 `reveal`，以及 4 个 bug 修复），并把**内部工作记录**（`PLAN-*` / `REVIEW-*` / `SPIKE-*` /
+`VERIFY-*` / `ROADMAP-*`）从发布包里移除 —— 它们是开发过程记录，用户不需要。包从 62 个文件 / 465 KB
+降到 49 个文件 / 305 KB。
+
+**Docs and packaging**: completed the 1.4.0 changelog and README (**12 commits' worth of entries were missing**:
+filtering/search/bulk delete, speed and ETA, the `Delete` key, the server-side `reveal`, and four bug fixes), and
+dropped the **internal working notes** (`PLAN-*` / `REVIEW-*` / `SPIKE-*` / `VERIFY-*` / `ROADMAP-*`) from the
+published package — they are development records users do not need. The package went from 62 files / 465 KB to
+49 files / 305 KB.
+
+### 变更 / Changed
+
+- `files` 改为**显式白名单**：只带 `dist/`、四份面向用户的文档（ARCHITECTURE / COMPATIBILITY / SECURITY /
+  TROUBLESHOOTING）、`docs/progress-pill.png`、`cordis.patch.yml`、README、CHANGELOG、LICENSE。
+  显式列举而不是「整个 `docs/` 再排除」：新加的内部文档不会因为忘了排除而误发。
+- 新增端到端断言：真跑 `npm pack --dry-run` 核对**实际会发出的文件清单**（而不是只读 `files` 字段 ——
+  匹配规则由 npm 决定），内部文档出现即失败。
+
+### 修复 / Fixed
+
+- 1.4.0 的 CHANGELOG 与 README 与实际发布内容不符（缺少上述 12 个提交的条目）。
+
 ## [1.4.0] - 2026-10-12
 
 **下载管理器**：侧边栏新增「下载管理」入口，点开是占满主区的列表页 —— 能看到全部任务（进行中 + 已完成，

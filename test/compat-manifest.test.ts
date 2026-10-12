@@ -16,6 +16,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 
@@ -221,4 +222,45 @@ test('compat: 从 Git 仓库地址安装无需构建脚本，dist 已在仓库�
 
 test('compat: bundle patch 仍然指向仓库里的 cordis.patch.yml', () => {
   assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml')
+})
+
+test('发布包内容：只带面向用户的文件，内部规划/评审文档不随包发出', () => {
+  // 用 npm **自己的**打包结果做断言，而不是只检查 `files` 字段：
+  // 到底会发出哪些文件由 npm 的匹配规则决定，只有真 pack 一次才知道。
+  const out = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+    // Windows 上 npm 是 npm.cmd，需要 shell 才能找到
+    shell: process.platform === 'win32',
+  })
+  assert.equal(out.status, 0, `npm pack --dry-run 失败：${out.stderr || out.error?.message || ''}`)
+  const parsed = JSON.parse(out.stdout) as Array<{ files: Array<{ path: string }> }>
+  const paths = parsed[0].files.map((f) => f.path)
+
+  // 正向：该在的必须在（用户装完要能加载、要能看到说明）
+  for (const required of [
+    'dist/index.js',
+    'dist/client.js',
+    'dist/rpc.js',
+    'cordis.patch.yml',
+    'README.md',
+    'CHANGELOG.md',
+    'LICENSE',
+  ]) {
+    assert.ok(paths.includes(required), `发布包必须包含 ${required}`)
+  }
+  // 面向用户的文档要一起发（README 里引用了它们）
+  for (const doc of [
+    'docs/ARCHITECTURE.md',
+    'docs/COMPATIBILITY.md',
+    'docs/SECURITY.md',
+    'docs/TROUBLESHOOTING.md',
+  ]) {
+    assert.ok(paths.includes(doc), `面向用户的文档必须包含 ${doc}`)
+  }
+
+  // 反向：内部工作记录（规划 / 评审 / 调研 / 验证 / 路线图）一律不得出现 ——
+  // 它们是开发过程记录，用户不需要，白占几百 KB。
+  const internal = paths.filter((p) => /^docs\/(PLAN|REVIEW|SPIKE|VERIFY|ROADMAP)/.test(p))
+  assert.deepEqual(internal, [], `内部规划/评审文档不得随包发布：${internal.join('、')}`)
 })

@@ -169,6 +169,18 @@ npm 与 pnpm 都可以，但**必须支持 `optionalDependencies` 的 `os` / `cp
 「装完一直走 curl」；切回官方 npm 源重装即可，具体排查见
 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)。
 
+**pnpm 11 的本机注意事项**：`pnpm.onlyBuiltDependencies` 写在 `package.json` 的 `pnpm`
+字段里时，**pnpm 11 不再读它**（该设置搬到了 `pnpm-workspace.yaml`）。未批准构建脚本时
+`pnpm install` 会以 `ERR_PNPM_IGNORED_BUILDS` **失败**（本项目需要 `esbuild` 的构建脚本，
+`tsx` 依赖它）。按提示在本机的 `pnpm-workspace.yaml` 里填上即可：
+
+```yaml
+allowBuilds:
+  esbuild: true
+```
+
+该文件被 `.gitignore` 忽略（它是**本机**的构建审批状态，不入库），CI 固定用 pnpm 9
+（读 `package.json` 里的字段），所以这一条只影响本机开发。
 ## profile 兼容性
 
 插件注册两个工具（`smart_download` / `download_status`），这部分**与 profile 无关**，

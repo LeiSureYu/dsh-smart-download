@@ -191,6 +191,28 @@ npm 与 pnpm 都可以，但**必须支持 `optionalDependencies` 的 `os` / `cp
 > 或侧边栏的 Plugins 页面：这个 profile 由 Electron 应用独占管理，外部 CLI 会被拒绝。
 > 本插件在 `desktop` 上的工具注册与 `web` 完全一致（`platform: 'web'` 沿用，客户端清单不需要改）。
 
+### 客户端插件的服务依赖（1.4.0 起）
+
+客户端脚本（`src/client.js`）除了 `react` 平台基线外，还通过 manifest 的
+`dsh.client.inject` 声明了这些宿主服务：
+
+| 声明 | 用途 | 缺了会怎样 |
+| --- | --- | --- |
+| `@deepseek-ai/dsh-client-ui-slots` | 注册浮层 / 侧边栏入口 / 主区面板 | 面板完全不出现 |
+| `@deepseek-ai/dsh-client-locale` | 中英文案 | 界面只剩键名 |
+| `@deepseek-ai/dsh-client-connection` | `/api` 载体（`connection.rpc.call`） | 拉不到进度 |
+| `@deepseek-ai/dsh-client-ui-layout` | `ctx.layout.selectPanel`（面板开合） | 点入口打不开面板 |
+| `@deepseek-ai/dsh-api-gateway`、`@deepseek-ai/dsh-api-remotes`、`@deepseek-ai/dsh-api-session-controller` | `ctx.remote.session`（「在文件夹中显示」的**首选**路径） | **自动降级到服务端实现**，功能照常 |
+
+**光在代码里写 `inject: ['remote.session']` 不够** —— manifest 才决定插件拿不拿得到这些
+命名空间。这是 1.4.0 踩过的坑：清单漏声明时 `ctx.remote.session` 恒为 `undefined`，
+而代码里的 `inject` 数组看不出任何问题。
+
+**`remote.session` 不是必需的**：实测这份 `desktop` profile 下即使清单补齐也拿不到它，
+所以「在文件夹中显示」实现了**两条路径** —— 优先 `remote.session`（原生「选中文件」），
+不可用时由服务端（`op:'reveal'`）起宿主进程打开（Windows `explorer.exe /select,`、
+macOS `open -R`、Linux `xdg-open`）。缺这个服务只会少一点原生贴合度。
+
 ## 二进制子包版本
 
 四个子包版本号统一为 **`1.37.0`**，与它们打包的 aria2 版本一致（不是本插件的版本）。

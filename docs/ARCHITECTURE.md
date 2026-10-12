@@ -57,22 +57,25 @@ execute(args, exec)                       src/index.ts
 
 | 文件 | 行数 | 职责 | 关键点 |
 | --- | --- | --- | --- |
-| `src/index.ts` | ~507 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面 10 步 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
-| `src/types.ts` | ~214 | 所有跨模块类型与返回结构 | `verifySkipped` / `reason` / `mirrorSkipped` 三者语义不同，见下 |
-| `src/url.ts` | ~160 | URL 校验与输出文件名净化 | 纯函数；协议白名单 + 单段文件名 |
-| `src/mirror.ts` | ~144 | 镜像前缀归一化、拼接、GitHub 判定、候选表 | 纯函数、不发请求；`auto` 模式与候选表覆盖的入口 |
-| `src/auto-mirror.ts` | ~216 | 自动镜像的挑选与「同源证明」 | 网络由调用方注入 `probe`；`ETag` 是镜像自报的，防不了投毒 |
-| `src/headers.ts` | ~230 | 请求头合成、校验与三种落地形式 | 探测与下载**共用一份**；自管头与 CR/LF 注入拒绝 |
-| `src/hash.ts` | ~143 | SHA-256 归一化、流式计算、比对与文案 | 纯函数 + 一次流式读取；四种官方文档写法归一化 |
-| `src/probe.ts` | ~295 | 探测远端能力（Range / 长度 / 指纹 / 编码） | 异常绝不抛出；HEAD 失败会走 Range GET 兜底；HEAD 分支同样读 `Content-Range` |
-| `src/decision.ts` | ~128 | 按大小与 aria2 可用性选方式 / 并发 | 纯函数；环境通过 `DecideEnv` 注入 |
-| `src/resume.ts` | ~236 | 续传前的安全性判定与旁车指纹读写 | 唯一会主动删用户文件的模块 |
-| `src/downloader.ts` | ~354 | 参数拼接、子进程执行、进度解析接线 | `-k 1M` 与 `--allow-overwrite=true` 不可删 |
-| `src/progress-parse.ts` | ~63 | aria2 摘要行 / curl 进度条解析、行切分 | 纯函数；真实样本在 `test/fixtures/` |
-| `src/progress.ts` | ~395 | 双轨进度上报（JSONL + JSON） | 异步批量落盘，`awaitFlush()` 给终态兜底 |
-| `src/status.ts` | ~244 | `download_status` 的只读扫描与合并 | 任何读取失败都退化为「少一条任务」 |
-| `src/rpc.ts` | ~188 | `/api/smartdl.status` Host 端点（web 面板数据源） | 非法请求一律回落到具体默认值 |
-| `src/client.js` | ~365 | 浏览器端进度面板（classic script） | 不打包，只依赖 `react` |
+| `src/index.ts` | ~1128 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面 10 步 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
+| `src/types.ts` | ~354 | 所有跨模块类型与返回结构 | `verifySkipped` / `reason` / `mirrorSkipped` 三者语义不同，见下 |
+| `src/url.ts` | ~142 | URL 校验与输出文件名净化 | 纯函数；协议白名单 + 单段文件名 |
+| `src/mirror.ts` | ~134 | 镜像前缀归一化、拼接、GitHub 判定、候选表 | 纯函数、不发请求；`auto` 模式与候选表覆盖的入口 |
+| `src/auto-mirror.ts` | ~198 | 自动镜像的挑选与「同源证明」 | 网络由调用方注入 `probe`；`ETag` 是镜像自报的，防不了投毒 |
+| `src/headers.ts` | ~212 | 请求头合成、校验与三种落地形式 | 探测与下载**共用一份**；自管头与 CR/LF 注入拒绝 |
+| `src/hash.ts` | ~153 | SHA-256 归一化、流式计算、比对与文案 | 纯函数 + 一次流式读取；四种官方文档写法归一化 |
+| `src/probe.ts` | ~270 | 探测远端能力（Range / 长度 / 指纹 / 编码） | 异常绝不抛出；HEAD 失败会走 Range GET 兜底；HEAD 分支同样读 `Content-Range` |
+| `src/decision.ts` | ~215 | 按大小与 aria2 可用性选方式 / 并发，并按吞吐历史抬档 | 纯函数；环境通过 `DecideEnv` 注入；只抬不降 |
+| `src/throughput-cache.ts` | ~252 | 按「主机 + 端口」缓存**真实观测到**的吞吐与并发 | 数据是下载本身免费产生的，不发额外探测；损坏 / 不可写一律当「无历史」 |
+| `src/resume.ts` | ~217 | 续传前的安全性判定与旁车指纹读写 | 唯一会主动删用户文件的模块 |
+| `src/verify.ts` | ~137 | 落盘字节数校验（退出码 0 **之后**）与跳过文案 | 远端长度未知或被压缩时如实报 `skipped`，不假装校验过 |
+| `src/downloader.ts` | ~542 | 参数拼接、子进程执行、进度解析接线 | `-k 1M` 与 `--allow-overwrite=true` 不可删；用户可见文案只出现可执行文件名 |
+| `src/progress-parse.ts` | ~73 | aria2 摘要行 / curl 进度条解析、行切分 | 纯函数；真实样本在 `test/fixtures/` |
+| `src/progress.ts` | ~500 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；1.4.0 起记 `outPath` / `size` / `fileMtimeMs` |
+| `src/status.ts` | ~346 | `download_status` 的只读扫描与两条轨道合并 | 任何读取失败都退化为「少一条任务」，并用 `scanFailedDirs` 如实报出 |
+| `src/cleanup.ts` | ~291 | `/api/smartdl.cleanup`：按保留窗口删**过期**的进度文件 | 与 `ProgressReporter.cleanup()` 不同 —— 这是给外部的触发入口，不接自动调用 |
+| `src/rpc.ts` | ~770 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`） | 路径**只能来自本插件自己的记录**；非法请求一律 `ok:false`，绝不按默认值执行 |
+| `src/client.js` | ~2333 | 浏览器端：进度浮层 + 侧边栏入口 + 下载管理页（classic script） | 不打包，只依赖 `react`；会话由浮层写进共享 store，供 `manage` 定位轨道一 |
 
 ## 数据流：进度怎么从子进程走到界面
 
@@ -104,6 +107,41 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 
 **为什么终态要 `awaitFlush()`**：`report()` 是异步落盘的，`done()` 之后调用方通常
 立刻 `return`；不等一下，那条「已完成」还躺在队列里，面板就会永远停在「下载中」。
+
+## 下载管理器：删除与「在文件夹中显示」
+
+这两件事都必须在**宿主进程**里做（浏览器既拿不到文件系统，也起不了文件管理器），
+所以它们走同一条 `POST /api/smartdl.manage`，用 `op` 区分；客户端只发 `taskId`。
+
+```
+浏览器（下载管理页）
+   │  op:'inspect' | 'forget' | 'delete' | 'reveal'  +  taskId  +  session
+   ▼
+/api/smartdl.manage ──► readManagePayload（op 白名单 + taskId 白名单 + confirm 检查）
+                          │
+                          ├─ inspect → checkManagedTarget：lstat 判定产物现状（只读）
+                          ├─ forget  → 只删本插件的两条进度记录，不碰产物
+                          ├─ delete  → **先删产物、成功后再删记录**（顺序不可颠倒）
+                          └─ reveal  → 宿主进程起 explorer / open / xdg-open
+```
+
+三条硬约束：
+
+1. **路径只能来自本插件自己的记录。** 调用方给不了路径（给了也忽略）—— 删除不可逆，
+   「删什么」必须由我们记下的那个 `outPath` 决定，而不是由请求决定。
+2. **只有「文件确实还在原位」才动手。** `checkManagedTarget` 用 `lstat`（不是 `stat` ——
+   否则会顺着符号链接把**目标**删掉），要求绝对路径、`normalize` 一致、尺寸与记录相符；
+   目录、符号链接、尺寸不符、任务未终态一律拒绝并如实回告 `reason`。
+3. **绝不假装成功。** `ok:true` 只代表「请求被处理」，`fileDeleted` 才是「文件没了」。
+   删除失败时记录**保留**（用户还看得见、还能重试），失败按 8 种 `reason` 分类回告。
+
+`op:'reveal'` 另有一层：客户端优先用宿主的 `remote.session`，该服务不可用时**自动降级**到
+服务端实现。注意 `spawn` 的错误是**异步 emit** 的 —— 必须挂 `error` 监听，否则「命令不存在」
+会变成未捕获异常，把整个宿主进程打崩（1.4.0 修的就是这个）。
+
+**会话必须随请求带上**：轨道一的路径是 `<cwd>/.dsh-progress/<session.id>/`，没有它就只能扫
+轨道二，于是出现「文件删得掉、记录删不掉」。会话由浮层（唯一读 `useSessions` 的组件）写进
+共享 store，`manage` 从那里取。
 
 ## 决策表
 

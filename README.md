@@ -24,13 +24,17 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **进度看得见** —— 带 Web 界面的 profile（`web` / 桌面版）右下角有实时进度面板（文件名 / 百分比 / 速度 / 剩余时间），下载完成后自动消失。
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
+- **一次下一批** —— `targets` 在单次调用内下载多个文件（逐条给出结果、一条失败不影响其余、批内并发受「总连接数有界」约束），`maxBandwidth` 给整批一个共享的带宽上限，`timeoutMs` 给每个条目一个超时。见[批量下载](#一次下载多个文件targets--maxbandwidth--timeoutms)。
+- **照官方文档核对内容** —— 把官方文档里印着的 SHA-256 传给 `sha256`，下载后逐字节核对。长度校验挡不住「等长但内容不同」，哈希能。
+- **能带请求头** —— `userAgent` / `referer` / `headers`：官方文档给的地址常需要伪装浏览器或带 Referer，探测与下载用**同一套**头，不会两边不一致。
+- **镜像自动挑** —— `mirror: "auto"` 时插件自己从内置候选表里选一个**被证实与原地址同源**的 GitHub 镜像，模型不用先「知道」gh-proxy 这类域名。
 
 支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**，这四组合是完整支持（随包 aria2 多线程）。
-macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说明](./docs/COMPATIBILITY.md)，那里也写清了为什么没硬做。
+macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说明](./docs/COMPATIBILITY.md)，那里写清了每个来源逐个核对后为何仍不成立（卡点是「来源不可信」，不是「没有二进制」），也写清了为什么没硬做。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
-- **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选镜像加速与断点续传。
+- **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选：`mirror` 镜像加速（前缀或 `auto`）、`sha256` 内容核对、`userAgent` / `referer` / `headers` 请求头、断点续传；用 `targets` 代替 `url` 可一次下载一批（`maxBandwidth` 限整批带宽、`timeoutMs` 限每个条目的耗时）。
 - **`download_status`**：查询下载进度。只读地返回最近任务的状态快照（百分比、速度、ETA），可用来回答“刚才那个下载到百分之几了”。
 
 ## 安装
@@ -68,70 +72,210 @@ dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
 
 > **进度面板只在带 Web 界面的 profile 生效**（`web` 与桌面版的 `desktop`）。纯 CLI 等 profile 下插件功能完全不受影响，只是没有界面面板，仍可用 `download_status` 工具查询进度。
 
+> **1.2.0 加了「照着官方文档把文件下对」的三件工具**：`sha256` 内容核对、
+> `userAgent` / `referer` / `headers` 请求头、`mirror: "auto"` 自动挑镜像；并修掉三处
+> 探测与回退缺陷（HEAD 失败不再直接放弃探测、HEAD 分支漏读 `Content-Range` 会把
+> 正确下载判成损坏、完整性校验失败不再白跑一遍 curl）。逐条依据见 [CHANGELOG.md](./CHANGELOG.md)。
+>
 > **1.1.0 为 DSH 0.2.0 适配。** 0.2.0 起安装前会核对 `peerDependencies`：`0.4.0` 及更早版本声明的范围不含 `0.2.0`，装上后整个 bundle 会被跳过，插件完全不加载。如果你装的是 `0.4.0` 或更早，升级即可；`0.4.1` 起已覆盖 0.2.0。详见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
 >
 > **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
 >
-> **版本要求：请使用 `1.1.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+> **版本要求：请使用 `1.2.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
 >
-> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.1.0` 即可。
+> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.2.0` 即可。
+
+## 照着官方文档下载
+
+大多数「按官方文档装东西」的场景都能落成一次 `smart_download` 调用：文档给你
+**地址**，通常还给你**摘要**，有时还需要**请求头**。三样东西对应三个参数。
+
+```
+文档里写什么                          传给 smart_download 的哪个参数
+─────────────────────────────────────────────────────────────────────
+https://example.com/tool-1.4.0.zip   url（必填）
+SHA256: 9f86d081884c7d65…             sha256（可选，但强烈建议）
+「需要 Referer / 请用浏览器 UA」        referer / userAgent
+「国内请用 GitHub 加速」                mirror: "auto"（GitHub 地址）
+「装到某个目录」                        output
+```
+
+一个照抄即可的调用：
+
+```
+smart_download(
+  url:    "https://github.com/owner/repo/releases/download/v1.4.0/tool.zip",
+  sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  mirror: "auto"
+)
+```
+
+> 这个单条目形态**不传新参数时**与 1.2.0 逐字段相同；`timeoutMs` 与 `maxBandwidth` 对单条目调用同样有效（`timeoutMs` 是**每个条目**的超时，不是批量专属），实测传了但未超时时返回结构的键集合也不变。详见[批量下载](#一次下载多个文件targets--maxbandwidth--timeoutms)。
+
+得到的结果会明确告诉你这次到底做了什么：
+
+```json
+{
+  "success": true,
+  "path": "tool.zip",
+  "method": "aria2",
+  "size": 52428800,
+  "fellback": false,
+  "reason": "支持 Range，文件 50.0MB，使用 8 连接",
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "requestedUrl": "https://gh-proxy.com/https://github.com/owner/repo/releases/download/v1.4.0/tool.zip",
+  "mirrored": true,
+  "mirror": "https://gh-proxy.com/"
+}
+```
+
+### `sha256`：把文档里的摘要粘进来
+
+接受官方文档里常见的各种写法，都会归一化成同一个小写十六进制：
+
+| 文档里的写法 | 是否接受 |
+| --- | --- |
+| `9f86d081884c7d65…`（裸十六进制，大小写均可） | ✅ |
+| `sha256:9f86d081…` / `sha256=9f86d081…` / `SHA256(9f86d081…)` | ✅ |
+| `sha256-<base64>`（网页 `integrity` 属性里的 SRI 形式） | ✅ |
+| 长度不是 64 位、含非十六进制字符、`md5:` / `sha1:` 前缀 | ❌ 下载前直接拒绝 |
+
+要点：
+
+- **不合法会在下载开始前就拒绝** —— 不会白下几百 MB 之后才告诉你参数写错了。
+- **核对失败一律判失败**：抛错、不返回 `success`，并保留旁车指纹（下次才有得比）。
+- **它不依赖任何远端信息**，所以在「远端未声明长度」或「远端声明了压缩编码」导致
+  长度校验跳过时，它依然能给出确定结论；此时返回值里**不会**出现 `verifySkipped`
+  —— 内容已经逐字节核对过，再报「未做字节数校验」只会误导。证明由 `sha256` 字段承载。
+- **流式计算**：几百 MB 的安装包不会整份读进内存。
+
+### `userAgent` / `referer` / `headers`：地址不是直接 GET 就能拿到时
+
+三者合成**一份**头表，**探测与下载共用同一份**。这一点是刻意的：两边不一致时，
+按 UA 分流的站点会让探测拿到 200、下载拿到 403，或者返回体积不同的响应 ——
+前者让决策基于一个下载时根本不成立的响应，后者让大小校验 100% 误报。
+
+```
+smart_download(
+  url:       "https://example.com/gated/model.bin",
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  referer:   "https://example.com/downloads",
+  headers:   { "Authorization": "Bearer <token>" }
+)
+```
+
+边界：
+
+- **插件自身管理的头不允许覆盖**：`Range`、`Accept-Encoding`、`Content-Length`、
+  `Host` 与连接级头（`Connection` / `Transfer-Encoding` / `Keep-Alive` / `TE` /
+  `Trailer` / `Upgrade` / `Proxy-*`）。它们各自承载着探测 / 续传 / 校验的既有语义，
+  被覆盖会静默改变行为。
+- **头值含 CR / LF / NUL 一律拒绝** —— 那是请求头注入，可以让调用方凭空往请求里
+  塞新头甚至新请求。
+- 命名参数优先于 `headers` 里的同名项；同名头（不分大小写）只保留一条。
+- 上限：32 条头、头名 128 字符、头值 8192 字符。
+
+### `mirror: "auto"`：文档只给原始 GitHub 地址时
+
+官方文档给的永远是**原始地址**，而能不能连上取决于你所在的网络。传 `mirror: "auto"`
+即由插件自己挑：
+
+1. 只对 GitHub 域名生效（`github.com` / `raw.githubusercontent.com` / `codeload.github.com`
+   / `objects.githubusercontent.com` 等），其它地址会明确回一句 `mirrorSkipped` 说明；
+2. 候选表内置（见下方「镜像加速」），也**可以用 `DSH_SMARTDL_MIRRORS` 换成你自己的**；
+3. 候选必须**被证实与原地址同源**才会被采用：文件长度完全一致，且原始地址给了
+   `ETag` 时，候选也必须给出相等的 `ETag`（归一化后比较，`W/` 弱校验前缀不影响判定）；
+4. 一个都没证实，就退回原始地址下载，并在返回值里写明 `mirrorSkipped` 的原因。
+
+> **自动镜像必须显式传入才会生效。** 它会让下载内容经过第三方服务器，这是调用方
+> （而不是插件）该做的决定，所以不设默认值。
+>
+> **这道「同源证明」防的是无心之失，不是投毒。** `ETag` 是镜像**自己声明的**，一个
+> 恶意镜像可以照抄原始 ETag 再返回等长但不同的内容 —— 长度与 ETag 都对得上，字节数
+> 校验也拦不住。要防投毒只有 `sha256`：摘要来自官方文档，镜像伪造不了。
+
 
 ## 工作原理
 
 下载决策流程（文字版）：
 
 ```
-调用 smart_download(url, output?, mirror?)
+调用 smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
         │
         ▼
-[0] 若传入 mirror，则把原始 URL 拼到镜像前缀后
-     · 镜像前缀 + 完整原始 URL
-     · 非 http(s) URL 不走镜像
-     · 输出文件名仍按原始 URL 推导
+[0] 参数前置校验（都在**下载开始前**，不合法直接拒绝）
+     · url 必须是 http(s)（file:// / ftp:// 一律拒绝）
+     · sha256 必须能归一化成 64 位十六进制
+     · headers 不能覆盖插件自管的头，值不能含 CR / LF / NUL
         │
         ▼
-[1] 探测 URL（超时 5s）
+[1] 组装请求头：headers + userAgent + referer 合成**一份**，
+    探测与下载共用（两边不一致会让探测结论与真实下载错位）
+        │
+        ▼
+[2] 镜像解析
+     · 显式前缀：镜像前缀 + 完整原始 URL
+     · "auto"：先探测原始地址，再逐个探测内置候选，
+       只采用「长度一致，且原始有 ETag 时 ETag 也一致」的候选；
+       一个都没证实就退回原始地址并写明 mirrorSkipped
+     · 非 http(s) URL 不走镜像；输出文件名始终按原始 URL 推导
+        │
+        ▼
+[3] 探测 URL（超时 5s）
      · 先发送 HEAD 请求
-     · 若 HEAD 返回 405 或缺少 Content-Length，
-       则改用 GET + "Range: bytes=0-0"
+     · HEAD 抛异常（超时 / 被墙）、返回 405、或缺少 Content-Length，
+       都改用 GET + "Range: bytes=0-0" 兜底再判一次
+     · 两条路都失败才判「不支持多线程」
         │
         ▼
-[2] decide() 按文件大小与 aria2 可用性分档：
+[4] decide() 按文件大小与 aria2 可用性分档：
      · 不支持 Range / 探测失败 / 无法获取大小 / <1MB  -> curl
      · 1MB ~ 8MB   -> aria2 4 连接
      · ≥ 8MB        -> aria2 8 连接（保守上限，不开 16）
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 档                       ▼ curl 档
-[3a] 能定位到随包 aria2c？         [3b] curl 单线程（含进度条）
+[5a] 能定位到随包 aria2c？         [5b] curl 单线程（含进度条）
    │ 是              │ 否
    ▼                 ▼
   aria2 4/8 连接     curl 单线程（回退）
   （每秒摘要进度）
-  （-c 续传）        （支持 Range 时 -C - 续传）
+  （能证实同源时 -c）  （能证实同源时 -C -）
     │ 失败
     ▼
   降级为 curl 单线程（回退）
-         │
-         ▼
-[4] 完整性校验：落盘字节数 vs 远端声明长度
-        │ 一致            │ 不一致
-        ▼                 ▼
-   清除 .part.json    抛错，保留旁车
+  注：完整性校验失败**不**走这条回退 —— 产物内容不对，
+      换下载器重下同一地址不会改变结果
+        │
+        ▼
+[6] 完整性校验（两层，各自独立）
+     · 落盘字节数 vs 远端声明长度（verifySize）
+     · 调用方给的 SHA-256 vs 实际算出的摘要（verifySha256）
+        │ 通过                │ 失败
+        ▼                     ▼
+   清除 .part.json       抛错，保留旁车
    返回 success
 
-  返回结果 { success, path, method, size, fellback, reason?, verifySkipped?, requestedUrl, mirrored }
+  返回结果 { success, path, method, size, fellback, reason?, verifySkipped?,
+            sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
 ```
 
 要点：
 
-- **任何探测异常**（超时、网络错误、无法获取文件大小）都会被安全地判定为“不支持多线程”，从而走 curl 回退，不会让下载直接失败。
+- **探测异常不会让下载失败，但「HEAD 抛异常」不再等于「不支持多线程」**：HEAD 超时 / 被墙时会
+  改用 Range GET 兜底再判一次（1.2.0 修正）。此前 HEAD 一失败就宣告「不支持且大小未知」，
+  连带白等一整个探测超时、完整性校验永久退化成「跳过」、大文件也永远单线程。
+  两条路都失败才回退 curl，`reason` 会同时写明两条失败原因。
 - 并发数随文件大小动态选择（阈值 1MB / 8MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
   阈值是 0.7.0 实测定下的，不是拍脑袋（见下方「并发阈值是实测的，不是猜的」）。
 - **下载完成后会校验落盘字节数**：`curl` / `aria2` 的退出码 0 只代表“它自己认为完成了”，不代表字节数对。
   少发、多发、镜像返回 200 的错误页等场景都不会有非零退出码，只有校验能拦下（详见「设计上的静默失败防护」）。
-- 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像。
+- **传了 `sha256` 就再核对内容**：长度校验挡不住「等长但内容不同」，哈希能，而且它不依赖远端信息，
+  在长度校验被迫跳过时依然给出确定结论。
+- 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像，
+  `mirror` 是实际用的前缀，`mirrorSkipped` 说明「请求了自动镜像但没用上」的原因。
 - **只允许 `http` / `https`**：URL 来自模型读到的任意页面，属于不可信输入。其他协议（`file:`、`ftp:` 等）在下载开始前直接被拒绝，不会进入探测或下载流程。
+- **不支持 FTP / SFTP / BitTorrent**：协议白名单只放行 `http` / `https`。放开之后五层防护里只剩第五层（调用方给的 `sha256`）有效，而它是**可选参数** —— 也就是说默认情况下 FTP 下载没有任何内容校验；BitTorrent 更进不来（DHT / 监听端口 / 做种会打破「除原始 URL 外不访问其他地址」这条权限承诺）。逐条依据（2026-10-12 核对）见 [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md) §B。
 - **输出文件名会被净化**：未传 `output` 时按 URL 推导文件名，推导结果只取**单个路径段**——URI 解码后的 `/`、`\`、`..` 等一律丢弃，因此不会写到工作目录之外。
 
 ### 为什么必须做协议白名单与文件名净化（实测结论，勿移除）
@@ -160,6 +304,27 @@ smart_download(
 - 非 `http(s)` 的 URL 不使用镜像；**镜像前缀本身也必须过白名单** —— 非 `http(s)` 的前缀（`file://`、`javascript://`、`data://` 等）一律不生效、原样走原始 URL。字符串拼接后整串的 scheme 由前缀决定，不判前缀就等于给 `file://` 开了后门（1.0.0 修正，实测见 [SECURITY.md](./docs/SECURITY.md)）；
 - 输出文件名始终按**原始 URL** 推导，不会把镜像域名带进文件名。
 
+### 不想手填前缀：`mirror: "auto"`
+
+传字面量 `auto`，由插件从候选表里挑一个**被证实与原地址同源**的镜像。
+完整规则与安全边界见上方[「照着官方文档下载」](#mirror-auto文档只给原始github-地址时)一节。
+
+### 换成自己的镜像：`DSH_SMARTDL_MIRRORS`
+
+内置候选是三个**公开第三方**服务，企业内网 / 自建代理的场景下一个都用不了。
+用逗号分隔的前缀表覆盖它，**顺序即优先级**：
+
+```bash
+# Linux / macOS
+export DSH_SMARTDL_MIRRORS="https://my-mirror.corp/ , http://10.0.0.9:8080"
+
+# Windows PowerShell
+$env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
+```
+
+空 / 纯空白 / 只有逗号都视为未设置，回落内置表。改动不影响「同源证明」：
+自定义镜像同样必须通过长度 + ETag 的核对才会被采用。
+
 常见的公开镜像（任选其一，可用性随网络环境变化）：
 
 | 镜像前缀 |
@@ -184,8 +349,68 @@ smart_download(
 
 为什么 curl 的续传是条件式的（实测结论，勿改成无条件）：
 
-> `curl -C -` 在服务器**不支持** Range 且本地已存在半截文件时，会以**退出码 33 直接失败**——实测：1000 字节资源、已有 400 字节半包 → `exit 33`，文件保持 400 字节不损坏；而同一场景**不带** `-C -` 能正常全量重新下载成功。
+> 先按官方定义对齐两个相邻的退出码：curl **33 = HTTP range error**（我们发出的 Range 请求未被服务器接受），而「服务器不支持续传」在 curl 里对应的是 **36 = bad download resume** —— 两者不是一回事，此前这里把 33 直接解释成「服务器不支持 Range」是不准确的。
+> 本机实测（curl 8.13.0）：服务器**忽略**我们发的 `Range`、且本地已存在半截文件时，`curl -C -` 会以**退出码 33 直接失败**——1000 字节资源、已有 400 字节半包 → `exit 33`，文件保持 400 字节不损坏；而同一场景**不带** `-C -` 能正常全量重新下载成功。也就是说：33 也可能意味着「服务器忽略了你发的 Range」，这与官方定义（range error）是同一件事的两种说法，但**不能**据此推断服务器永久不支持续传（那要按 36 判）。
 > 支持 Range 时三种情况均实测正确：半包续传、已下载完整后重跑、文件不存在从头下。
+
+## 一次下载多个文件：`targets` / `maxBandwidth` / `timeoutMs`
+
+`url` 下载单个文件；`targets` 在**一次调用内**下载一批（P0 的核心交付）：
+
+```json
+{
+  "targets": [
+    { "url": "https://example.com/a.iso", "output": "a.iso" },
+    { "url": "https://example.com/b.iso", "output": "b.iso", "sha256": "<官方文档里的摘要>" }
+  ],
+  "maxBandwidth": "4M",
+  "timeoutMs": 600000
+}
+```
+
+### 二选一与上限
+
+- **`url` 与 `targets` 二选一**：两个都给、或两个都不给，都在**发起任何请求之前**被拒绝 —— 不会「以某一个为准」，静默忽略一边会让调用方以为两边都下了。因此 `url` **不是**必填参数。（这条约束在工具 schema 层表达不出来：参数表的根节点只能是一张属性表，放不下「二选一」，所以由执行层强制并在参数说明里写明后果。）
+- **`targets` 是空数组**同样在发起请求之前被拒绝。
+- **单批上限 50 条**，与 `download_status` 的读取上限对齐。超限**显式拒绝**并回报实际条数，而不是截断 —— 静默丢掉尾巴会变成「下过了但查不到」，那种现象无从解释。需要更多就拆成多批。
+- 每条可以带自己的 `output` 与 `sha256`；`mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` / `timeoutMs` 是**整批共享**的。
+- **同步返回**：整批跑完才返回（不是「提交任务、稍后查」）。正因如此，`timeoutMs` 才有存在的必要（见下）。
+
+### 逐条结果与「部分成功」
+
+批量返回 `batch`（批次 ID）、`succeeded` / `failed` / `cancelled` 三个计数，以及逐条的 `results[]`（`succeeded + failed + cancelled === results.length`）：
+
+- **一条失败不影响其余条目**：每一行都有自己的 `success`、落盘 `path`（失败时也给出「本该落到哪」）与 `error` 原因。为什么逐条给而不是只报计数：只给「N 条成功 M 条失败」，调用方仍然不知道要不要重试、重试哪一条。
+- **失败与取消分开计数**（与单条目路径同一条规则）：`failed` 是「下载坏了」，`cancelled` 是「整批被取消」，二者在面板上是两个状态。整批取消时，还没开工的条目也会各留一条 `cancelled` 记录，不会凭空消失。
+- 失败文案沿用单条目那套（例如 `aria2c 退出码 22：…`），**不含**可执行文件的绝对路径。
+- 每个条目的进度记录都带同一个 `batch` ID：`download_status` 与面板都能把一次调用的条目归到一起。
+
+### 批内并发：按「总连接数有界」反推
+
+批内用滑动窗口并发（不是「固定分成几组」：组里最慢的一条会拖住整组，而各条目耗时天然差很多）。窗口宽度**不是**单条目的最高档 8 —— 那会让峰值连接数达到 8 × 8 = 64，直接违背「单文件上限压在 8 是为了避免触发服务器按 IP 限并发」这个既定取舍。现在的规则是：
+
+```
+批内连接预算 = 单条目最高档 × 2      （= 16；两倍是愿意为「批量比单文件快」多冒的连接风险上限）
+窗口         = 预算 ÷ 单条目可能占用的连接数
+```
+
+代入当前档位（小文件 4 连接 / 大文件 8 连接）：每条 8 连接时窗口 2、每条 4 连接时窗口 4，两种情况峰值都在 16 附近。批量在开工前不知道各条目的大小（那要逐条探测），因此统一按最高档保守计算 —— 当前实际窗口恒为 2。单条目内部开 4 还是 8 仍按文件大小决定。
+
+### `maxBandwidth`：整批共享的带宽上限
+
+接受裸字节数或 K/M/G 后缀（1024 进制），如 `"4M"`、`"500K"`、`"1500000"`。它是**一次调用**的上限，不是每条的上限：批量时按实际并发位均分（`"4M"` + 窗口 2 → 每条 2M），因此一次调用的合计吞吐不会超过它。落到子进程上是 aria2 的 `--max-overall-download-limit` 与 curl 的 `--limit-rate`。**非法值在发起任何请求之前抛错** —— 交给子进程等于「用户以为限了速，其实没限」（它们对非法参数是静默忽略的）。
+
+### `timeoutMs`：单条目超时（路线 A 是同步调用）
+
+`timeoutMs` 是**每个条目**的超时（毫秒，`1000`..`1800000`，即 1 秒到 30 分钟）。为什么需要它：本工具是同步调用，一个卡死的条目会让整批一直不返回。30 分钟是保守上限（1GB @ 1MB/s ≈ 17 分钟），更长的等待说明应当改用「先返回、后台继续」的形态 —— 那个形态明确不做，所以宁可让它在这里失败，也不挂住整个会话。
+
+超时之后会发生什么（这几条是定义，不是实现细节）：
+
+- **超时的那一条记 `failed`**，不是 `cancelled` —— 用户并没有按取消，两者在面板上是两个状态。`results[]` 里那一行的 `error` 与两张进度轨道上的终态都写明「下载超时：<毫秒>ms 内没有完成（已终止这一条；半包与旁车指纹保留，重跑会先核对同源再续传）」。
+- **批量里其余条目继续跑**：超时只终止它自己那一条的子进程（探测、aria2、curl 三个阶段都算）。
+- **已完成条目的结果不会被改判**：已经在 `succeeded` 里的条目及其 `path` 原样保留。
+- 超时**不**回退到 curl —— 回退等于把同一份等待再花一遍。
+- 缺省（不传）表示不设超时；非法值（越界、小数、非数字）在发起任何请求之前抛错。
 
 ## 查询下载进度：download_status
 
@@ -251,6 +476,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - **插槽**：注册到 `shell.overlay`（`kind: 'list'`，`order: 100`），因此不会覆盖宿主自身界面；无内容时渲染为 `null`。
 - **只依赖 `react`**：客户端脚本以 classic script 形式通过 `window.__ModuleLoader__.load` 注册，不做打包。
 - **陈旧任务自动忽略**：超过 10 分钟没有更新的 `running` 任务不再计入面板，避免历史残留文件让面板永久卡住。
+- **面板是只读的（本轮明确不提供取消 / 重试）**：面板侧没有任何能触发宿主动作的 API —— 客户端插件只拿到 `connection.rpc.call`（一次请求一个响应），没有「让宿主去做某件事」的通道；宿主侧也没有 `taskId → AbortController` 表：那次下载的 `AbortSignal` 只活在 `execute()` 的调用栈里，RPC 处理函数够不到它。因此本轮不加任何「点了没反应」的按钮；要做取消/重试，先得扩建 RPC 写端点、进程内任务注册表与任务元数据（原 URL / 输出路径 / 摘要）。
 
 > 该面板仅在带 Web 界面的 profile 提供；CLI 等 profile 下插件会静默跳过客户端注册，工具与下载功能不受影响。
 
@@ -319,6 +545,23 @@ CLI 下每次下载结束都要多卡约 2 秒才退出；以及 aria2 失败回
 | `verifySize`        | 退出码 0 但字节数不对 → 当成成功 | 字节数一致必须返回 `ok`；**chunked 截断**（aria2/curl 均 exit 0）必须被判为失败；「探测长度未知」与「服务器返回压缩编码」必须返回**独立的 `skipped`**（带机器可读 `reason`）而不是与 `ok` 同形 |
 | `probeUrl` 的 `accept-encoding` | 默认带 `gzip, deflate` → 拿到压缩长度 | 服务器必须收到 `identity`，且必须取回**未压缩**长度（5000 而非 41） |
 | `registerStatusRpc` 的 handler | 非法请求 → 回默认值 / 静默放行 | 无 `connection` 时必须**恰好注册 0 条路由**；信封非法必须回 `rpcId='invalid-request'` 的 `ok:false`；非法 `limit` 必须回落到 `DEFAULT_STATUS_LIMIT`（10，而非 0 / `Infinity`）；业务异常必须仍是 200 + `ok:false`（不裸奔 500） |
+| `normalizeSha256` | 认不出 → 当成没传 / 认错 → 恒不匹配 | 四种官方文档写法必须归一到**同一个** 64 位小写十六进制；长度不对 / 含非十六进制 / 别的算法前缀必须返回 `null`（调用方据此在下载前拒绝） |
+| `sha256File` | 分块拼接丢字节 → 摘要错 | 8MB 文件流式算出的摘要必须与一次性计算**逐字符相等**；文件不存在必须返回 `null`（不是抛错、不是空串） |
+| `describeHashFailure` | 两种失败共用一句 → 用户分不清「没读成」与「内容不对」 | `unreadable` 与 `mismatch` 必须是**两句不同**的文案 |
+| `buildRequestHeaders` | 头被悄悄丢掉 / 覆盖自管头 → 探测与下载错位 | 三个入参必须合成**一份**头表且命名参数优先；同名头只留一条；`Range` / `Accept-Encoding` / `Host` 等必须**拒绝**；值含 CR / LF / NUL 必须**拒绝**；恰好等于上限必须通过 |
+| `resolveAutoMirror` | 挑不到 → 静默用原始地址 / 挑错 → 下载到别的东西 | 三条「不启用」路径必须各自返回**具体的** `skipped` 文案；采用时 `mirrored` 必须为真且带回 `mirror` 前缀 |
+| `pickMirrorServingSameFile` | 只要「有响应」就采用 → 把「下载到什么」交给第三方 | 长度不一致必须拒绝；原始有 ETag 而候选没有必须拒绝；ETag 不等必须拒绝；原始长度未知时**一次请求都不发**；单个候选抛异常不得影响其余候选 |
+| `describeExitCode` 未知退出码 | 丢掉退出码与 stderr / 编一个原因 | 未知码必须**原样保留**退出码与 stderr 尾部，且**不得**编造「下一步」（`test/runprocess.test.ts`） |
+| `verifySize` 的两种 skipped | 「没测过」与「测过且一致」同形 | `remote-length-unknown` 与 `content-encoded` 必须返回**各自独立**的 `skipped`（带机器可读 `reason`），并分别有 gzip / chunked 场景断言 |
+| `readDownloadStatus` 目录读不到 | 空列表（与「确实没有任务」同形） | 两个目录都读不到时 `ok` 必须为 `false` 且报出**每个**失败目录；可读目录里的任务不得因另一半失败而消失 |
+| 批量单条失败 | 一条失败把整批带崩 / 丢掉已成功条目 | 失败只影响那一条：`results[]` 每行各有 `success` / `path` / `error`，已成功条目的 `path` 原样保留 |
+| 批量取消 vs 失败 | 混成一个状态 | `cancelled` 与 `failed` 必须分开计数；未开工的条目也要各留一条取消记录，不得凭空消失 |
+| `maxBandwidth` 非法值 | 被子进程静默忽略 → 「用户以为限了速，其实没限」 | 必须在发起任何请求之前抛错（用例断言服务器 `hits === 0`） |
+| `timeoutMs` 非法值 | 同上 | 同上：越界 / 小数 / 非数字都在发请求之前拒绝 |
+| `resolveTargets` 二选一 / 空数组 / 超 50 | 静默取一边 / 静默截断尾巴 | 三条路径都必须在发请求之前拒绝；超限时文案必须带上**实际条数**与上限 |
+| `cleanupHistory` 参数越界 | 静默夹到边界后照删 | 越界必须 `ok:false` + 文案点名字段与范围，且**一个文件都不删** |
+| cleanup 扫不到轨道一 | 安静地只扫轨道二 → 假装清完了 | 必须 `taskDir === ''` + `taskDirSkipped` 固定文案说明「轨道一未参与」及原因 |
+| 单条目超时 | 卡住整批不返回 | 超时的那一条记 `failed`（不是 `cancelled`）并带超时文案；同批其余条目继续跑；已完成条目不被改判；不回退 curl |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -354,6 +597,8 @@ aliyun 镜像对 aria2 的 UA 直接返回 403。）
 维持 8 连接上限不动：32/64MB 下 x=16 确实还能再快一倍（23~24 MB/s），
 但出于“避免触发服务器按 IP 限并发”的保守考虑不引入。
 
+**批内并发沿用同一条理由**（1.3.0）：批量的滑动窗口刻意**不取**「单条目最高档 = 8」，而是按「批内总连接数有界」反推 —— 否则 8 条 × 8 连接 = 峰值 64 连接，会把上面这条保守取舍整个抵消。推导规则与峰值上限见[一次下载多个文件](#一次下载多个文件targets--maxbandwidth--timeoutms)。
+
 ### 两个差点让并发全部失效的坑
 
 - **aria2 的 `-x/-s` 会被 `min-split-size` 悄悄废掉**。aria2 默认 `--min-split-size=20M`，
@@ -386,12 +631,15 @@ macOS 为什么没做、需要补什么，见 [COMPATIBILITY.md](./docs/COMPATIB
 
 | 行为 | 说明 |
 | --- | --- |
-| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。 |
+| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）—— **不支持 FTP / SFTP / BitTorrent**：放开白名单后五层防护里只剩第五层（可选的 `sha256`）有效，即默认无内容校验；BT 的 DHT / 监听端口 / 做种还会打破下方「除原始 URL 外不访问其他地址」这条承诺。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。**`mirror: "auto"` 时，候选镜像地址也会被探测**（并发 HEAD，每个同样 5s 超时）—— 这是自动模式的必要代价，且**必须显式传 `auto` 才会发生**；候选表可用 `DSH_SMARTDL_MIRRORS` 限定为你信任的镜像。 |
+| 发送请求头 | 默认只发探测必需的 `accept-encoding: identity`。调用方传了 `userAgent` / `referer` / `headers` 时，这些头会**同时**出现在探测请求与下载请求上（子进程命令行里可见，因此**不要**把长期凭证写进 `headers`）。插件自身管理的头（`Range` / `Accept-Encoding` / `Content-Length` / `Host` / 连接级头）拒绝覆盖；头值含 CR / LF / NUL 判为注入并拒绝。 |
+| 读取下载文件 | `sha256` 校验时以**流式**方式读取刚落盘的那个文件（不整份进内存），用于计算 SHA-256。不读其他文件。 |
 | 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未传 `output` 之外的路径不改动。aria2 一律带 `--allow-overwrite=true`（**必须**）：aria2 默认遇到同名文件既不截断也不覆盖，而是另存为 `f.1.bin`，而插件返回的 `path` 仍指向旧文件 —— 前一个版本的静默路径错位就是这么来的。 |
 | 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
 | 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
+| HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册两条精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）与 `POST /api/smartdl.cleanup`（**会删文件**）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。**影响面**：进度文件是「已完成 / 失败」回执的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用该端点的人就能清理本机所有会话的历史进度。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
 | 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
-| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`）。 |
+| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）。 |
 
 **不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
 
@@ -422,7 +670,7 @@ dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 
 
 豁免记录在该 profile 的 `compatibility.json` 里，可以用 `dsh plugin version-exemptions` 查看、`revoke-version` 撤销。豁免的粒度是**精确版本**：换了 dsh 版本就不再生效。
 
-macOS 未列入支持平台：**不是兼容性问题，而是缺少对应的 aria2 二进制子包**。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
+macOS 未列入支持平台：**不是兼容性问题，而是没有可信来源的 aria2 二进制子包**（注意：macOS 二进制存在且带哈希，卡点是「来源不可信」—— 逐个来源的核对结果见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md) 与 [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md)，核对时间 2026-10-12）。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
 
 ## 常见问题
 
@@ -445,7 +693,19 @@ A：不会。子进程均以 `windowsHide: true` 启动。
 A：调用 `download_status`，它会返回最近任务的百分比、速度与 ETA。传 `taskId` 可只查某一个任务。它是纯只读的，不会影响正在进行的下载。
 
 **Q：GitHub Release 下载太慢，能用镜像吗？**
-A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "https://gh-proxy.com/"`。请注意镜像是第三方服务，不要用它下载含敏感信息的文件。
+A：可以。给 `smart_download` 传 `mirror` 前缀即可，例如 `mirror: "https://gh-proxy.com/"`；不想手填就传 `mirror: "auto"`，由插件从内置候选里挑一个**被证实与原地址同源**的。请注意镜像是第三方服务，不要用它下载含敏感信息的文件。
+
+**Q：官方文档给了 SHA-256，怎么核对？**
+A：把摘要原样传给 `sha256` 参数即可，四种常见写法都接受（裸十六进制、`sha256:<hex>`、`SHA256(<hex>)`、SRI 的 `sha256-<base64>`）。核对通过时返回值里会出现 `sha256` 字段；不一致会抛错并且**保留**旁车指纹。摘要写错会在下载开始前就被拒绝，不会白下一遍。详见[「照着官方文档下载」](#照着官方文档下载)。
+
+**Q：官方文档的下载地址直接下会 403 / 返回一个 HTML 页面？**
+A：多半是站点按 UA 或 Referer 分流。传 `userAgent` / `referer`，或更一般的 `headers`（例如门控资源需要 `Authorization`）。插件会把这一套头**同时**用在探测与下载上，避免「探测成功、下载 403」这种两边不一致的错位。
+
+**Q：`mirror: "auto"` 为什么没生效？**
+A：看返回值的 `mirrorSkipped`，它写明具体原因，常见三种：地址不是 GitHub 域名、拿不到原始文件长度（无从证实镜像同源）、内置镜像都不可达或返回的文件与原始地址不一致。任何一种情况下插件都会**照常从原始地址下载**，不会因此失败。另外部分镜像会剥掉 `ETag`，对这类镜像插件一律不采用（宁可慢也不接受无法证实的来源）。
+
+**Q：自动镜像选中的镜像会不会下到别的东西？**
+A：候选必须通过「长度完全一致 + 原始有 ETag 时 ETag 也一致」的核对才会被采用，所以能挡住「镜像缓存了旧版本」「返回了错误页」这类问题。但这道证明**防不住投毒** —— ETag 是镜像自己声明的。要防投毒请传 `sha256`（摘要来自官方文档，镜像伪造不了）。企业内网可以用 `DSH_SMARTDL_MIRRORS` 把候选限定成自己信任的镜像。
 
 **Q：下载中断后要重新开始吗？**
 A：不需要。用同样的 `url` 与 `output` 再调用一次 `smart_download`，支持 Range 的服务器会从断点继续。
@@ -462,20 +722,37 @@ A：先确认真的装成功了：从仓库地址安装要求该 git 主机可�
 | --- | --- |
 | [README](./README.md) / [English](./README.en.md) | 安装、用法、权限说明 |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 内部结构：一次调用经过哪些步骤、模块职责、进度数据流 |
-| [SECURITY.md](./docs/SECURITY.md) | 威胁模型与四层防护，每层对应的实测复现 |
+| [SECURITY.md](./docs/SECURITY.md) | 威胁模型与五层防护，每层对应的实测复现 |
 | [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 为什么搁置 |
 | [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | 症状 → 原因 → 处理 |
 | [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 代码审查：必修 / 建议 / 已知折衷 |
 | [CHANGELOG.md](./CHANGELOG.md) | 逐版本变更记录 |
 
+### 与官方文档的关系
+
+本插件是**社区维护的第三方插件**（见文末「声明」），它的行为约定以
+[DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 的
+插件与工具规范为准：`defineTool` 的参数 schema、`dsh plugin` 的安装命令形态、
+profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对齐（例如 `1.1.0` 的
+`dsh.manifestVersion: 1`、`1.1.2` 的「git 安装不再依赖构建脚本」都是这么来的）。
+
+因此**安装与升级请以官方文档为准**，本 README 只补充本插件特有的部分。
+两个工具的参数、返回值与失败原因则完全记录在本 README 与
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md) 里，遇到不一致时以本仓库的
+[CHANGELOG.md](./CHANGELOG.md) 与测试用例为准（每个「返回默认值」的路径都有正向断言，见上方契约表）。
+
 ## 开发
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**262 例用例（260 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.81%** / 分支 **92.53%**。
+当前基线：**343 例用例（341 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.74%** / 分支 **94.18%** / 函数 **96.99%**。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)）。
 2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+
+> 「未覆盖行」一列会把**块结束的 `}` 与多行表达式的续行**报成未覆盖 —— 已逐条核对
+> （`downloader.ts:134`、`headers.ts:119` 对应的语句都有用例并断言到具体值），
+> 属于 tsx 源码映射的行归属问题，不是缺少用例的语句。判断时以百分比为准。
 
 ```bash
 # 安装依赖

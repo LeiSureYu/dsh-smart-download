@@ -23,6 +23,7 @@ import {
   downloadWithCurl,
   getAria2Path,
   runProcess,
+  summarySpeedBytes,
 } from '../src/downloader.js'
 
 /* ------------------------------ 参数拼接 ------------------------------ */
@@ -119,6 +120,46 @@ test('buildCurlArgs resume=false -> 明确不含 -C', () => {
   assert.equal(args[args.indexOf('-o') + 1], 'b.zip')
 })
 
+/* ------------------------------ 自定义请求头 ------------------------------ */
+
+test('buildCurlArgs 带请求头 -> 每个头一条 -H，URL 仍排在最后', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip', false, {
+    'User-Agent': 'ua/1',
+    Referer: 'https://r.example/',
+  })
+  assert.deepEqual(args, [
+    '--progress-bar',
+    '-L',
+    '-o', 'b.zip',
+    '--fail',
+    '--show-error',
+    '-H', 'User-Agent: ua/1',
+    '-H', 'Referer: https://r.example/',
+    'https://example.com/b.zip',
+  ])
+  assert.equal(args[args.length - 1], 'https://example.com/b.zip', 'URL 必须是最后一个参数')
+})
+
+test('buildCurlArgs 不带请求头 -> 一条 -H / -A 都不产出（与 1.1.x 逐字一致）', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip', false)
+  assert.equal(args.includes('-H'), false)
+  assert.equal(args.includes('-A'), false, '统一用 -H，不混用 -A 以免优先级随 curl 版本变化')
+})
+
+test('buildAria2Args 带请求头 -> 每个头一条 --header，且 -o 与文件名仍紧邻', () => {
+  const args = buildAria2Args('https://example.com/b.zip', 'b.zip', 4, true, {
+    'User-Agent': 'ua/1',
+  })
+  assert.ok(args.includes('--header=User-Agent: ua/1'), args.join(' '))
+  assert.equal(args[args.indexOf('-o') + 1], 'b.zip')
+  assert.equal(args[args.length - 1], 'https://example.com/b.zip', 'URL 必须是最后一个参数')
+})
+
+test('buildAria2Args 不带请求头 -> 一条 --header 都不产出', () => {
+  const args = buildAria2Args('https://example.com/b.zip', 'b.zip', 4, true)
+  assert.equal(args.some((a) => a.startsWith('--header')), false)
+})
+
 test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正确', () => {
   assert.deepEqual(Object.keys(ARIA2_TARGETS).sort(), [
     'linux-arm64',
@@ -186,13 +227,83 @@ test('runProcess: 非零退出 -> reject 且错误包含退出码与 stderr', as
   )
 })
 
-test('runProcess: 预先 abort 的信号 -> reject 为取消', async () => {
+test('runProcess: 预先 abort 的信号 -> reject 为取消，且只出现可执行文件名', async () => {
   const controller = new AbortController()
   controller.abort()
+  // 用 process.execPath（绝对路径，且带 .exe）走 close 分支：文案里必须是 'node'
   await assert.rejects(
     runProcess(process.execPath, ['-e', 'setInterval(()=>{}, 200)'], controller.signal),
-    /取消|终止/,
+    (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.equal(err.message, '下载已取消：node 被 AbortSignal 终止')
+      assert.doesNotMatch(err.message, /node_modules/i, '不得出现 node_modules')
+      assert.doesNotMatch(err.message, /[A-Za-z]:[\\/]/, '不得出现盘符路径')
+      assert.doesNotMatch(err.message, /[\\/]/, '不得出现路径分隔符')
+      return true
+    },
   )
+})
+
+/* ---------------- P0V-01：真实 aria2 / curl 的取消文案都不得泄漏绝对路径 ---------------- */
+
+/** 取消文案的统一不变量：只有可执行文件名，没有任何绝对路径痕迹。 */
+function assertNoAbsolutePath(message: string): void {
+  assert.doesNotMatch(message, /node_modules/i, '文案里不得出现 node_modules')
+  assert.doesNotMatch(message, /[A-Za-z]:[\\/]/, '文案里不得出现盘符路径')
+  assert.doesNotMatch(message, /[\\/]/, '文案里不得出现任何路径分隔符')
+}
+
+test('取消文案（aria2 路径）：随包 aria2 的绝对路径收敛成 aria2c', async (t) => {
+  const aria2Path = getAria2Path()
+  if (aria2Path === null) {
+    // 与 execute.test.ts 的既有做法一致：没有子包就跳过（本机装了子包，不会触发）
+    t.skip('本机无 aria2 子包，跳过 aria2 取消文案用例')
+    return
+  }
+  // 前提断言：随包 aria2 确实是带分隔符的绝对路径、且真的落在 node_modules 下 ——
+  // 否则「文案里不出现 node_modules」这条断言会因为命令本身干净而空转
+  assert.match(aria2Path, /[\\/]/, '前提：随包 aria2 的路径是带分隔符的绝对路径')
+  assert.match(aria2Path, /node_modules/i, '前提：该路径确实在 node_modules 下（否则测不到泄漏）')
+
+  const server = await startThrottledServer(4 * 1024 * 1024, { chunk: 32 * 1024, delayMs: 50 })
+  const out = path.join(os.tmpdir(), `dsh-cancel-aria2-${Date.now()}.bin`)
+  try {
+    const controller = new AbortController()
+    const running = downloadWithAria2(aria2Path, server.url, out, 4, controller.signal, undefined, false)
+    // 让 aria2 真正跑起来再取消：取消文案来自「运行中被 abort」那条分支
+    await delay(400)
+    controller.abort()
+    await assert.rejects(running, (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.equal(err.message, '下载已取消：aria2c 被 AbortSignal 终止')
+      assertNoAbsolutePath(err.message)
+      return true
+    })
+  } finally {
+    await server.close()
+    rmSync(out, { force: true })
+    rmSync(`${out}.aria2`, { force: true })
+  }
+})
+
+test('取消文案（curl 路径）：只出现 curl', async () => {
+  const server = await startThrottledServer(4 * 1024 * 1024, { chunk: 32 * 1024, delayMs: 50 })
+  const out = path.join(os.tmpdir(), `dsh-cancel-curl-${Date.now()}.bin`)
+  try {
+    const controller = new AbortController()
+    const running = downloadWithCurl(server.url, out, controller.signal, undefined, false)
+    await delay(400)
+    controller.abort()
+    await assert.rejects(running, (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.equal(err.message, '下载已取消：curl 被 AbortSignal 终止')
+      assertNoAbsolutePath(err.message)
+      return true
+    })
+  } finally {
+    await server.close()
+    rmSync(out, { force: true })
+  }
 })
 
 test('runProcess: 运行中 abort -> 子进程被强制结束', async () => {
@@ -424,6 +535,64 @@ test('downloadWithAria2: reporter 收到真实摘要（文案固定、百分比 
   }
 })
 
+test('summarySpeedBytes: MiB/KiB 按 1024 进制、KB/MB 按 1000 进制、解析不出来返回 undefined', () => {
+  assert.equal(summarySpeedBytes('10MiB/s'), 10 * 1024 * 1024)
+  assert.equal(summarySpeedBytes('115.7KiB/s'), 115.7 * 1024)
+  assert.equal(summarySpeedBytes('1.5GiB/s'), 1.5 * 1024 ** 3)
+  assert.equal(summarySpeedBytes('500B/s'), 500)
+  // 不带 i 的是十进制：aria2 实测吐 MiB，但 progress-parse 的正则也接受这种写法
+  assert.equal(summarySpeedBytes('2KB/s'), 2000)
+  assert.equal(summarySpeedBytes('3MB/s'), 3_000_000)
+  // 0 如实返回 0（要不要跳过由调用方决定：见 downloadWithAria2 里只在 > 0 时留观测）
+  assert.equal(summarySpeedBytes('0B/s'), 0)
+  // 数字与单位之间的空格照收：上游正则在字段里本来就允许 `\s*`，这里不该比它更严
+  assert.equal(summarySpeedBytes('10 MiB/s'), 10 * 1024 * 1024)
+  for (const bad of ['10MiB', 'fast', '', '10XB/s', 'MiB/s']) {
+    assert.equal(summarySpeedBytes(bad), undefined, `${JSON.stringify(bad)} 应解析失败而不是猜一个数`)
+  }
+})
+
+test('downloadWithAria2 返回观测值：吞吐换算成字节/秒、并发是本次档位、cn 来自摘要', async (t) => {
+  const aria2Path = getAria2Path()
+  if (!aria2Path) {
+    t.skip('本平台未安装随包 aria2，回退 curl')
+    return
+  }
+  // 与上面那条进度用例同样的限速参数：必须跨过至少一次 1s 摘要周期，才会有观测值可返回
+  const size = 4 * 1024 * 1024
+  const { url, close } = await startThrottledServer(size, {
+    chunk: 32 * 1024,
+    delayMs: 40,
+    stallAt: 2 * 1024 * 1024,
+    stallMs: 800,
+  })
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-a2-obs-'))
+  const out = path.join(dir, 'f.bin')
+  try {
+    const observation = await downloadWithAria2(aria2Path, url, out, 4)
+    assert.ok(observation, '限速下载必须至少解析出一条带速度的摘要（否则 P1-2 拿不到观测值）')
+    assert.equal(observation.concurrency, 4, '并发数必须是本次请求的 -x/-s 档位')
+    assert.ok(
+      Number.isInteger(observation.cn) && observation.cn >= 1,
+      `实际有效连接数（CN）必须 ≥ 1，实际 ${observation.cn}`,
+    )
+    assert.ok(observation.cn <= 4, `实际连接数不该超过请求的档位，实际 ${observation.cn}`)
+    // 单位换算的方向：每连接 32KB/40ms ≈ 0.8MB/s，量级应在 MB/s 附近 ——
+    // 换算反了（或把KiB当MiB）会落在这个区间之外
+    assert.ok(
+      observation.throughput > 100 * 1024,
+      `吞吐应大于 100KiB/s，实际 ${observation.throughput}`,
+    )
+    assert.ok(
+      observation.throughput < 100 * 1024 * 1024,
+      `吞吐不该是离谱值，实际 ${observation.throughput}`,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    await close()
+  }
+})
+
 test('downloadWithAria2: 404 时抛错且 reporter 收到 0 条（错误摘要行不得误报进度）', async (t) => {
   const aria2Path = getAria2Path()
   if (!aria2Path) {
@@ -573,3 +742,41 @@ function isProcessAlive(pid: number): boolean {
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
+
+/* ---------------- 1.3.0：总带宽上限（一批内共享，见 src/index.ts） ---------------- */
+
+test('buildAria2Args 带宽上限 -> 追加 --max-overall-download-limit=<字节数>', () => {
+  const args = buildAria2Args('https://example.com/a.zip', 'a.zip', 8, true, undefined, 262144)
+  const at = args.indexOf('--max-overall-download-limit=262144')
+  assert.ok(at >= 0, '必须出现 --max-overall-download-limit=<字节数>')
+  // 位置：在 -o 之前（选项区），且不得影响 -o 与 URL 的关系
+  assert.ok(at < args.indexOf('-o'), '限速开关属于选项区，必须排在 -o 之前')
+  assert.equal(args[args.indexOf('-o') + 1], 'a.zip')
+  assert.equal(args[args.length - 1], 'https://example.com/a.zip')
+})
+
+test('buildAria2Args 不带带宽上限 -> 命令行与 1.2.0 逐字节相同（回归项）', () => {
+  const withoutLimit = buildAria2Args('https://example.com/a.zip', 'a.zip', 8, true, undefined, undefined)
+  const baseline = buildAria2Args('https://example.com/a.zip', 'a.zip', 8, true)
+  assert.deepEqual(withoutLimit, baseline, '不传限速时不得多出任何参数')
+  assert.equal(
+    withoutLimit.some((a) => a.startsWith('--max-overall-download-limit')),
+    false,
+    '不得凭空出现限速开关',
+  )
+})
+
+test('buildCurlArgs 带宽上限 -> 追加 --limit-rate <字节数>', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip', false, undefined, 131072)
+  const at = args.indexOf('--limit-rate')
+  assert.ok(at >= 0, '必须出现 --limit-rate')
+  assert.equal(args[at + 1], '131072', '限速值必须紧跟开关（curl 的语法是空格分隔）')
+  assert.equal(args[args.length - 1], 'https://example.com/b.zip', 'URL 仍必须排在最后')
+})
+
+test('buildCurlArgs 不带带宽上限 -> 命令行与 1.2.0 逐字节相同（回归项）', () => {
+  const withoutLimit = buildCurlArgs('https://example.com/b.zip', 'b.zip', false, undefined, undefined)
+  const baseline = buildCurlArgs('https://example.com/b.zip', 'b.zip', false)
+  assert.deepEqual(withoutLimit, baseline)
+  assert.equal(withoutLimit.includes('--limit-rate'), false, '不得凭空出现限速开关')
+})

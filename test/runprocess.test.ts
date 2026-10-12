@@ -19,7 +19,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runProcess } from '../src/downloader.js'
+import { describeExitCode, runProcess } from '../src/downloader.js'
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -120,17 +120,64 @@ test('runProcess: Windows 上用 child.kill 得不到信号名 -> 至少带出�
   )
 })
 
-test('runProcess: 预先 abort 且命令不存在 -> 优先报「下载已取消」', async () => {
+test('runProcess: 运行中 abort 的文案只含可执行文件名（绝对路径不得泄漏）', async () => {
+  // close 分支 + 绝对路径：这是 t8 实测泄漏的那条路径（aria2 用绝对路径启动）
+  const controller = new AbortController()
+  const running = runProcess(process.execPath, ['-e', 'setInterval(()=>{}, 200)'], controller.signal)
+  await delay(250)
+  controller.abort()
+  await assert.rejects(running, (err: unknown) => {
+    assert.ok(err instanceof Error)
+    assert.equal(err.message, '下载已取消：node 被 AbortSignal 终止')
+    assert.doesNotMatch(err.message, /node_modules/i)
+    assert.doesNotMatch(err.message, /[A-Za-z]:[\\/]/)
+    assert.doesNotMatch(err.message, /[\\/]/)
+    return true
+  })
+})
+
+test('runProcess: curl 形状的绝对路径 -> 取消文案只出现 curl（不是路径）', async () => {
+  // 为什么单列一条：curl 平时是按裸名字调用的（走 PATH），因此「curl 路径不会被泄漏」
+  // 这件事不会被真实下载路径覆盖到 —— 只有把命令换成绝对路径才检验得到。将来若改成
+  // 用解析出来的绝对路径启动 curl，这条用例就是拦住泄漏的那一道。
   const controller = new AbortController()
   controller.abort()
-  const missing = `definitely-not-a-real-command-${Date.now()}`
+  const missing = path.join(os.tmpdir(), 'curl', 'bin', 'curl.exe')
+  assert.match(missing, /[\\/]/, '前提：这条命令确实是带分隔符的绝对路径')
+  await assert.rejects(runProcess(missing, [], controller.signal), (err: unknown) => {
+    assert.ok(err instanceof Error)
+    assert.equal(err.message, '下载已取消：curl 被 AbortSignal 终止')
+    assert.doesNotMatch(err.message, /[\\/]/)
+    assert.doesNotMatch(err.message, /\.exe/i)
+    return true
+  })
+})
+
+test('runProcess: 预先 abort 且命令不存在 -> 优先报「下载已取消」，且只出现可执行文件名', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  // 故意用一条**绝对路径**、形状与随包 aria2 完全一致：t8 实测过取消文案里曾把
+  // 完整 node_modules 路径漏给用户。这一支走的是 child 'error'（ENOENT + 已 abort），
+  // 与 close 分支是同一个不变量的两处实现，必须各自守住。
+  const missing = path.join(
+    os.tmpdir(),
+    'node_modules',
+    '.pnpm',
+    '@leisureyu+dsh-aria2-win32-x64@1.37.0',
+    'bin',
+    'aria2c.exe',
+  )
+  assert.match(missing, /[\\/]/, '前提：这条命令确实是绝对路径（否则测不到泄漏）')
   await assert.rejects(
     runProcess(missing, [], controller.signal),
     (err: unknown) => {
       assert.ok(err instanceof Error)
       // 关键顺序：abort 状态必须压过底层 ENOENT，否则调用方会拿到误导性的错误
-      assert.match(err.message, /下载已取消/)
-      assert.match(err.message, /AbortSignal/)
+      assert.equal(err.message, '下载已取消：aria2c 被 AbortSignal 终止')
+      // 不变量：用户可见文案里不得出现任何绝对路径
+      assert.doesNotMatch(err.message, /node_modules/i, '不得出现 node_modules')
+      assert.doesNotMatch(err.message, /[A-Za-z]:[\\/]/, '不得出现盘符路径')
+      assert.doesNotMatch(err.message, /[\\/]/, '不得出现路径分隔符')
       assert.equal((err as NodeJS.ErrnoException).code, undefined)
       return true
     },
@@ -191,3 +238,111 @@ async function waitForNumberFile(file: string, timeoutMs: number): Promise<numbe
   }
   throw new Error(`等待 PID 文件超时：${file}`)
 }
+
+/* --------------------- 1.3.0：退出码翻译层（P0-1） --------------------- */
+
+/**
+ * 这一组用例的契约来自 roadmap §1.3 P0-1：
+ * - 退出码 0 不得产生任何文案（调用方据此走 resolve 分支）；
+ * - 已知码给出「原因 + 下一步」；
+ * - 未知码原样保留退出码与 stderr，**不得编造原因**；
+ * - 用户可见文案里不得出现命令的绝对路径。
+ *
+ * 映射表里每个码都引了官方来源（curl manpage 的 Exit codes / aria2 官方手册的
+ * EXIT STATUS），见 `src/downloader.ts` 的 `EXIT_CODE_DESCRIPTIONS` 注释。
+ */
+
+test('describeExitCode: 退出码 0 -> null（正常结束不产生任何文案）', () => {
+  assert.equal(describeExitCode('/usr/bin/curl', 0, null, ''), null)
+  // 即使 stderr 有内容，退出码 0 也不该被翻译成错误
+  assert.equal(describeExitCode('aria2c', 0, null, 'warning: something'), null)
+})
+
+test('describeExitCode: curl 已知码都给「中文原因 + 下一步」', () => {
+  // 至少覆盖 roadmap 点名的 18 / 22 / 28 / 33 / 56
+  for (const code of [18, 22, 28, 33, 56]) {
+    const message = describeExitCode('/usr/bin/curl', code, null, '')
+    assert.ok(message, `curl ${code} 必须有文案`)
+    assert.match(message, /curl 退出码 \d+/, `必须带工具名与退出码：${message}`)
+    assert.match(message, /下一步/, `必须带下一步：${message}`)
+    // 原因部分必须是非空中文说明，而不是只有一个码
+    assert.ok(message.split('\n')[0]!.length > 'curl 退出码 00'.length, `必须说明原因：${message}`)
+  }
+})
+
+test('describeExitCode: aria2 已知码都给「中文原因 + 下一步」', () => {
+  // 至少覆盖 roadmap 点名的 1 / 3 / 9 / 13 / 24
+  for (const code of [1, 3, 9, 13, 24]) {
+    const message = describeExitCode('C:\\bin\\aria2c.exe', code, null, '')
+    assert.ok(message, `aria2 ${code} 必须有文案`)
+    assert.match(message, /aria2c 退出码 \d+/, `必须带工具名与退出码：${message}`)
+    assert.match(message, /下一步/, `必须带下一步：${message}`)
+  }
+})
+
+test('describeExitCode: 未知码原样保留退出码与 stderr，且不编造原因', () => {
+  const message = describeExitCode('/usr/bin/curl', 47, null, 'Maximum (50) redirects followed')
+  assert.ok(message)
+  // 正向断言：退出码与 stderr 都必须在
+  assert.match(message, /curl 退出码 47/)
+  assert.match(message, /Maximum \(50\) redirects followed/)
+  // 不得凭空加「下一步」：我们不知道这个码是什么，编一个下一步就是误导
+  assert.doesNotMatch(message, /下一步/)
+})
+
+test('describeExitCode: 未知码无 stderr 时也不丢退出码', () => {
+  const message = describeExitCode('curl', 99, null, '')
+  assert.equal(message, 'curl 退出码 99')
+})
+
+test('describeExitCode: 用户可见文案里不出现命令的绝对路径', () => {
+  // 断言「目录部分」不出现，而不是「任何斜杠都不许有」—— 文案里的
+  // 「headers / referer」这类正常写法含有斜杠，用通配的斜杠断言会误报。
+  const winPath = 'C:\\Users\\u\\.dsh\\runtimes\\aria2c.exe'
+  const posixPath = '/home/u/.dsh/runtimes/aria2c'
+  const curlPath = '/usr/bin/curl'
+  const win = describeExitCode(winPath, 9, null, '')
+  const posix = describeExitCode(posixPath, 9, null, '')
+  const curlAbs = describeExitCode(curlPath, 22, null, '')
+  for (const [label, message, leaked] of [
+    ['win', win, 'C:\\Users\\u\\.dsh\\runtimes\\'],
+    ['posix', posix, '/home/u/.dsh/runtimes/'],
+    ['curl', curlAbs, '/usr/bin/'],
+  ] as const) {
+    assert.ok(message)
+    assert.ok(!message.includes(leaked), `${label}：不得出现路径的目录部分（实际：${message}）`)
+    assert.ok(!message.includes(winPath) && !message.includes(posixPath) && !message.includes(curlPath))
+  }
+  // 但仍必须能看出是哪个工具
+  assert.match(win!, /^aria2c 退出码 9/)
+  assert.match(posix!, /^aria2c 退出码 9/)
+  assert.match(curlAbs!, /^curl 退出码 22/)
+})
+
+test('describeExitCode: 被信号终止时带出信号名', () => {
+  const message = describeExitCode('/usr/bin/curl', null, 'SIGKILL', '')
+  assert.ok(message)
+  assert.match(message, /（信号 SIGKILL）/)
+  // 退出码为 null 时不得拼出「退出码 null」这种给用户看的东西
+  assert.doesNotMatch(message, /null/)
+})
+
+test('runProcess: 退出码 0 逐字节不变（仍 resolve，不产生文案）', async () => {
+  await assert.doesNotReject(runProcess(process.execPath, ['-e', 'process.exit(0)']))
+})
+
+test('runProcess: 已知 curl 退出码经真实子进程产出「下一步」（端到端）', async () => {
+  // 用 node 扮演 curl：进程名不可控，所以这里断言的是**未知码路径**在真实
+  // 子进程里同样保留 stderr 与退出码 —— 映射表本身由上面的纯函数用例覆盖。
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', 'process.stderr.write("boom"); process.exit(42)']),
+    (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /退出码 42/)
+      assert.match(err.message, /stderr:\nboom/)
+      assert.match(err.message, /node/, '工具名必须是可执行文件名，而不是绝对路径')
+      assert.doesNotMatch(err.message, /[\\/]/, '不得出现路径分隔符')
+      return true
+    },
+  )
+})

@@ -13,14 +13,30 @@
 export interface ParsedSummary {
   /** 进度百分比 0-100 */
   pct: number
+  /**
+   * 实际有效连接数（摘要行里的 `CN:`）。
+   *
+   * 为什么值得单独取出来（1.3.0 新增，纯观测）：`-x/-s` 是**请求**的并发数，
+   * `CN` 才是 aria2 **实际**用起来的连接数。两者不等时，说明瓶颈不在本插件的
+   * 并发档位（分片数不够、服务器限并发、镜像不给 Range 等）——这是「为什么这次
+   * 没跑满」唯一可观测的答案。此前正则已经匹配并消费了 `CN:\d+`，却没有捕获组，
+   * 于是这个数字每次都被丢掉：数据一直是免费的，只是没留下。
+   *
+   * 1.3.0 只做观测：调用方（`src/downloader.ts` 的进度回调）不消费它，
+   * 因此不影响任何下载行为。
+   */
+  cn: number
   /** 速度字符串，规范化为如 "10MiB/s" */
   spd: string
   /** 剩余时间字符串，如 "2s"、"4m51s"；临近完成 aria2 可能省略，故可选 */
   eta?: string
 }
 
+// 捕获组顺序：1=pct，2=CN，3=速度，4=ETA。
+// CN 的捕获组必须插在速度**之前**——它在摘要行里本来就在 DL/SPD 前面，
+// 这样 m[3]/m[4] 仍然分别是速度与 ETA，读取处的下标含义不会被搅乱。
 const SUMMARY_RE =
-  /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:\d+\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?B(?:\/s|s)?)(?:\s+ETA:(\S+?))?\]\s*$/i
+  /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:(\d+)\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?B(?:\/s|s)?)(?:\s+ETA:(\S+?))?\]\s*$/i
 
 /**
  * 按 \r\n / \r / \n 切分原始文本。
@@ -48,7 +64,10 @@ export function parseAria2Summary(line: string): ParsedSummary | null {
   const pct = parseInt(m[1], 10)
   if (!Number.isFinite(pct)) return null
 
-  return { pct, spd: normalizeSpeed(m[2]), eta: m[3] }
+  // CN 的捕获组是 `(\d+)`，至少一位数字，parseInt 必然得到有限整数
+  const cn = parseInt(m[2], 10)
+
+  return { pct, cn, spd: normalizeSpeed(m[3]), eta: m[4] }
 }
 
 /**

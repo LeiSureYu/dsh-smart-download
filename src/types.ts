@@ -2,17 +2,96 @@
  * smart_download 工具的参数与返回结果类型定义
  */
 
-/** 工具入参 */
-export interface SmartDownloadArgs {
+/** 请求头表：头名 -> 头值（头名已归一化为 `X-Foo-Bar` 形式） */
+export type RequestHeaders = Record<string, string>
+
+/**
+ * 批量下载里的一个条目。
+ *
+ * 字段与单条目调用**同构**（`url` 必填，`output` / `sha256` 可选），这样模型把
+ * 单条调用的写法直接塞进数组即可，不需要记第二套参数名。其余单条目参数
+ * （mirror / userAgent / referer / headers / maxBandwidth）是**整批共享**的，
+ * 因此不在这里重复声明 —— 每条一个镜像会立刻变成「同一次调用里两种真相」。
+ */
+export interface DownloadTarget {
   /** 待下载文件的 URL */
   url: string
+  /** 该条目的输出文件路径，可选；缺省时按 URL 推导 */
+  output?: string
+  /** 该条目的期望 SHA-256，可选；逐条独立校验 */
+  sha256?: string
+}
+
+/** 工具入参 */
+export interface SmartDownloadArgs {
+  /**
+   * 待下载文件的 URL。
+   *
+   * 与 `targets` **二选一**：单条目走这一条（行为与 1.2.0 逐字段相同），
+   * 批量走 `targets`。两者同时给出会被拒绝，而不是「以某一个为准」——
+   * 静默忽略其中一边会让调用方以为两边都下了。
+   */
+  url?: string
   /** 输出文件路径，可选；缺省时根据 URL 自动推导文件名 */
   output?: string
   /**
+   * 一次调用内批量下载的条目列表，可选；与 `url` 二选一。
+   *
+   * 为什么是数组而不是多次调用：DSH 的 `smart_download` 未声明
+   * `isConcurrencySafe`，执行模式是 exclusive —— 同一时刻只有一个调用在跑，
+   * 分多次调用只能串行等待。批量让多条在同一批内并行（批内并发窗口见
+   * `batchWindow()`），且共享一份入参校验与进度上报。
+   */
+  targets?: DownloadTarget[]
+  /**
+   * 整批共享的总带宽上限，可选。接受正整数 + 可选单位后缀
+   * （`K` / `M` / `G`，按 1024 进制），例如 `"2M"`、`"500K"`、`"1500000"`。
+   *
+   * 语义是**一批内所有任务合计**的上限：分给批内并发跑的每个条目一份
+   * （总量 ÷ 批内并发数），因此一批的总吞吐不会超过它。单条目调用时就是那一条
+   * 的上限。非法值在任何请求发出之前直接抛错。
+   */
+  maxBandwidth?: string
+  /**
+   * 每个条目的超时（毫秒），可选；缺省表示**不设超时**。
+   *
+   * 取值范围 `1000`..`1800000`（下限挡「把正常下载误杀」，上限是保守取值，见下）。
+   * 为什么需要它：路线 A 是同步调用，一个卡死的条目会让整批一直不返回。
+   * 为什么上限放在 30 分钟：足够覆盖常见的大文件（1GB @ 1MB/s ≈ 17 分钟），而更长的
+   * 等待说明应当改用「先返回、后台继续」的形态 —— 那个形态明确不做；同时也不设更激进的
+   * 默认值，否则会把「慢但正常」的大文件判死。
+   *
+   * 超时只终止它自己这一条：批量里其余条目继续跑，已完成条目的结果不会被改判，
+   * 且超时记 `failed` 而不是 `cancelled`（用户并没有按取消）。非法值在任何请求
+   * 发出之前抛错；解释器见 src/index.ts 的 parseTimeoutMs / finishAborted。
+   */
+  timeoutMs?: number
+  /**
    * 镜像前缀，可选；提供后把原始 URL 拼到该前缀后面再下载。
    * 例如 `https://gh-proxy.com/` + 原始 GitHub 下载地址。
+   * 传字面量 `auto` 时改为自动模式：从内置候选表里挑一个**经证实与原地址
+   * 同源**的镜像（见 src/auto-mirror.ts），仅对 GitHub 地址生效。
    */
   mirror?: string
+  /**
+   * 期望的 SHA-256 摘要，可选；下载完成后逐字节核对。
+   *
+   * 用法就是「把官方文档里写着的那个摘要粘进来」，接受裸十六进制、
+   * `sha256:<hex>` / `SHA256(<hex>)` 前缀写法，以及 SRI 的 `sha256-<base64>`。
+   * 长度校验只能证明字节数对，证明不了内容是同一份；传了摘要才挡得住
+   * 「等长但内容不同」。摘要不合法会在下载开始前直接拒绝。
+   */
+  sha256?: string
+  /** `User-Agent`，可选；探测与下载使用同一个值 */
+  userAgent?: string
+  /** `Referer`，可选；部分站点/镜像按它放行 */
+  referer?: string
+  /**
+   * 任意附加请求头，可选；键为头名、值为字符串。
+   * 与 `userAgent` / `referer` 同源合并，命名参数优先。
+   * `Range` / `Accept-Encoding` / `Host` 等由插件自身管理的头不允许覆盖。
+   */
+  headers?: Record<string, unknown>
 }
 
 /** 下载使用的底层方式 */
@@ -38,12 +117,94 @@ export interface SmartDownloadResult {
    * 为什么单独开一个字段而不是复用 `reason`：`reason` 讲的是「为什么选了这种
    * 下载方式」，这里讲的是「为什么这次没验完整性」，两件事会被同时看到时就
    * 互相顶掉了。跳过校验的两种情形见 `src/verify.ts` 的 `VerifySkipReason`。
+   *
+   * 传了 `sha256` 且校验通过时该字段**不出现** —— 内容哈希是比长度更强的
+   * 证明，此时再报「未做字节数校验」只会误导。证明本身由 `sha256` 承载。
    */
   verifySkipped?: string
+  /**
+   * 实际算出的 SHA-256 摘要（小写十六进制）。
+   * 仅在调用方传了 `sha256` 且校验通过时出现 —— 它的存在就是「内容已核对」。
+   */
+  sha256?: string
   /** 实际请求的地址（启用镜像时为「镜像前缀 + 原始 URL」，否则等于原始 URL） */
   requestedUrl: string
   /** 是否走了镜像加速 */
   mirrored: boolean
+  /** 实际使用的镜像前缀（`mirrored` 为真时出现） */
+  mirror?: string
+  /**
+   * 本次**没有**使用镜像的说明（请求了自动镜像但未启用时出现）。
+   * 与 `verifySkipped` 同理：自动镜像静默失效时，调用方必须能看见原因。
+   */
+  mirrorSkipped?: string
+}
+
+/**
+ * 批量下载里**单个条目**的结果。
+ *
+ * 为什么单独一套字段而不是直接复用 `SmartDownloadResult`：批量必须能表达
+ * 「这条没下成」和「这条被取消」，而 `SmartDownloadResult` 里 `success: false`
+ * 只覆盖「失败」一种终态，取消与失败混在一起会让用户以为下载坏了（这正是
+ * 1.0.0 在单条目路径上修过的那个坑，批量不能把它带回来）。
+ *
+ * 字段是**扁平**的：output schema 用 `additionalProperties: false` 校验，嵌套
+ * 对象只会让「哪条缺了什么」更难核对。
+ */
+export interface BatchItemResult {
+  /** 该条目请求的原始 URL（逐条可辨认） */
+  url: string
+  /** 该条目最终的目标路径（按 output 或 URL 推导，失败时也能看出本该落到哪） */
+  output: string
+  /** 该条目是否下载成功 */
+  success: boolean
+  /** 是否因整批取消而未完成（与失败区分；成功条目不会带上它） */
+  cancelled?: boolean
+  /** 失败 / 取消原因（逐条可见，失败条目必有） */
+  error?: string
+  /** 实际使用的下载方式（有结论时出现） */
+  method?: DownloadMethod
+  /** 落盘路径（成功时与 output 相同，显式给出便于逐条核对） */
+  path?: string
+  /** 文件大小（探测到时出现） */
+  size?: number
+  /** 是否发生了 aria2 → curl 回退 */
+  fellback?: boolean
+  /** 回退或不支持多线程的原因 */
+  reason?: string
+  /** 未做字节数校验的说明（跳过校验时出现） */
+  verifySkipped?: string
+  /** 校验通过的 SHA-256（传了 sha256 且通过时出现） */
+  sha256?: string
+  /** 实际请求的地址（启用镜像时与 url 不同） */
+  requestedUrl?: string
+  /** 是否走了镜像 */
+  mirrored?: boolean
+  /** 实际使用的镜像前缀 */
+  mirror?: string
+  /** 未使用自动镜像的说明 */
+  mirrorSkipped?: string
+}
+
+/**
+ * 批量下载的返回值：逐条结果 + 汇总计数。
+ *
+ * 为什么**不**在部分失败时抛错（用户决策 D4=②）：抛错会把已成功条目的结果
+ * 一起吞掉，而调用方最需要的恰恰是「哪几条成了、哪几条没成」。因此批量路径
+ * 永远正常返回，成败由 `results` 与计数表达；只有「入参本身不合法」（url 与
+ * targets 同时给出、超过批量上限、带宽值非法…）才在发起请求之前抛错。
+ */
+export interface BatchDownloadResult {
+  /** 本批次的批次 ID（与两条进度轨道里写的是同一个值） */
+  batch: string
+  /** 逐条结果，顺序与入参 `targets` 一致 */
+  results: BatchItemResult[]
+  /** 成功条数 */
+  succeeded: number
+  /** 失败条数（不含取消） */
+  failed: number
+  /** 取消条数（整批取消时未完成的那些条目） */
+  cancelled: number
 }
 
 /** URL 探测结果 */
@@ -83,6 +244,12 @@ export interface ProbeOptions {
   threshold?: number
   /** 单次 HTTP 请求超时时间（毫秒），默认 5000ms */
   timeout?: number
+  /**
+   * 附加请求头（UA / Referer / 自定义），与下载时使用**同一套**。
+   * 见 src/headers.ts 文件头：两边不一致会让探测结论与真实下载错位。
+   * 探测自身强制的 `accept-encoding: identity` 永远最后合并，覆盖不掉。
+   */
+  headers?: RequestHeaders
 }
 
 /**
@@ -163,6 +330,18 @@ export interface ProgressRecord {
   spd?: string
   /** 剩余时间字符串，如 "4m51s" */
   eta?: string
+  /**
+   * 批次 ID，可选（1.3.0 新增）：同一次 `smart_download` 调用里的所有条目共享
+   * 同一个值，单条目调用也会有一个**唯一**的值。
+   *
+   * 为什么必须有这个字段：批量调用会一次产生多条进度记录，而读取端（面板 /
+   * `download_status`）只能按时间倒序看到一堆散点，无法判断「这几条是同一次
+   * 调用」——分组信息只存在调用方的上下文里，落盘时丢掉就再也补不回来。
+   *
+   * 它**只是分组标签**：不参与任何执行/并发/去重决策，读取端拿不到它时行为与
+   * 之前完全相同（老进度文件缺该字段是正常情况，不是损坏）。
+   */
+  batch?: string
 }
 
 /** 进度状态，取值与 dsh-task-progress 的协议一致 */

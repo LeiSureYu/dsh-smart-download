@@ -42,13 +42,32 @@ export interface TaskStatus {
   spd: string
   /** 剩余时间字符串，如 "4m51s" */
   eta: string
+  /**
+   * 批次 ID（1.3.0 新增）。同一次 `smart_download` 调用产生的条目共享同一个值，
+   * 读取端据此把散点还原成「一次调用」。
+   *
+   * 老进度文件没有该字段时收敛成**空串**，而不是让整条记录读不出来：升级前的
+   * 历史记录必须照常可读，这也是「可选字段」这条硬回归项的落点。空串同时是
+   * schema 允许的值（`type: string`），不会让 download_status 的返回校验失败。
+   */
+  batch: string
   /** 最近更新时间戳（毫秒） */
   updatedAt: number
 }
 
 /** download_status 的返回结构 */
 export interface DownloadStatusSnapshot {
-  /** 是否读取成功（目录不可读时为 false，tasks 为空数组） */
+  /**
+   * 是否至少有一个目录被成功扫描。
+   *
+   * 语义收紧（1.3.0）：此前恒为 `true`，于是「目录读不到」与「确实没有任务」
+   * 在返回结构里**完全同形** —— 一次读不到任何东西的查询看起来和一次干净的
+   * 空查询一模一样。现在只有**两个目录都读不到**时才为 `false`。
+   *
+   * 为什么不是「任一目录读不到就 false」：没有会话上下文时轨道一目录本就
+   * 定位不到（`resolveTaskProgressDir` 返回 `null`），那是**正常的**
+   * 单轨模式而不是故障，报 false 会把正常调用判成失败。
+   */
   ok: boolean
   /** 轨道一目录（JSONL）；无法定位时为 `''`（工具 schema 要求 string） */
   taskDir: string
@@ -58,6 +77,15 @@ export interface DownloadStatusSnapshot {
   total: number
   /** 任务快照，按 updatedAt 倒序 */
   tasks: TaskStatus[]
+  /**
+   * 扫描失败的目录路径列表；**只在真的有目录读不到时出现**。
+   *
+   * 为什么做成可选字段而不是恒在的空数组：`tasks: []` 本身无法区分
+   * 「读不到」与「确实没有任务」，而两者对用户的意义完全相反 —— 前者是插件
+   * 出问题，后者是一切正常。字段的**存在与否**就是那个区分信号，所以正常路径
+   * 上它必须整个不出现（也让老读取端拿到逐字段相同的结构）。
+   */
+  scanFailedDirs?: string[]
 }
 
 /** 默认返回条数 */
@@ -122,13 +150,27 @@ function statusFrom(pct: number, msg: string, state?: unknown): TaskStatus['stat
   return 'running'
 }
 
-/** 收集一个目录下的任务快照（.jsonl 或 .json） */
-function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskStatus> {
+/**
+ * 收集一个目录下的任务快照（.jsonl 或 .json）。
+ *
+ * @param dir 待扫描目录
+ * @param ext 该目录下的进度文件后缀
+ * @param onScanError 目录读不到时回调（收到目录路径）。**必须由调用方透出**：
+ *   此前这里静默 `return out`，于是「权限不足 / 路径不存在 / 磁盘故障」与
+ *   「目录里确实没有任务」产出同一个空 Map —— 一次失败的查询看起来和一次干净的
+ *   空查询完全一样，正是本项目反复出问题的静默失败形态。
+ */
+function collectFromDir(
+  dir: string,
+  ext: '.jsonl' | '.json',
+  onScanError?: (dir: string) => void,
+): Map<string, TaskStatus> {
   const out = new Map<string, TaskStatus>()
   let entries: string[]
   try {
     entries = fs.readdirSync(dir)
   } catch {
+    onScanError?.(dir)
     return out
   }
 
@@ -158,6 +200,8 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
         status: statusFrom(pct, msg, rec.state),
         spd: str(rec.spd),
         eta: str(rec.eta),
+        // 老记录没有 batch：`str()` 收敛成空串，解析结果与 1.2.0 逐字段相同
+        batch: str(rec.batch),
         updatedAt: mtimeMs,
       })
       continue
@@ -190,6 +234,8 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
       status,
       spd: str(rec.speed),
       eta: str(rec.eta),
+      // 与轨道一同理：老任务文件没有 batch 时为 ''
+      batch: str(rec.batch),
       updatedAt: Number.isFinite(updatedRaw) && updatedRaw > 0 ? updatedRaw : mtimeMs,
     })
   }
@@ -200,7 +246,8 @@ function collectFromDir(dir: string, ext: '.jsonl' | '.json'): Map<string, TaskS
 /**
  * 读取下载任务进度快照。
  *
- * 只做只读扫描；两条轨道任一不可用都跳过，整体仍返回 ok=true（只要扫到任意任务）。
+ * 只做只读扫描；两条轨道任一不可用都跳过，**但跳过不再静默** ——
+ * 读不到的目录会被收进 `scanFailedDirs`，两个都读不到时 `ok` 为 `false`。
  *
  * @param limit 最多返回多少个任务，默认 10
  * @param taskId 指定任务 ID 时只返回该任务
@@ -214,16 +261,32 @@ export function readDownloadStatus(
   const taskDir = resolveTaskProgressDir(session)
   const downloadDir = resolveDownloadProgressDir()
 
+  const scanFailedDirs: string[] = []
+  const noteScanError = (dir: string): void => {
+    scanFailedDirs.push(dir)
+  }
+
   const merged = new Map<string, TaskStatus>()
   // 先铺轨道二（JSON，含明确的 status/updatedAt），再用轨道一（JSONL，含 msg/spd/eta）覆盖补充
-  for (const [id, task] of collectFromDir(downloadDir, '.json')) merged.set(id, task)
+  for (const [id, task] of collectFromDir(downloadDir, '.json', noteScanError)) {
+    merged.set(id, task)
+  }
   if (taskDir) {
-    for (const [id, task] of collectFromDir(taskDir, '.jsonl')) {
+    for (const [id, task] of collectFromDir(taskDir, '.jsonl', noteScanError)) {
       const existing = merged.get(id)
-      // 轨道一的 name 可能为空（老版本进度文件），此时保留轨道二给出的名字
+      // 轨道一的 name / batch 可能为空（老版本进度文件没有这些字段），此时保留
+      // 轨道二给出的值：与 name 完全同一个理由 —— 让「老文件 + 新文件」合并后
+      // 仍然拿得到较新的那个轨道已经写下来的信息。
       merged.set(
         id,
-        existing ? { ...existing, ...task, name: task.name || existing.name } : task,
+        existing
+          ? {
+              ...existing,
+              ...task,
+              name: task.name || existing.name,
+              batch: task.batch || existing.batch,
+            }
+          : task,
       )
     }
   }
@@ -238,7 +301,21 @@ export function readDownloadStatus(
       : DEFAULT_STATUS_LIMIT
   tasks = tasks.slice(0, cap)
 
+  // 只有「两个目录都读不到」才判失败：那时调用方拿到的空列表是**无信息**的，
+  // 必须能与「扫过了、确实没有任务」区分开。没有会话上下文时 taskDir 为 null
+  // （轨道一压根不参与扫描），因此不构成失败 —— 那是正常的单轨模式。
+  const scannedDirs = taskDir ? 2 : 1
+  const ok = scanFailedDirs.length < scannedDirs
+
   // taskDir 可能是 null（没有会话上下文且未设 DSH_PROGRESS_DIR）；schema 要求
   // string，因此统一收敛成空串，避免 download_status 因类型不合法而报错。
-  return { ok: true, taskDir: taskDir ?? '', downloadDir, total, tasks }
+  // scanFailedDirs 只在有失败时出现：正常路径上返回结构与收紧前逐字段相同。
+  return {
+    ok,
+    taskDir: taskDir ?? '',
+    downloadDir,
+    total,
+    tasks,
+    ...(scanFailedDirs.length > 0 ? { scanFailedDirs } : {}),
+  }
 }

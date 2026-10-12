@@ -16,7 +16,7 @@ macOS **能用但不会加速** —— 插件装得上、下得动，只是永�
 | Windows | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-win32-arm64` | 第三方 ARM64 构建（官方无此架构） |
 | Linux | x64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-x64` | musl 静态构建，任意发行版可用 |
 | Linux | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-arm64` | 同上 |
-| macOS | x64 / arm64 | ⚠️ 走 curl | ❌ | — | 缺二进制子包，见下 |
+| macOS | x64 / arm64 | ⚠️ 走 curl | ❌ | — | 无可信来源的二进制子包，见下 |
 
 **「插件可用」与「多线程可用」是两件事。** 每个支持平台对应一个独立 npm 子包，
 子包用 `os` / `cpu` 字段声明适用平台。包管理器在不匹配的平台上会**直接跳过安装**，
@@ -28,18 +28,65 @@ macOS **能用但不会加速** —— 插件装得上、下得动，只是永�
 
 ### macOS 为什么搁置
 
-不是兼容性问题，是**缺一个可用的 aria2 二进制**。本项目只分发自己验证过哈希的二进制
-（见 README 的「第三方组件声明」），而 macOS 上没有找到满足条件的来源：
+不是兼容性问题，是**缺一个可信来源的 aria2 二进制**。本项目只分发自己验证过哈希的二进制
+（见 README 的「第三方组件声明」）。这一条在 1.3 被**逐个来源重新核对过**（2026-10-12），
+结论不变、证据更强：**卡点是「来源不可信」，不是「没有二进制」**。
 
-- aria2 官方不发布 macOS 二进制；
-- 现有的第三方 macOS 构建没有可核对的发布哈希，且需要按 Intel / Apple Silicon 分包；
-- Homebrew 的 `aria2` 属于用户环境依赖，不能假设存在，也不该由插件代管。
+| 说法 | 是否成立 |
+| --- | --- |
+| 「没有 macOS 二进制」 | ❌ 不成立。存在提供 macOS x64 与 arm64 的 aria2 1.37.0 并公布 SHA256 的第三方候选（见下） |
+| 「没有可核对哈希的 macOS 二进制」 | ❌ 也不成立。该候选的 `.sha256` 文件与 GitHub `digest` 字段两处一致（已复现） |
+| 「没有**可信**的 macOS 二进制来源」 | ✅ **成立** —— 哈希只证明「传输是否被篡改」，不证明「来源可信、二进制由官方源码构建」 |
 
-自建 macOS 二进制并验证哈希在当前条件下做不了，因此如实搁置。**没有硬做的版本。**
+**为什么「有哈希」仍然不够**：哈希解决的是传输完整性，不解决来源可信性与「二进制 ↔ 源码」
+的可核验绑定。本项目的四个既有子包（官方发布包 / 两个第三方静态构建）都在这一点上说得清，
+唯一带哈希的 macOS 候选说不清。
+
+**唯一带哈希的候选：`FerroDownload/aria2-static-builds`**（来源：
+<https://api.github.com/repos/FerroDownload/aria2-static-builds/releases?per_page=3>，核对时间 2026-10-12）
+
+它确实提供 macOS x64（4,056,152 B）与 arm64（4,221,960 B）的 aria2 1.37.0，并公布 SHA256。
+被否的原因是哈希之外的三条，全部实测：
+
+1. **发布方可信度极低**：仓库创建于 2026-06-20、`stargazers_count=0`、无许可证声明、
+   无描述、只有 1 次 release。一个刚创建、零关注、无许可证的个人仓库，作为**随 npm 包
+   分发的可执行文件**来源，够不上本项目对 Windows arm64（`minnyres`）与 Linux（`abcfy2`）
+   来源所隐含的标准。
+2. **二进制与源码之间没有可核验的绑定**：GitHub 的构建证明
+   （`GET /repos/FerroDownload/aria2-static-builds/attestations/<digest>`）对这两个摘要
+   **均返回 404**。也就是说没有任何签名证明「这个二进制确实由那份 workflow 从官方源码
+   构建出来」。工作流本身也未 pin 源码 commit、依赖 `brew install` 当时最新版本，
+   无法重跑一次构建并比对哈希。
+3. **产物形态不利**：macOS 无法完全静态链接，因此这两个文件是动态链接的（HTTPS 走
+   `--with-appletls`），仍依赖宿主系统库版本，与现有四个子包的形态不一致。
+
+其余来源逐个核对的结果（全部 2026-10-12，来源清单与逐条证据见
+[PLAN-P2-PLATFORM.md](./PLAN-P2-PLATFORM.md) §A.2 与附录 C）：
+
+- aria2 官方最后一次发 macOS 包是 `release-1.35.0`（2019-10-06，仅 x86_64），且
+  **官方从未为 macOS 包提供摘要**（`body` 无校验和清单、资产 `digest` 为空）；
+  最新版 `release-1.37.0`（2023-11-15）的 6 个资产无 darwin。
+  来源：<https://api.github.com/repos/aria2/aria2/releases/tags/release-1.35.0>
+- 现用的 Linux 来源 `abcfy2/aria2-static-build` 与社区最知名的 `dmesg00/aria2-static-builds`
+  （735★）**都不产 darwin**。来源：
+  <https://api.github.com/repos/abcfy2/aria2-static-build/releases?per_page=4>、
+  <https://api.github.com/repos/dmesg00/aria2-static-builds>
+- Homebrew 的 `aria2` 有 SHA256，但 bottle **只有 arm64 macOS**（无任何 `x86_64_*`），
+  且是动态链接带 5 个依赖（`c-ares, libssh2, openssl@4, sqlite, gettext`），属用户环境
+  依赖。来源：<https://formulae.brew.sh/api/formula/aria2.json>
+
+自建 macOS 二进制技术上存在（GitHub 官方 runner 同时提供 x64 与 arm64 的 macOS 镜像，
+来源：<https://github.com/actions/runner-images/blob/main/README.md>，核对时间 2026-10-12），
+但那是**新增长期维护负担**而不是「补个子包」（runner 标签有生命周期：`macos-14` 已进入
+废弃流程，见 <https://github.com/actions/runner-images/issues/13518>），且两条前置条件
+未确证，1.3 内不做。因此如实搁置。**没有硬做的版本。**
 在 macOS 上插件保持可用、行为可预测：所有下载走 `curl`，路径与校验逻辑与其他平台一致。
 
 如果后续补齐了 macOS 子包，只需要往 `ARIA2_TARGETS`（`src/downloader.ts`）加
 `darwin-x64` / `darwin-arm64` 两项并发布对应子包，其余代码不用改。
+
+**本插件不支持 FTP / SFTP / BitTorrent**，理由见 README「权限说明」与
+[SECURITY.md](./SECURITY.md)「已知边界」。
 
 ## DSH 与运行时版本
 

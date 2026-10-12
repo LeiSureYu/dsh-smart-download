@@ -117,6 +117,78 @@ test('轨道二 JSON：解析 progress/status/updatedAt', () => {
   })
 })
 
+/* ---------------- 1.3.0：批次 ID（P0-5 的读取端） ---------------- */
+
+test('批次 ID：两条轨道都能读出（P0-5 贯通四层）', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    writeJsonl(taskDir, 'dl-batch-1', [
+      { v: 1, task: 'dl-batch-1', pct: 100, msg: '下载完成', state: 'done', batch: 'b-777' },
+    ])
+    writeJson(downloadDir, 'dl-batch-2', {
+      id: 'dl-batch-2',
+      name: 'x.zip',
+      status: 'completed',
+      progress: 1,
+      batch: 'b-888',
+    })
+    const snap = readDownloadStatus()
+    const byId = new Map(snap.tasks.map((t) => [t.id, t]))
+    assert.equal(byId.get('dl-batch-1')?.batch, 'b-777', '轨道一的批次必须被读出')
+    assert.equal(byId.get('dl-batch-2')?.batch, 'b-888', '轨道二的批次必须被读出')
+  })
+})
+
+test('批次 ID：老进度文件缺该字段 -> 空串，且 status/pct/msg 解析结果不变（硬回归项）', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 1.2.0 及更早写下的记录：没有 batch 字段，其它字段照旧
+    writeJsonl(taskDir, 'dl-old', [{ v: 1, task: 'dl-old', pct: 30, msg: '失败: 连接超时' }])
+    writeJson(downloadDir, 'dl-old-json', {
+      id: 'dl-old-json',
+      name: 'old.zip',
+      status: 'failed',
+      progress: 0.3,
+    })
+    const snap = readDownloadStatus()
+    const byId = new Map(snap.tasks.map((t) => [t.id, t]))
+
+    const fromJsonl = byId.get('dl-old')
+    assert.ok(fromJsonl)
+    assert.equal(fromJsonl.batch, '', '缺字段必须是空串（schema 要求 string）')
+    // 解析结果一个字都不能变
+    assert.equal(fromJsonl.pct, 30)
+    assert.equal(fromJsonl.msg, '失败: 连接超时')
+    assert.equal(fromJsonl.status, 'failed')
+
+    const fromJson = byId.get('dl-old-json')
+    assert.ok(fromJson)
+    assert.equal(fromJson.batch, '')
+    assert.equal(fromJson.pct, 30)
+    assert.equal(fromJson.status, 'failed')
+    assert.equal(fromJson.name, 'old.zip')
+  })
+})
+
+test('批次 ID：一条轨道缺该字段时，合并结果保留另一条轨道写下的值', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 轨道二（较新）写了批次；轨道一（老写入端）没有 —— 合并后不得把批次丢掉
+    writeJson(downloadDir, 'dl-merge', {
+      id: 'dl-merge',
+      name: 'm.zip',
+      status: 'running',
+      progress: 0.5,
+      batch: 'b-merge',
+    })
+    writeJsonl(taskDir, 'dl-merge', [
+      { v: 1, task: 'dl-merge', pct: 50, msg: '下载中（aria2）' },
+    ])
+    const snap = readDownloadStatus()
+    const task = snap.tasks[0]
+    assert.ok(task)
+    assert.equal(task.batch, 'b-merge', '轨道一没有批次时应保留轨道二的')
+    assert.equal(task.msg, '下载中（aria2）', '其余字段仍由轨道一覆盖')
+  })
+})
+
 test('同一任务两条轨道都有 -> 合并，JSONL 的 msg/速度补充上去', () => {
   withDirs(({ taskDir, downloadDir }) => {
     writeJson(downloadDir, 'dl-both', {
@@ -212,15 +284,140 @@ test('字符串字段永不返回 undefined（schema 要求 string）', () => {
   })
 })
 
-test('目录不存在 -> 静默跳过，仍返回 ok=true', () => {
+/* ---------------- 1.3.0：区分「读不到」与「没有任务」 ---------------- */
+
+test('目录不存在 -> 读失败被显式记录（不再与「没有任务」同形）', () => {
   const savedTask = process.env.DSH_PROGRESS_DIR
   const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
   process.env.DSH_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-a')
   process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-b')
   try {
     const snap = readDownloadStatus()
-    assert.equal(snap.ok, true)
+    // 两个目录都读不到 -> 空列表是「无信息」的，必须判为失败
+    assert.equal(snap.ok, false, '两个目录都读不到时 ok 必须为 false')
     assert.deepEqual(snap.tasks, [])
+    // 正向断言：必须报出**具体是哪些目录**读不到，而不是只给一个 false
+    assert.deepEqual(
+      snap.scanFailedDirs?.slice().sort(),
+      [path.join(tmpdir(), 'dsh-no-such-dir-a'), path.join(tmpdir(), 'dsh-no-such-dir-b')].sort(),
+      '必须列出两个读失败的目录路径',
+    )
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+  }
+})
+
+test('只有一个目录读不到 -> ok 仍为 true，但 scanFailedDirs 报出那一个', () => {
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  const downloadDir = tempDir()
+  process.env.DSH_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-c')
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    writeJson(downloadDir, 'dl-half', { id: 'dl-half', status: 'running', progress: 0.5 })
+    const snap = readDownloadStatus()
+    // 关键：一个目录读得到时，结论仍然可信 —— 不能因为另一半失败就把整体判失败
+    assert.equal(snap.ok, true, '仍有一个目录被成功扫描时不得判整体失败')
+    assert.equal(snap.total, 1, '可读目录里的任务必须照常返回')
+    assert.deepEqual(snap.scanFailedDirs, [path.join(tmpdir(), 'dsh-no-such-dir-c')])
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(downloadDir, { recursive: true, force: true })
+  }
+})
+
+test('回归：目录读得到但确实为空 -> 返回结构与 1.2.0 逐字段相同（无 scanFailedDirs 键）', () => {
+  withDirs(() => {
+    const snap = readDownloadStatus()
+    assert.equal(snap.ok, true, '干净的空目录是正常状态，不得判失败')
+    assert.deepEqual(snap.tasks, [])
+    // 关键回归断言：正常路径上这个键必须**整个不出现**，否则老读取端会看到
+    // 一个多余字段，而「有键」正是「读不到」的信号本身
+    assert.equal(Object.hasOwn(snap, 'scanFailedDirs'), false, '正常路径不得出现 scanFailedDirs')
+    assert.deepEqual(
+      Object.keys(snap).sort(),
+      ['downloadDir', 'ok', 'taskDir', 'tasks', 'total'],
+      '正常路径的字段集合必须与 1.2.0 一致',
+    )
+  })
+})
+
+test('无会话上下文时 taskDir 为 null -> 不构成扫描失败（正常的单轨模式）', () => {
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  const downloadDir = tempDir()
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    const snap = readDownloadStatus()
+    // 轨道一压根不参与扫描（定位不到），不该被算成「读失败」
+    assert.equal(snap.ok, true, '没有会话上下文是正常状态，不是故障')
+    assert.equal(Object.hasOwn(snap, 'scanFailedDirs'), false)
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(downloadDir, { recursive: true, force: true })
+  }
+})
+
+test('扫描失败时仍返回 string 字段（schema 要求 string，不得因失败漏字段）', () => {
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  process.env.DSH_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-d')
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-e')
+  try {
+    const snap = readDownloadStatus()
+    assert.equal(typeof snap.taskDir, 'string')
+    assert.equal(typeof snap.downloadDir, 'string')
+    assert.equal(typeof snap.ok, 'boolean')
+    assert.equal(snap.total, 0)
+    assert.ok(Array.isArray(snap.scanFailedDirs))
+    for (const dir of snap.scanFailedDirs ?? []) {
+      assert.equal(typeof dir, 'string', 'scanFailedDirs 的元素必须是 string')
+    }
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+  }
+})
+
+test('向后兼容：老读取端只取已知字段时忽略 scanFailedDirs 不报错', () => {
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  process.env.DSH_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-f')
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(tmpdir(), 'dsh-no-such-dir-g')
+  try {
+    const snap = readDownloadStatus()
+    // 模拟一个只认识 1.2.0 字段的读取端：解构已知字段 + 走一遍 JSON 往返
+    const legacyView = (({ ok, taskDir, downloadDir, total, tasks }) => ({
+      ok,
+      taskDir,
+      downloadDir,
+      total,
+      tasks,
+    }))(snap)
+    assert.deepEqual(legacyView, {
+      ok: false,
+      taskDir: path.join(tmpdir(), 'dsh-no-such-dir-f'),
+      downloadDir: path.join(tmpdir(), 'dsh-no-such-dir-g'),
+      total: 0,
+      tasks: [],
+    })
+    assert.equal(
+      JSON.parse(JSON.stringify(snap)).ok,
+      false,
+      '新字段必须能通过 JSON 往返（不得含 undefined）',
+    )
   } finally {
     if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
     else process.env.DSH_PROGRESS_DIR = savedTask

@@ -126,3 +126,19 @@ test('describeMismatch: 文件缺失与字节数不等都有可读文案', () =>
   assert.match(describeMismatch({ kind: 'mismatch', expected: 5000, actual: 41 }), /41 字节/)
   assert.match(describeMismatch({ kind: 'mismatch', expected: 5000, actual: 41 }), /5000 字节/)
 })
+
+test('describeMismatch: 带「下一步」，且说明产物与旁车已保留、可重跑', () => {
+  // 两条 mismatch 分支（文件不存在 / 字节数不等）都必须带下一步：
+  // 只补一条的话，另一条的调用方仍然不知道该怎么办。
+  for (const outcome of [
+    { kind: 'mismatch', expected: 5000, actual: null },
+    { kind: 'mismatch', expected: 5000, actual: 41 },
+  ] as const) {
+    const message = describeMismatch(outcome)
+    // 只断言「下一步信息存在」，不逐字断言整句
+    assert.match(message, /下一步/, `必须带下一步：${message}`)
+    assert.match(message, /旁车/, '必须说明旁车指纹已保留')
+    assert.match(message, /保留/, '必须说明产物未被删除')
+    assert.match(message, /重跑|重试/, '必须给出可执行的动作')
+  }
+})

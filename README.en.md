@@ -24,6 +24,10 @@ The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: us
 - **Visible progress** — on profiles with the web UI (`web`, or the desktop app) a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
+- **A batch in one call** — `targets` downloads several files inside a single call (one result per entry, a failing entry never discards the rest, in-batch concurrency bounded by a connection budget), `maxBandwidth` caps the whole batch, and `timeoutMs` bounds each entry. See [Downloading several files](#downloading-several-files-targets--maxbandwidth--timeoutms).
+- **Verify against the official docs** — pass the SHA-256 the docs print as `sha256` and the downloaded bytes are hashed and compared. A byte-length check cannot catch a payload of the right size but the wrong content; a hash can.
+- **Send the headers the docs' link needs** — `userAgent` / `referer` / `headers`. The probe and the download share **one** header set, so the two can never disagree.
+- **Pick a mirror automatically** — with `mirror: "auto"` the plugin chooses a GitHub mirror that is *proven* to serve the same file, so the model does not have to know domains like gh-proxy.
 
 All four of **Windows x64 / arm64** and **Linux x64 / arm64** are fully supported (bundled aria2,
 multi-connection). macOS installs and works, but always downloads over single-threaded `curl` —
@@ -31,7 +35,7 @@ see [COMPATIBILITY.md](./docs/COMPATIBILITY.md) for why, and for why no macOS bu
 
 `dsh-smart-dl` registers two tools with DSH:
 
-- **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Supports an optional mirror prefix and resume.
+- **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Optional: `mirror` (a prefix, or `auto`), `sha256` content verification, `userAgent` / `referer` / `headers`, and resume. Pass `targets` instead of `url` to download a batch in one call (`maxBandwidth` caps the whole batch, `timeoutMs` bounds each entry).
 - **`download_status`** — query download progress. Returns a read-only snapshot of recent tasks (percentage, speed, ETA), useful for answering "how far along is that download?".
 
 ## Install
@@ -69,68 +73,210 @@ Requirements and caveats:
 
 > **The progress panel is available on profiles that have the web UI** (`web`, and the desktop app's `desktop` profile). On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
+> **1.2.0 adds the three things you need to "download the right bytes from the official docs"**: `sha256` content verification, `userAgent` / `referer` / `headers`, and `mirror: "auto"`. It also fixes three probe/fallback defects (a HEAD failure no longer abandons the probe, the HEAD branch used to ignore `Content-Range` and could fail a perfectly good download, and an integrity failure no longer triggers a pointless curl re-download). See [CHANGELOG.md](./CHANGELOG.md) for the evidence behind each.
+>
 > **1.1.0 adapts the plugin to DSH 0.2.0.** From 0.2.0 on, DSH checks declared `peerDependencies` before installing: `0.4.0` and earlier declare a range that does not cover `0.2.0`, so an already-installed copy has its whole bundle skipped and the plugin never loads. If you are on `0.4.0` or older, upgrading is the fix; `0.4.1` and newer already cover 0.2.0 — see [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
 >
 > **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
 >
-> **Use `1.1.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md).
+> **Use `1.2.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md).
 >
-> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.1.0`.
+> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.2.0`.
+
+## Downloading from official documentation
+
+Most "install this the way the docs say" jobs reduce to a single `smart_download` call: the
+docs give you a **URL**, usually a **checksum**, and sometimes a requirement about **headers**.
+Those three map onto three parameters.
+
+```
+What the docs say                          Which smart_download parameter
+─────────────────────────────────────────────────────────────────────────
+https://example.com/tool-1.4.0.zip     url (or targets for several files)
+SHA256: 9f86d081884c7d65…               sha256 (optional, but strongly advised)
+"Referer required / use a browser UA"  referer / userAgent
+"Behind a slow network? Use a mirror"  mirror: "auto" (GitHub URLs)
+"Install it over there"                output
+```
+
+A call you can copy as-is:
+
+```
+smart_download(
+  url:    "https://github.com/owner/repo/releases/download/v1.4.0/tool.zip",
+  sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  mirror: "auto"
+)
+```
+
+> This single-entry shape is field-for-field identical to 1.2.0 **when the new parameters are omitted**; `timeoutMs` and `maxBandwidth` work on a single-entry call too (`timeoutMs` is a **per-entry** timeout, not batch-only), and measured with a value that never expires the returned key set is unchanged as well. See [Downloading several files](#downloading-several-files-targets--maxbandwidth--timeoutms).
+
+The result tells you exactly what happened:
+
+```json
+{
+  "success": true,
+  "path": "tool.zip",
+  "method": "aria2",
+  "size": 52428800,
+  "fellback": false,
+  "reason": "支持 Range，文件 50.0MB，使用 8 连接",
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "requestedUrl": "https://gh-proxy.com/https://github.com/owner/repo/releases/download/v1.4.0/tool.zip",
+  "mirrored": true,
+  "mirror": "https://gh-proxy.com/"
+}
+```
+
+### `sha256` — paste the checksum the docs print
+
+Every spelling you are likely to meet is accepted and normalised to the same lowercase hex:
+
+| As written in the docs | Accepted? |
+| --- | --- |
+| `9f86d081884c7d65…` (bare hex, either case) | ✅ |
+| `sha256:9f86d081…` / `sha256=9f86d081…` / `SHA256(9f86d081…)` | ✅ |
+| `sha256-<base64>` (the SRI form used in HTML `integrity` attributes) | ✅ |
+| Wrong length, non-hex characters, or an `md5:` / `sha1:` prefix | ❌ rejected before downloading |
+
+Key points:
+
+- **A malformed digest is rejected before the download starts** — you never spend a few hundred MB only to be told the argument was wrong.
+- **A mismatch always fails**: it throws, returns no `success`, and **keeps** the sidecar fingerprint so the next attempt has something to compare against.
+- **It needs nothing from the server**, so it still produces a definite answer when the byte-length check has to be skipped (no `Content-Length`, or a compressed response). In that case the result carries **no** `verifySkipped` — the content has been compared byte for byte, and reporting "no length check was done" would only mislead. The proof is the `sha256` field itself.
+- **Streamed**: a multi-hundred-MB installer is never buffered in memory.
+
+### `userAgent` / `referer` / `headers` — when the docs' link is not a plain GET
+
+The three combine into **one** header set, shared by **the probe and the download**. That is
+deliberate: when they disagree, a site that varies on User-Agent makes the probe see a 200 and
+the download see a 403, or returns a body of a different size — the first makes the decision
+rest on a response that will not hold during the download, the second makes the size check
+report a false positive 100% of the time.
+
+```
+smart_download(
+  url:       "https://example.com/gated/model.bin",
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  referer:   "https://example.com/downloads",
+  headers:   { "Authorization": "Bearer <token>" }
+)
+```
+
+Boundaries:
+
+- **Headers the plugin manages itself cannot be overridden**: `Range`, `Accept-Encoding`,
+  `Content-Length`, `Host`, and the connection-level ones (`Connection` / `Transfer-Encoding` /
+  `Keep-Alive` / `TE` / `Trailer` / `Upgrade` / `Proxy-*`). Each carries existing probe / resume /
+  verification semantics, and overriding one changes behaviour silently.
+- **A header value containing CR / LF / NUL is refused** — that is header injection, which would
+  let the caller smuggle new headers or even a new request into the request.
+- Named parameters win over the same name in `headers`; duplicate names (any case) collapse to one.
+- Limits: 32 headers, 128 characters per name, 8192 per value.
+
+### `mirror: "auto"` — when the docs only give a raw GitHub URL
+
+Official docs always hand you the **original** URL, and whether it is reachable depends on your
+network. Passing `mirror: "auto"` lets the plugin choose:
+
+1. It applies to GitHub hosts only (`github.com` / `raw.githubusercontent.com` /
+   `codeload.github.com` / `objects.githubusercontent.com` and friends); anything else gets an
+   explicit `mirrorSkipped` explaining why;
+2. The candidate list is built in (see "Mirror acceleration" below) and can be replaced with
+   your own via `DSH_SMARTDL_MIRRORS`;
+3. A candidate is used only once it is **proven to serve the same file**: identical length, and
+   an identical `ETag` (compared after normalisation, so a `W/` weak-validator prefix does not
+   matter) whenever the origin sends one;
+4. If none can be proven, the download falls back to the original URL and the reason lands in
+   `mirrorSkipped`.
+
+> **Auto-mirroring is opt-in.** It routes the download through a third-party server, and that is
+> a decision for the caller, not for the plugin — so there is no default.
+
+> **The same-source proof guards against accidents, not against poisoning.** The `ETag` is
+> *self-reported by the mirror*: a malicious mirror can copy the origin's ETag and serve
+> different bytes of the same length, and both the length and ETag will match. Only `sha256`
+> defends against that — the digest comes from the official docs, and a mirror cannot forge it.
+
 
 ## How it works
 
 The decision flow, in text:
 
 ```
-call smart_download(url, output?, mirror?)
+call smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
+        │   — or —   targets: [{ url, output?, sha256? }, …] (batch)
         │
         ▼
-[0] validate the protocol: only http / https are accepted;
-     anything else is rejected before any request
+[0] validate the arguments (all of it **before** any request is made)
+     · exactly one of url / targets (both, or neither, is rejected)
+     · url must be http(s) (file:// / ftp:// are refused outright)
+     · sha256 must normalise to 64 hex digits
+     · maxBandwidth must parse as a positive byte count (K/M/G, 1024-based)
+     · timeoutMs must be an integer in 1000..1800000
+     · headers must not override plugin-managed headers,
+       and values must not contain CR / LF / NUL
         │
         ▼
-[1] if mirror is given, prepend the prefix to the URL
-     · mirror prefix + full original URL
-     · skipped for non-http(s) URLs
-     · output filename still derived from the original URL
+[1] build the header set: headers + userAgent + referer become **one**
+    set, shared by the probe and the download (a disagreement between the
+    two makes the probe's conclusion wrong for the actual download)
         │
         ▼
-[2] Probe the URL (5s timeout)
+[2] resolve the mirror
+     · explicit prefix: mirror prefix + full original URL
+     · "auto": probe the original first, then each built-in candidate,
+       and only accept one whose length matches and whose ETag matches
+       whenever the origin sent one; if none is proven, fall back to the
+       original URL and say so in mirrorSkipped
+     · non-http(s) URLs skip the mirror; the output filename is still
+       derived from the original URL
+        │
+        ▼
+[3] Probe the URL (5s timeout)
      · send a HEAD request first
-     · if HEAD returns 405 or no Content-Length,
-       retry with GET + "Range: bytes=0-0"
+     · if HEAD throws (timeout / blocked), returns 405, or has no
+       Content-Length, retry with GET + "Range: bytes=0-0"
+     · only when both routes fail is it judged "no multi-threading"
         │
         ▼
-[3] decide() picks a tier by file size and aria2 availability:
+[4] decide() picks a tier by file size and aria2 availability:
      · no Range support / probe failed / size unknown / <1MB -> curl
      · 1MB ~ 8MB   -> aria2 with 4 connections
      · ≥ 8MB       -> aria2 with 8 connections (conservative cap, not 16)
         │
    ┌────┴──────────────────────────┐
    ▼ aria2 tier                     ▼ curl tier
-[4a] bundled aria2c found?          [4b] curl single-threaded
+[5a] bundled aria2c found?          [5b] curl single-threaded
    │ yes             │ no             (with progress bar)
    ▼                 ▼
  aria2 4/8 conns   curl single-threaded (fallback)
  (per-second summary progress)
- (resume: -c)      (resume: -C - when Range is supported)
+ (resume: -c)      (resume: -C - when the origin is proven unchanged)
    │ on failure
    ▼
   degrade to curl single-threaded
-         │
-         ▼
-[5] integrity check: bytes on disk vs declared remote length
-        │ match             │ mismatch
-        ▼                   ▼
-   clear .part.json     throw, keep marker
+  Note: an integrity failure does **not** take this fallback — the bytes
+        on disk are wrong, and re-downloading the same URL through a
+        different downloader would not change that
+        │
+        ▼
+[6] integrity check (two independent layers)
+     · bytes on disk vs declared remote length (verifySize)
+     · caller-supplied SHA-256 vs the computed digest (verifySha256)
+        │ pass                │ fail
+        ▼                     ▼
+   clear .part.json       throw, keep marker
    return success
 
-  return { success, path, method, size, fellback, reason?, requestedUrl, mirrored }
+  return { success, path, method, size, fellback, reason?, verifySkipped?,
+           sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
 ```
 
 Key points:
 
-- **Any probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
+- **A probe anomaly never fails the download, but "HEAD threw" no longer means "no multi-threading"**: when HEAD times out or is blocked, the probe retries with a Range GET (fixed in 1.2.0). Previously a single HEAD failure declared the file "unsupported and of unknown size", which also meant waiting out the whole probe timeout, permanently degrading the integrity check to "skipped", and forcing even huge files onto a single curl connection. Only when both routes fail does it fall back to curl, and the `reason` then carries both failure messages.
+- **Any other probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
 - The connection count is chosen dynamically by file size (thresholds 1MB / 8MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing". The thresholds are measured, not guessed — see "The concurrency thresholds are measured" below.
 - **The downloaded size is verified after every download.** An exit code of 0 from `curl` / `aria2` only means "the tool thinks it finished", not that the byte count is right. Short reads, over-reads, and mirrors returning a 200 error page all exit 0; only comparing bytes on disk catches them (see "Guarding against silent failures").
 - `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
@@ -160,6 +306,30 @@ Details:
 - Non-`http(s)` URLs skip the mirror, and **the mirror prefix itself must pass the same allow-list** — a non-`http(s)` prefix (`file://`, `javascript://`, `data://`…) never takes effect and the original URL is used unchanged. The prefix decides the scheme of the concatenated string, so not checking it would open a `file://` back door (fixed in 1.0.0; reproduction in [SECURITY.md](./docs/SECURITY.md)).
 - The output filename is always derived from the **original** URL, so the mirror host never leaks into the filename.
 
+### Rather not pick a prefix by hand: `mirror: "auto"`
+
+Pass the literal `auto` and the plugin picks a mirror that is **proven to serve the same file**.
+The full rules and security boundaries are in
+["Downloading from official documentation"](#mirror-auto--when-the-docs-only-give-a-raw-github-url) above.
+
+### Use your own mirrors: `DSH_SMARTDL_MIRRORS`
+
+The built-in candidates are three **public third-party** services, and none of them work on a
+corporate network or behind a self-hosted proxy. Override the list with a comma-separated prefix
+table; **order is priority**:
+
+```bash
+# Linux / macOS
+export DSH_SMARTDL_MIRRORS="https://my-mirror.corp/ , http://10.0.0.9:8080"
+
+# Windows PowerShell
+$env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
+```
+
+Empty, whitespace-only, or comma-only values count as unset and fall back to the built-in table.
+This does not weaken the same-source proof: a custom mirror still has to pass the length + ETag
+comparison before it is used.
+
 Commonly used public mirrors (pick one; availability varies by network):
 
 | Mirror prefix |
@@ -184,8 +354,70 @@ Why resume needs a check beyond "Range is supported" (measured, do not simplify)
 
 Why curl's resume is conditional (measured, do not make it unconditional):
 
-> `curl -C -` **fails outright with exit code 33** when the server does **not** support Range and a partial file already exists — measured: a 1000-byte resource with an existing 400-byte partial → `exit 33`, file left intact at 400 bytes, while the **same scenario without** `-C -` re-downloads the full file successfully.
+> First align two adjacent exit codes by their official definitions: curl **33 = HTTP range error** (the Range request we sent was not accepted by the server), while "the server does not support resuming" is curl **36 = bad download resume** — they are not the same thing, and explaining 33 as "the server does not support Range" (as this section used to) is inaccurate.
+> Measured locally (curl 8.13.0): when the server **ignores** the `Range` we sent and a partial file already exists, `curl -C -` **fails outright with exit code 33** — a 1000-byte resource with an existing 400-byte partial → `exit 33`, file left intact at 400 bytes, while the **same scenario without** `-C -` re-downloads the full file successfully. In other words 33 can also mean "the server ignored your Range request", which is another phrasing of the official definition (range error) — but it does **not** license the inference that the server permanently cannot resume (that is what 36 would mean).
 > With Range support, all three cases are measured correct: resuming a partial file, re-running after completion, and starting from scratch with no file present.
+
+## Downloading several files: `targets` / `maxBandwidth` / `timeoutMs`
+
+`url` downloads one file; `targets` downloads a batch **inside a single call** (the core P0 deliverable):
+
+```json
+{
+  "targets": [
+    { "url": "https://example.com/a.iso", "output": "a.iso" },
+    { "url": "https://example.com/b.iso", "output": "b.iso", "sha256": "<the digest the docs print>" }
+  ],
+  "maxBandwidth": "4M",
+  "timeoutMs": 600000
+}
+```
+
+### Exactly one of `url` / `targets`, and the batch cap
+
+- **`url` and `targets` are mutually exclusive**: passing both, or neither, is rejected **before any request is made** — there is no "one of them wins", because silently ignoring one side would leave the caller believing both were downloaded. So `url` is **not** a required parameter. (This constraint cannot be expressed in the tool schema: the parameter root is a plain property map and has no slot for a root-level `oneOf`, so the execution layer enforces it and the parameter descriptions spell out the consequence.)
+- **An empty `targets` array is likewise rejected before any request is made.**
+- **50 entries per call**, aligned with what `download_status` reads back. Exceeding it is **rejected explicitly** with the actual count rather than truncated — silently dropping the tail would turn "downloaded but unqueryable" into an unexplainable symptom. For more, split into several calls.
+- Each entry may carry its own `output` and `sha256`; `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` / `timeoutMs` are **shared by the whole batch**.
+- **Returns synchronously**: the whole batch finishes before the call returns (not "submit a job and check later"). That is exactly why `timeoutMs` exists (see below).
+
+### Per-entry results and "partial success"
+
+A batch returns `batch` (the batch ID), the three counts `succeeded` / `failed` / `cancelled`, and a per-entry `results[]` (`succeeded + failed + cancelled === results.length`):
+
+- **One failure does not affect the other entries**: every row carries its own `success`, the `path` it landed on (also given for a failure, as "where it was supposed to land") and an `error` reason. Why per-entry rather than counts alone: with only "N succeeded, M failed" the caller still does not know whether to retry, or which one.
+- **Failures and cancellations are counted separately** (the same rule as the single-entry path): `failed` means "the download broke", `cancelled` means "the whole batch was cancelled" — two different states on the panel. When a whole batch is cancelled, entries that had not started yet also each leave a `cancelled` record rather than vanishing.
+- Failure text reuses the single-entry wording (e.g. `aria2c exit code 22: …`) and **never contains** the executable's absolute path.
+- Every entry's progress records carry the same `batch` ID, so `download_status` and the panel can group one call's entries together.
+
+### In-batch concurrency: derived from "bounded total connections"
+
+The batch runs a sliding-window concurrency (not "fixed groups": the slowest entry in a group stalls the whole group, while entry durations naturally differ a lot). The window width is **not** the single-entry top tier of 8 — that would put the peak at 8 × 8 = 64 connections and directly contradict the existing trade-off that "the per-file cap stays at 8 to avoid tripping per-IP concurrency limits on servers". The rule is:
+
+```
+in-batch connection budget = single-entry top tier × 2
+window                    = budget ÷ connections one entry may take
+```
+
+The budget is 16. Why ×2 (rather than ×1 or ×4): entries in a batch often cannot fill their own split ceiling — there have to be enough splits, and the server has to be fast enough; ×2 is the extra connection risk worth taking for "a batch is faster than one file".
+
+Substituting the current tiers (4 connections for small files / 8 for large): with 8 connections per entry the window is 2, with 4 it is 4 — either way the peak sits near 16. A batch cannot know each entry's size before it starts (that would take a probe per entry), so it computes conservatively from the top tier — the actual window is therefore always 2. Whether a single entry opens 4 or 8 is still decided by its own file size.
+
+### `maxBandwidth`: a cap shared by the whole batch
+
+Accepts a plain byte count or a K/M/G suffix (1024-based), e.g. `"4M"`, `"500K"`, `"1500000"`. It is a cap for **one call**, not per entry: with a batch it is divided across the entries actually running concurrently (`"4M"` + a window of 2 → 2M each), so the combined throughput of one call never exceeds it. It reaches the subprocess as aria2's `--max-overall-download-limit` and curl's `--limit-rate`. **An invalid value throws before any request is made** — handing it to the subprocess would mean "the user believes the speed is capped, but it is not" (they silently ignore invalid parameters).
+
+### `timeoutMs`: per-entry timeout (route A is a synchronous call)
+
+`timeoutMs` is **each entry's** timeout in milliseconds (`1000`..`1800000`, i.e. 1 second to 30 minutes). Why it is needed: this tool is a synchronous call, and one stuck entry keeps the whole batch from returning. 30 minutes is a conservative cap (1GB @ 1MB/s ≈ 17 minutes); a longer wait means the caller should switch to a "return first, continue in the background" shape — that shape is explicitly out of scope, so it is better to fail here than to hang the whole session.
+
+What happens after a timeout (these are definitions, not implementation details):
+
+- **The entry that timed out is recorded as `failed`**, not `cancelled` — the user did not press cancel, and the two are different states on the panel. That row's `error` in `results[]` and the terminal state on both progress tracks read "download timed out: did not complete within <ms>ms (this entry was terminated; the partial file and sidecar fingerprint are kept, a rerun checks same-origin before resuming)".
+- **The batch's other entries keep running**: a timeout only terminates that one entry's subprocess (probe, aria2 and curl all count).
+- **Results that already succeeded are never re-labelled**: entries already in `succeeded` keep their `path` as-is.
+- A timeout does **not** fall back to curl — that would spend the same wait a second time.
+- Omitting it means no timeout; an invalid value (out of range, fractional, non-numeric) throws before any request is made.
 
 ## Querying progress: download_status
 
@@ -235,13 +467,13 @@ Progress is written through `ProgressReporter` on **two tracks**; if either trac
 - Track 1 (dsh-task-progress format): `$DSH_PROGRESS_DIR/<taskId>.jsonl`, one JSON object per line, append-only. **DSH 0.2.0 no longer ships a reader for it**; only the third-party [`dsh-task-progress`](https://www.npmjs.com/package/dsh-task-progress) plugin reads this format. Track 2 and the built-in panel are unaffected. When that variable is unset the default is `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (the session id and working directory come from `exec.agent.session.header`). **With no session context, track 1 is not written at all** — the dsh-task-progress reader filters by session, so writing to the wrong directory is the same as not writing.
 - Track 2 (this plugin's own format): `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json` (`DSH_HOME` defaults to `~/.dsh`), overwritten as a whole.
 
-Every record carries a `state` field (`running` / `done` / `failed` / `cancelled`): the dsh-task-progress reader only looks at `state` and treats a missing one as `running`, which is why pre-0.5.0 records with `pct=100` and `msg=下载完成` still showed "downloading" forever. Progress is **de-duplicated by the whole record** (`pct + state + msg + spd + eta` must all match to skip); any change is written, so the panel sees live speed and ETA, and terminal states (completed / failed / cancelled) always break through because `state` changed. aria2 output is parsed from the `--summary-interval=1` summary lines (including speed and ETA); curl is parsed from `--progress-bar` percentages.
+Every record carries a `state` field (`running` / `done` / `failed` / `cancelled`): the dsh-task-progress reader only looks at `state` and treats a missing one as `running`, which is why pre-0.5.0 records with `pct=100` and `msg=下载完成` still showed "downloading" forever. Since **1.3.0** a record may also carry a `batch` field — the ID shared by every entry of one call, so the panel and `download_status` can group them. It is a grouping label only: it never influences execution or concurrency, and a single-entry call gets its own unique batch ID too (so display is uniform). Old progress files without the field keep parsing exactly as before. Progress is **de-duplicated by the whole record** (`pct + state + msg + spd + eta` must all match to skip); any change is written, so the panel sees live speed and ETA, and terminal states (completed / failed / cancelled) always break through because `state` changed. aria2 output is parsed from the `--summary-interval=1` summary lines (including speed and ETA); curl is parsed from `--progress-bar` percentages.
 
 Since `0.6.0` writing is **asynchronous**: `report()` only enqueues a record and a microtask batch-writes it in order, so the download loop is no longer blocked by a synchronous `appendFileSync`. Callers `await reporter.awaitFlush()` before returning, so `download_status` and the panel always read a terminal state rather than the last intermediate one.
 
 ## Progress panel in the UI (web / desktop)
 
-On profiles with the web UI (`web`, and the desktop app's `desktop`) the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; when the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all.
+On profiles with the web UI (`web`, and the desktop app's `desktop`) the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; a `failed` / `cancelled` entry also shows its failure reason in the row itself rather than only in a hover tooltip. When the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all. It reads up to **50** tasks (`MAX_STATUS_LIMIT`, aligned with what the server clamps to), and the list scrolls when a batch is longer than the panel.
 
 ![progress panel](docs/progress-pill.png)
 
@@ -305,6 +537,23 @@ fallback path asserts the **concrete value** it fell back to rather than merely 
 | `verifySize`         | exit code 0 with wrong byte count → treated as success | matching bytes must return `ok`; a **chunked truncation** (both aria2 and curl exit 0) must be reported as a failure; "declared length unknown" and "server returned a compressed encoding" must return a **distinct `skipped`** (with a machine-readable `reason`), never the same shape as `ok` |
 | `probeUrl` `accept-encoding` | default `gzip, deflate` → compressed length | the server must receive `identity`, and the probe must return the **uncompressed** length (5000, not 41) |
 | `registerStatusRpc` handler | invalid request → default value / silent pass-through | with no `connection` it must register **exactly 0 routes**; an invalid envelope must answer `ok:false` with `rpcId='invalid-request'`; an invalid `limit` must fall back to `DEFAULT_STATUS_LIMIT` (10, not 0 / `Infinity`); a business-layer exception must still be 200 + `ok:false` (never a bare 500) |
+| `normalizeSha256` | unrecognised → treated as absent / mis-parsed → never matches | all four documentation spellings must normalise to the **same** 64-digit lowercase hex; wrong length, non-hex characters or another algorithm's prefix must return `null` (so the caller rejects it before downloading) |
+| `sha256File` | a dropped chunk → wrong digest | the streamed digest of an 8MB file must be **character-for-character identical** to a one-shot computation; a missing file must return `null` (not throw, not an empty string) |
+| `describeHashFailure` | both failures share one sentence → "could not read" looks like "wrong content" | `unreadable` and `mismatch` must be **two different** messages |
+| `buildRequestHeaders` | a header silently dropped / a managed header overridden → probe and download disagree | the three inputs must merge into **one** set with named parameters winning; duplicate names collapse to one; `Range` / `Accept-Encoding` / `Host` etc. must be **refused**; a value with CR / LF / NUL must be **refused**; exactly at the limit must pass |
+| `resolveAutoMirror` | nothing found → silently uses the origin / wrong pick → downloads something else | each of the three "not enabled" paths must return its **own** `skipped` message; when enabled, `mirrored` must be true and the `mirror` prefix must come back |
+| `pickMirrorServingSameFile` | "it responded" is enough → hands "what you download" to a third party | a length mismatch must be refused; origin has an ETag but the candidate does not must be refused; differing ETags must be refused; an unknown origin length must send **zero requests**; one candidate throwing must not affect the others |
+| `describeExitCode` unknown exit code | exit code and stderr dropped / an invented cause | an unknown code must **keep** the exit code and the stderr tail verbatim and must **not** invent a "next step" (`test/runprocess.test.ts`) |
+| `verifySize`'s two `skipped` forms | "never checked" looks identical to "checked and matched" | `remote-length-unknown` and `content-encoded` must return **distinct** `skipped` values (with a machine-readable `reason`), each with its own gzip / chunked scenario assertion |
+| `readDownloadStatus` unreadable directory | empty list (same shape as "genuinely no tasks") | when both directories are unreadable `ok` must be `false` and **every** failed directory must be reported; tasks from a readable directory must not vanish because the other half failed |
+| a single batch entry failing | one failure takes the batch down / discards the entries that succeeded | a failure affects only that entry: every row of `results[]` carries its own `success` / `path` / `error`, and the `path` of already-succeeded entries is kept as-is |
+| batch cancellation vs failure | collapsed into one state | `cancelled` and `failed` must be counted separately; entries that never started must each leave a cancellation record rather than vanishing |
+| `maxBandwidth` invalid value | silently ignored by the subprocess → "the user believes the speed is capped, but it is not" | must throw **before any request is made** (the case asserts the server saw `hits === 0`) |
+| `timeoutMs` invalid value | same as above | same: out of range, fractional or non-numeric are all refused before any request |
+| `resolveTargets` both / neither / over 50 | silently picks one side / silently truncates the tail | all three paths must be refused before any request; when over the limit the message must state the **actual count** and the cap |
+| `cleanupHistory` out-of-range parameter | silently clamped to a bound, then deletes | must answer `ok:false` with text naming the field and its range, and must **not delete a single file** |
+| cleanup cannot reach track 1 | quietly scans track 2 only → pretends it cleaned everything | must report `taskDir === ''` plus the fixed `taskDirSkipped` text explaining "track 1 did not participate" and why |
+| single-entry timeout | the whole batch never returns | the timed-out entry is recorded as `failed` (not `cancelled`) with the timeout text; the batch's other entries keep running; already-succeeded entries are never re-labelled; no fallback to curl |
 
 Every assertion is **positive**: it checks "did it actually produce output", not "did it avoid crashing". Real samples live in `test/fixtures/` (curl fixtures are `.bin` files preserving `\r`), and "the fixture must contain `\r`" is itself a forced assertion.
 
@@ -335,6 +584,8 @@ Three conclusions:
 
 The 8-connection cap stays: at 32/64MB, x=16 really is twice as fast again (23–24 MB/s), but it is deliberately not adopted to avoid tripping per-IP concurrency limits on servers.
 
+**In-batch concurrency follows the same reasoning** (1.3.0): the batch's sliding window deliberately does **not** take "the single-entry top tier = 8", and is instead derived from "the total connection count in a batch is bounded" — otherwise 8 entries × 8 connections = a peak of 64, cancelling out the conservative trade-off above entirely. The derivation rule and the peak cap are in [Downloading several files](#downloading-several-files-targets--maxbandwidth--timeoutms).
+
 ### Two traps that would have disabled concurrency entirely
 
 - **aria2's `-x/-s` are silently defeated by `min-split-size`.** aria2 defaults to `--min-split-size=20M`; for files under 20MB it does **not split at all** — measured with an 8MB file, it issued a single GET without a Range header, making `-x 16 -s 16` a no-op with single-connection throughput. This plugin passes `-k 1M` and avoids it by luck. Deleting `-k 1M` silently degrades every tier above to a single connection with no error at all, so that line carries a warning comment in the source. Separately, `--min-split-size=512K` makes aria2 fail outright with exit code 28, so 1M is the value verified as safe.
@@ -362,12 +613,15 @@ This plugin does exactly three things: **start downloads**, **write progress fil
 
 | Behaviour | Detail |
 | --- | --- |
-| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. |
+| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`) — **FTP / SFTP / BitTorrent are not supported**: opening the allow-list would leave only the fifth layer of defence (the caller's optional `sha256`) effective, i.e. no content check by default; BitTorrent is further out (DHT / listening ports / seeding would break the "contacts nothing beyond the original URL" promise below). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. **With `mirror: "auto"`, the candidate mirror addresses are probed too** (concurrent HEADs, 5s timeout each) — the necessary cost of auto mode, and it happens **only** when `auto` is passed explicitly; the candidate list can be restricted to mirrors you trust with `DSH_SMARTDL_MIRRORS`. |
+| Sending request headers | By default only the `accept-encoding: identity` the probe needs. When the caller passes `userAgent` / `referer` / `headers`, those headers appear on **both** the probe request and the download request (visible in the child process command line, so **do not** put long-lived credentials in `headers`). Plugin-managed headers (`Range` / `Accept-Encoding` / `Content-Length` / `Host` / connection-level) cannot be overridden, and a value containing CR / LF / NUL is rejected as injection. |
+| Reading the downloaded file | When `sha256` is supplied, the file just written is read **as a stream** (never buffered whole) to compute its SHA-256. No other file is read. |
 | Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
 | Reading progress files | `download_status` (and `/api/smartdl.status`) only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
+| HTTP endpoints (web-UI profiles only) | The plugin registers two exact routes on the shared `/api` carrier: `POST /api/smartdl.status` (**read-only** snapshot, reading the same progress files as `download_status`) and `POST /api/smartdl.cleanup` (**deletes files**). Cleanup's deletion scope is strictly limited to the two progress-track directories, and only touches **regular files** whose names match this plugin's convention (`*.json` / `*.jsonl`) and whose mtime is older than the retention window (via `lstat`; directories and symlinks are never touched): the default window is 24 hours (lower bound 60 seconds, upper 365 days), 200 deletions per call by default (hard cap 500), oldest first. It does **not** delete download artifacts, does **not** recurse, and does **not** touch other directories; an invalid parameter (window or count out of range) is refused with `ok:false` plus actionable text rather than being clamped to a bound and then deleting. **Blast radius**: progress files are the only source of the "completed / failed" receipts, so deleting them hides those tasks from the panel and `download_status` (downloaded files are unaffected, but that history cannot be recovered from anywhere else). **Auth**: inherited from the carrier itself (browser session cookie + loopback / Origin checks) — there is no per-task or per-session authorisation, so anyone who can call the endpoint can clean up the progress history of all sessions on this machine. To clean track 1 (`<session.cwd>/.dsh-progress/<session.id>/`) the request payload must carry `session: { id, cwd }`; without it the response states `taskDirSkipped` explicitly ("track 1 did not participate") instead of pretending it cleaned everything. |
 | Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl`; when that variable is unset, `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (skipped entirely without a session context). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
 | Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, `SIGKILL` if still alive after 1s — that fallback is armed on **every** platform, since a POSIX process can ignore SIGTERM just as well). A cancellation is recorded as the `cancelled` state, distinct from a failure. |
-| Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly). |
+| Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly), plus `DSH_SMARTDL_MIRRORS` (overrides the auto-mirror candidate list; only affects `mirror: "auto"`). |
 
 What it **does not** need: it does not read your DSH session contents, does not touch credentials or keys, does not modify DSH configuration (the `cordis.patch.yml` is applied by DSH itself at install time), and ships no telemetry or network reporting.
 
@@ -398,7 +652,7 @@ dsh plugin --profile <profile> allow-version <package@version> --dsh-version <ex
 
 The exemption is recorded in that profile's `compatibility.json`; list it with `dsh plugin version-exemptions` and undo it with `revoke-version`. Exemptions are **exact-version** only: a different dsh version does not inherit them.
 
-macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage for it**. On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
+macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage from a trustworthy source**. Note that macOS binaries *do* exist and *do* come with hashes — the blocker is "the source cannot be trusted": the per-source check results are in [COMPATIBILITY.md](./docs/COMPATIBILITY.md) and [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md) (checked 2026-10-12). On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
 
 ## FAQ
 
@@ -421,7 +675,25 @@ A: No. All child processes are started with `windowsHide: true`.
 A: Call `download_status`. It returns the percentage, speed and ETA of recent tasks; pass `taskId` to look up a single task. It is purely read-only and never disturbs a download in progress.
 
 **Q: GitHub Release downloads are slow — can I use a mirror?**
-A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-proxy.com/"`. Note that mirrors are **third-party services**: do not use one for files containing sensitive data.
+A: Yes. Pass a `mirror` prefix to `smart_download`, e.g. `mirror: "https://gh-proxy.com/"`, or pass `mirror: "auto"` and let the plugin pick a built-in candidate that is **proven to serve the same file**. Note that mirrors are **third-party services**: do not use one for files containing sensitive data.
+
+**Q: The official docs print a SHA-256 — how do I check it?**
+A: Pass the digest as `sha256`. All four common spellings are accepted (bare hex, `sha256:<hex>`, `SHA256(<hex>)`, SRI `sha256-<base64>`). On success the result carries a `sha256` field; on mismatch it throws and **keeps** the sidecar fingerprint. A malformed digest is rejected before the download starts, so you never waste a full download on a typo. See ["Downloading from official documentation"](#downloading-from-official-documentation).
+
+**Q: The docs' download link returns 403, or an HTML page?**
+A: The site most likely varies on User-Agent or Referer. Pass `userAgent` / `referer`, or the more general `headers` (a gated asset may need `Authorization`). The plugin uses that one header set for **both** the probe and the download, so you never get the "probe succeeded, download 403" mismatch.
+
+**Q: Why didn't `mirror: "auto"` take effect?**
+A: Check `mirrorSkipped` in the result — it names the reason. The three possibilities are: the URL is not a GitHub host; the origin's file length could not be obtained (so there is nothing to prove sameness against); or every built-in mirror was unreachable or returned a different file. In all three cases the plugin **still downloads from the original URL** rather than failing. Note also that some mirrors strip `ETag`, and those are never chosen (better slow than unverifiable).
+
+**Q: Could auto-mirroring download something else?**
+A: A candidate is used only after passing "identical length, and identical ETag whenever the origin sends one", which catches a stale cache or an error page. But that proof **does not stop poisoning** — the ETag is self-reported by the mirror. Pass `sha256` for that (the digest comes from the official docs and cannot be forged by a mirror). On a corporate network, use `DSH_SMARTDL_MIRRORS` to restrict the candidates to mirrors you trust.
+
+**Q: How do I download several files at once?**
+A: Pass `targets` instead of `url` — an array of entries, each with its own `url` plus optional `output` / `sha256`, while `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` / `timeoutMs` stay shared by the whole call. The result reports each entry individually, so one failure never hides the entries that succeeded. `url` and `targets` are mutually exclusive (passing both, or neither, is rejected before any request), and a call takes at most 50 entries — beyond that, split into several calls. Full semantics in ["Downloading several files"](#downloading-several-files-targets--maxbandwidth--timeoutms).
+
+**Q: Can I cap the download speed?**
+A: Pass `maxBandwidth`, e.g. `"4M"`, `"500K"` or a plain byte count like `"1500000"` (K/M/G are 1024-based). It caps the **whole call**, not each entry: in a batch it is divided across the entries running concurrently, so the combined throughput never exceeds it. It reaches aria2 as `--max-overall-download-limit` and curl as `--limit-rate`, and an invalid value is refused before any request is made.
 
 **Q: Do I have to restart an interrupted download?**
 A: No. Call `smart_download` again with the same `url` and `output`; against a server that supports Range it resumes from where it stopped.
@@ -438,22 +710,43 @@ A: First make sure the install actually succeeded: installing from a repository 
 | --- | --- |
 | [README](./README.md) / [English](./README.en.md) | Install, usage, permissions |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Internals: what one call goes through, module responsibilities, progress data flow |
-| [SECURITY.md](./docs/SECURITY.md) | Threat model and the four layers of defence, each with a runnable reproduction |
+| [SECURITY.md](./docs/SECURITY.md) | Threat model and the five layers of defence, each with a runnable reproduction |
 | [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why macOS is shelved |
 | [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Symptom -> cause -> fix |
 | [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 code review: must-fix / suggestions / known trade-offs |
 | [CHANGELOG.md](./CHANGELOG.md) | Per-version change log |
 
+### Relationship to the official documentation
+
+This is a **community-maintained third-party plugin** (see "Disclaimer" below). Its behavioural
+contracts follow the plugin and tool conventions of the
+[DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness): the `defineTool`
+parameter schema, the shape of `dsh plugin` install commands, and the profile / bundle loading
+rules. When the official documentation moves, this plugin follows — `dsh.manifestVersion: 1` in
+`1.1.0` and "git installs no longer need a build script" in `1.1.2` both came from that.
+
+So **install and upgrade according to the official documentation**; this README only covers what
+is specific to this plugin. The two tools' parameters, return values and failure reasons are
+documented here and in [ARCHITECTURE.md](./docs/ARCHITECTURE.md), and where anything disagrees,
+[CHANGELOG.md](./CHANGELOG.md) plus the test suite are authoritative (every path that "returns a
+default" has a positive assertion — see the contract table above).
+
 ## Development
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **262 cases (260 pass / 2 skip / 0 fail)**, **99.81%** line / **92.53%** branch coverage.
+Current baseline: **343 cases (341 pass / 2 skip / 0 fail)**, **99.74%** line / **94.18%** branch / **96.99%** function coverage.
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets, so the same code on CRLF reports different numbers and different uncovered line
 numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).
 The 2 skipped cases are platform-limited (they only reproduce on Linux); the Ubuntu CI job runs them for real.
 See [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
+
+> The "uncovered lines" column reports **closing braces and continuation lines of multi-line
+> expressions** as uncovered — each one has been checked by hand (`downloader.ts:134` and
+> `headers.ts:119` both belong to statements that have tests asserting concrete values), so
+> this is tsx source-map line attribution, not statements missing a test. Judge by the
+> percentages.
 
 ```bash
 # install dependencies

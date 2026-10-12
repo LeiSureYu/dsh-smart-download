@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { registerStatusRpc } from '../src/rpc.js'
@@ -115,11 +115,21 @@ function stubConnection(): unknown {
   }
 }
 
-/** 拿到已注册的 handler（要求注册成功，且只注册了一条） */
-function handlerOf(connection: unknown): (r: Request) => Promise<Response> {
+/**
+ * 拿到已注册的 handler。
+ *
+ * 一个注册函数现在会挂两条路由（status 读、cleanup 清理），因此按**路径**挑：
+ * 用「只有一条路由」来定位的写法在加第二个端点时就会失效，而那正是这次改动
+ * 要防的回归（端点少注册一条 = 面板/调用方直接摸不到）。
+ *
+ * @param connection 桩连接
+ * @param endpoint 端点名（`smartdl.status` / `smartdl.cleanup`）
+ */
+function handlerOf(connection: unknown, endpoint = 'smartdl.status'): (r: Request) => Promise<Response> {
   const out = runRegister(connection)
-  assert.equal(out.routes.length, 1, '应恰好注册出一条路由')
-  return out.routes[0].fetch
+  const route = out.routes.find((r) => r.path === `/api/${endpoint}`)
+  assert.ok(route, `应注册出 /api/${endpoint} 路由（实际：${out.routes.map((r) => r.path).join(', ')}）`)
+  return route.fetch
 }
 
 /** 造一个 client-request 信封请求 */
@@ -211,18 +221,18 @@ test('registerStatusRpc: 依赖缺失时 cordis 不会调用注入回调', () =>
   assert.equal(out.routes.length, 0, '依赖缺失时不应注册路由')
 })
 
-test('registerStatusRpc: 注册路径与方法是 /api/smartdl.status + POST', () => {
+test('registerStatusRpc: 注册两条路由（status 读 + cleanup 清理），路径与方法各自正确', () => {
   const conn = stubConnection()
   const out = runRegister(conn)
-  assert.equal(out.routes.length, 1, '应恰好注册一条路由')
-  assert.equal(out.routes[0].path, '/api/smartdl.status')
-  assert.deepEqual(out.routes[0].methods, ['POST'])
-  assert.equal(out.routes[0].requestBody, 'buffered')
-  assert.equal(
-    out.effectLabel,
-    'dsh-smart-dl: /api/smartdl.status Fetch route',
-    'effect 标签应标明端点，便于 fiber 树排障',
-  )
+  assert.equal(out.routes.length, 2, 'status 与 cleanup 各要一条路由')
+  const status = out.routes.find((r) => r.path === '/api/smartdl.status')
+  const cleanup = out.routes.find((r) => r.path === '/api/smartdl.cleanup')
+  assert.ok(status, '缺少 /api/smartdl.status')
+  assert.ok(cleanup, '缺少 /api/smartdl.cleanup')
+  for (const route of [status, cleanup]) {
+    assert.deepEqual(route.methods, ['POST'])
+    assert.equal(route.requestBody, 'buffered')
+  }
 })
 
 test('handler: 非 POST 方法返回 404', async () => {
@@ -542,4 +552,252 @@ test('handler: 端到端 —— 能真的读到轨道二的任务快照', async 
     assert.equal(value.tasks[0].spd, '1.2MB/s', 'speed 字段必须映射到 spd')
     assert.equal(value.tasks[0].status, 'running')
   })
+})
+
+/* ---------------------- /api/smartdl.cleanup（D7-② 清理入口） ---------------------- */
+
+/** 造一个 cleanup 端点请求（method 固定为 smartdl.cleanup） */
+function cleanupRequest(payload: unknown, rpcId = 'c1'): Request {
+  return rpcRequest({
+    type: 'client-request',
+    rpcId,
+    method: 'smartdl.cleanup',
+    payload,
+  })
+}
+
+/** 把一个文件的 mtime 拨到 days 天前（清理的判定完全基于 mtime） */
+function ageFile(file: string, days: number): void {
+  const when = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+  utimesSync(file, when, when)
+}
+
+test('cleanup：请求 status 路由时 method 不匹配会回 ok:false（两条路由不会互相串门）', async () => {
+  const conn = stubConnection()
+  const statusHandler = handlerOf(conn, 'smartdl.status')
+  const res = await statusHandler(cleanupRequest({}))
+  const env = await readEnvelope(res)
+  assert.equal(env.body.result?.ok, false)
+  assert.match(env.body.result?.error?.message ?? '', /smartdl\.cleanup/)
+  assert.match(env.body.result?.error?.message ?? '', /smartdl\.status/)
+})
+
+test('cleanup：只删过期的历史文件，保留窗口内的文件一个都不动', async () => {
+  await withDirs(async ({ taskDir, downloadDir }) => {
+    const oldDl = path.join(downloadDir, 'old.json')
+    const freshDl = path.join(downloadDir, 'fresh.json')
+    const oldTask = path.join(taskDir, 'old.jsonl')
+    const freshTask = path.join(taskDir, 'fresh.jsonl')
+    const oldRaw = JSON.stringify({ id: 'old', name: 'a.bin', status: 'completed', progress: 1 })
+    writeFileSync(oldDl, oldRaw)
+    writeFileSync(freshDl, JSON.stringify({ id: 'fresh', name: 'b.bin', status: 'running', progress: 0.1 }))
+    writeFileSync(oldTask, '{"pct":100,"state":"done"}\n')
+    writeFileSync(freshTask, '{"pct":5,"state":"running"}\n')
+    ageFile(oldDl, 3)
+    ageFile(oldTask, 3)
+
+    const conn = stubConnection()
+    const fetchHandler = handlerOf(conn, 'smartdl.cleanup')
+    const res = await fetchHandler(cleanupRequest({ olderThanMs: 24 * 60 * 60 * 1000 }))
+    const env = await readEnvelope(res)
+    assert.equal(env.body.result?.ok, true, '清理应成功返回')
+    const value = env.body.result?.value as {
+      deleted: string[]
+      kept: Array<{ file: string }>
+      deletedCount: number
+    }
+    assert.deepEqual(
+      value.deleted.slice().sort(),
+      [oldDl, oldTask].sort(),
+      '只有 3 天前的两个文件该被删',
+    )
+    assert.equal(value.deletedCount, 2)
+    assert.ok(readFileSync(freshDl, 'utf-8').includes('fresh'), '窗口内文件必须原样保留')
+    assert.ok(readFileSync(freshTask, 'utf-8').includes('running'), '窗口内文件必须原样保留')
+    assert.equal(value.kept.length, 2, '留在窗口内的文件要如实报告')
+  })
+})
+
+test('cleanup：非法 olderThanMs 以 ok:false + 可操作文案拒绝（不夹取、也不删任何东西）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    // 摆一个「已经过期」的文件：如果参数被夹到边界后照删，它会被删掉 —— 这正是要防的
+    const stale = path.join(downloadDir, 'stale.json')
+    writeFileSync(stale, JSON.stringify({ id: 'stale', status: 'completed', progress: 1 }))
+    ageFile(stale, 5)
+
+    const conn = stubConnection()
+    const fetchHandler = handlerOf(conn, 'smartdl.cleanup')
+    // 59999 与 >365 天都是「看起来像数字」的越界值：此前的实现会把它们夹到边界，
+    // 调用方从返回里看不出自己给的值没生效 —— 现在必须直接拒绝。
+    const badValues: unknown[] = [
+      0,
+      -1,
+      'abc',
+      null,
+      {},
+      Number.POSITIVE_INFINITY,
+      59_999,
+      366 * 24 * 60 * 60 * 1000,
+    ]
+    for (const bad of badValues) {
+      const env = await readEnvelope(
+        await fetchHandler(cleanupRequest({ olderThanMs: bad, limit: 5 }, `c-${String(bad)}`)),
+      )
+      assert.equal(env.body.result?.ok, false, `olderThanMs=${String(bad)} 必须被拒绝，而不是被改写`)
+      const message = env.body.result?.error?.message ?? ''
+      assert.match(message, /olderThanMs/, '文案必须点名是哪个字段错了')
+      assert.match(message, /60000/, '文案必须给出合法范围的下限（60 秒）')
+      assert.match(message, /拒绝清理/, '文案必须说明这是拒绝，而不是「已按默认值清理」')
+    }
+    assert.equal(existsSync(stale), true, '被拒绝的请求一个文件都不能删')
+  })
+})
+
+test('cleanup：limit 生效（传 1 只删最旧的一个），非法值则拒绝而不是回落（不是「点了没反应」）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const files = ['a.json', 'b.json', 'c.json'].map((name) => {
+      const file = path.join(downloadDir, name)
+      writeFileSync(file, JSON.stringify({ id: name, status: 'completed', progress: 1 }))
+      ageFile(file, 5)
+      return file
+    })
+
+    const conn = stubConnection()
+    const fetchHandler = handlerOf(conn, 'smartdl.cleanup')
+
+    const limited = await readEnvelope(await fetchHandler(cleanupRequest({ limit: 1 }, 'c-1')))
+    const limitedValue = limited.body.result?.value as { deletedCount: number; truncated: boolean }
+    assert.equal(limitedValue.deletedCount, 1, 'limit=1 只应删一个')
+    assert.equal(limitedValue.truncated, true, '还有过期文件没删完时必须报 truncated')
+    assert.equal(files.filter((f) => existsSync(f)).length, 2, '剩下两个仍然过期，留给下一次调用')
+
+    // 非法 limit 不再回落到默认条数：会删文件的操作不接受静默改写参数
+    const rejected = await readEnvelope(await fetchHandler(cleanupRequest({ limit: 0 }, 'c-2')))
+    assert.equal(rejected.body.result?.ok, false, 'limit=0 必须被拒绝')
+    const message = rejected.body.result?.error?.message ?? ''
+    assert.match(message, /limit/, '文案必须点名 limit')
+    assert.match(message, /1\.\.500/, '文案必须给出合法范围（1..500）')
+    assert.equal(
+      files.filter((f) => existsSync(f)).length,
+      2,
+      '被拒绝时不得顺手把剩下的过期文件删掉',
+    )
+  })
+})
+
+test('cleanup：调用两次是幂等的（第二次删不到东西，且不报错）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const stale = path.join(downloadDir, 'stale.json')
+    writeFileSync(stale, JSON.stringify({ id: 'stale', status: 'failed', progress: 0.3 }))
+    ageFile(stale, 10)
+
+    const conn = stubConnection()
+    const fetchHandler = handlerOf(conn, 'smartdl.cleanup')
+    const first = await readEnvelope(await fetchHandler(cleanupRequest({}, 'c-first')))
+    const second = await readEnvelope(await fetchHandler(cleanupRequest({}, 'c-second')))
+    assert.equal((first.body.result?.value as { deletedCount: number }).deletedCount, 1)
+    assert.equal((second.body.result?.value as { deletedCount: number }).deletedCount, 0)
+    assert.equal(second.body.result?.ok, true)
+    assert.equal(existsSync(stale), false)
+  })
+})
+
+test('cleanup：目录不存在时报 scanFailedDirs 而不是抛错（幂等的清理不该因此失败）', async () => {
+  const saved = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(tempDir(), 'missing')
+  try {
+    const conn = stubConnection()
+    const fetchHandler = handlerOf(conn, 'smartdl.cleanup')
+    const env = await readEnvelope(await fetchHandler(cleanupRequest({})))
+    assert.equal(env.body.result?.ok, true, '目录读不到时仍需返回结构化结果')
+    const value = env.body.result?.value as { scanFailedDirs?: string[]; deletedCount: number }
+    assert.deepEqual(value.scanFailedDirs, [process.env.DSH_DOWNLOAD_PROGRESS_DIR])
+    assert.equal(value.deletedCount, 0)
+  } finally {
+    if (saved === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = saved
+  }
+})
+
+/* ---------- P0R-03：轨道一必须真的参与清理，或如实报告它没参与 ---------- */
+
+test('cleanup：带 payload.session 时轨道一也参与清理，并报出实际扫描的目录', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'rpc-cleanup-sess-'))
+  const downloadDir = mkdtempSync(path.join(tmpdir(), 'rpc-cleanup-dl-'))
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  // 轨道一的落点优先看 DSH_PROGRESS_DIR，因此这里必须清掉它，才能验证「靠会话定位」
+  delete process.env.DSH_PROGRESS_DIR
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    const sessionDir = path.join(cwd, '.dsh-progress', 'sess-clean')
+    mkdirSync(sessionDir, { recursive: true })
+    const staleTask = path.join(sessionDir, 'p1.jsonl')
+    writeFileSync(staleTask, '{"v":1,"task":"p1","pct":100,"msg":"下载完成","state":"done"}\n')
+    ageFile(staleTask, 3)
+    const freshTask = path.join(sessionDir, 'p2.jsonl')
+    writeFileSync(freshTask, '{"v":1,"task":"p2","pct":5,"msg":"下载中"}\n')
+
+    const fetchHandler = handlerOf(stubConnection(), 'smartdl.cleanup')
+    const env = await readEnvelope(
+      await fetchHandler(cleanupRequest({ session: { id: 'sess-clean', cwd } })),
+    )
+    assert.equal(env.body.result?.ok, true)
+    const value = env.body.result?.value as {
+      deleted: string[]
+      taskDir: string
+      taskDirSkipped?: string
+    }
+    assert.deepEqual(value.deleted, [staleTask], '轨道一里过期的那条必须被删掉')
+    assert.equal(value.taskDir, sessionDir, '必须如实报出实际扫描的轨道一目录')
+    assert.equal(value.taskDirSkipped, undefined, '轨道一参与了就不该出现「未参与」说明')
+    assert.equal(existsSync(freshTask), true, '保留窗口内的轨道一文件必须留着')
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(cwd, { recursive: true, force: true })
+    rmSync(downloadDir, { recursive: true, force: true })
+  }
+})
+
+test('cleanup：没有会话且未设 DSH_PROGRESS_DIR -> 如实报出轨道一未参与（不是静默少扫一个目录）', async () => {
+  const downloadDir = mkdtempSync(path.join(tmpdir(), 'rpc-cleanup-only2-'))
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    const stale = path.join(downloadDir, 'only-two.json')
+    writeFileSync(stale, JSON.stringify({ id: 'only-two', status: 'completed', progress: 1 }))
+    ageFile(stale, 3)
+
+    const fetchHandler = handlerOf(stubConnection(), 'smartdl.cleanup')
+    const env = await readEnvelope(await fetchHandler(cleanupRequest({})))
+    assert.equal(
+      env.body.result?.ok,
+      true,
+      '轨道一定位不到不是调用失败（没有会话是正常的单轨模式）',
+    )
+    const value = env.body.result?.value as {
+      taskDir: string
+      taskDirSkipped?: string
+      deleted: string[]
+    }
+    assert.equal(value.taskDir, '', 'taskDir 为空串 = 轨道一没有参与')
+    assert.match(
+      value.taskDirSkipped ?? '',
+      /轨道一未参与/,
+      '缺一个目录必须被显式报出来，而不是让调用方以为「删了 N 个 = 清完了」',
+    )
+    assert.match(value.taskDirSkipped ?? '', /session/, '说明里必须给出让轨道一参与的办法')
+    assert.deepEqual(value.deleted, [stale], '轨道二照常清理')
+  } finally {
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    rmSync(downloadDir, { recursive: true, force: true })
+  }
 })

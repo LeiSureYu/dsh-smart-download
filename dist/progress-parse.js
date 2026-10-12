@@ -8,7 +8,10 @@
  * 本文件同时提供“逐行切分”与 curl 进度解析，供生产代码与测试共用，
  * 避免测试用自己复刻的切分逻辑而绕过真实实现。
  */
-const SUMMARY_RE = /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:\d+\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?B(?:\/s|s)?)(?:\s+ETA:(\S+?))?\]\s*$/i;
+// 捕获组顺序：1=pct，2=CN，3=速度，4=ETA。
+// CN 的捕获组必须插在速度**之前**——它在摘要行里本来就在 DL/SPD 前面，
+// 这样 m[3]/m[4] 仍然分别是速度与 ETA，读取处的下标含义不会被搅乱。
+const SUMMARY_RE = /^\[#[\w]+\s+(?:SIZE:\s*)?[\d.]+\s*[KMGTPE]?i?B\/[\d.]+\s*[KMGTPE]?i?B\((\d+)%\)\s+CN:(\d+)\s+(?:DL|SPD):\s*([\d.]+\s*[KMGTPE]?i?B(?:\/s|s)?)(?:\s+ETA:(\S+?))?\]\s*$/i;
 /**
  * 按 \r\n / \r / \n 切分原始文本。
  * 末尾无终止符的半截内容会作为最后一个元素返回（由调用方决定是否保留）。
@@ -35,7 +38,9 @@ export function parseAria2Summary(line) {
     const pct = parseInt(m[1], 10);
     if (!Number.isFinite(pct))
         return null;
-    return { pct, spd: normalizeSpeed(m[2]), eta: m[3] };
+    // CN 的捕获组是 `(\d+)`，至少一位数字，parseInt 必然得到有限整数
+    const cn = parseInt(m[2], 10);
+    return { pct, cn, spd: normalizeSpeed(m[3]), eta: m[4] };
 }
 /**
  * 解析 curl --progress-bar 单行中的百分比。

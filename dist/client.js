@@ -25,12 +25,38 @@ window.__ModuleLoader__.load({
 		const API_PATH = '/api';
 		/** Endpoint owned by src/rpc.ts. */
 		const STATUS_ENDPOINT = 'smartdl.status';
-		/** How many tasks the pill asks for. */
-		const STATUS_LIMIT = 5;
+		/**
+		 * How many tasks the pill asks for.
+		 *
+		 * 50 = the Host's `MAX_STATUS_LIMIT` (src/status.ts): asking for more is
+		 * silently clamped there, so a larger number here would only look like it
+		 * did something. A batch call (路线 A) can finish more than 5 tasks in one
+		 * turn, and the point of stopping at 5 was that the panel could not show
+		 * more than a handful — the panel now caps its own height and scrolls,
+		 * so the request no longer has to be the thing that hides tasks.
+		 */
+		const STATUS_LIMIT = 50;
 		/** Poll cadence while the panel is mounted. */
 		const POLL_INTERVAL_MS = 2000;
 		/** How long a finished task stays on screen as a receipt. */
 		const FINISHED_HOLD_MS = 30000;
+		/**
+		 * Cap on the panel body height. 50 rows would otherwise grow taller than
+		 * the viewport; the cap keeps the pill a pill and lets the rows scroll.
+		 */
+		const PANEL_MAX_HEIGHT = 260;
+		/**
+		 * Failure text kept in full on one line. It is rendered in a wrapping
+		 * block (not an ellipsis row), so this only guards against a runaway
+		 * stderr blob pushing the progress bar off screen.
+		 */
+		const FAILURE_TEXT_LIMIT = 240;
+		/**
+		 * The status word `ProgressReporter.fail()` puts in front of the reason
+		 * (`src/progress.ts`). It is stripped for display because the row already
+		 * says 失败 and the two words together read as "Failed: 失败: …".
+		 */
+		const FAILED_MSG_PREFIX = '失败:';
 		/**
 		 * A task still marked `running` whose progress file has not been touched
 		 * for this long is treated as dead: the DSH process that owned it is gone
@@ -88,6 +114,46 @@ window.__ModuleLoader__.load({
 			return base.length > 48 ? base.slice(0, 45) + '…' : base;
 		}
 
+		/**
+		 * The text a hover `title` should carry: the whole untrimmed name.
+		 *
+		 * 返回值可能是空串 —— 那时**不挂 `title`**。空 `title` 会让浏览器弹出
+		 * 一个空白气泡，看起来像界面坏了；不挂属性则完全没有提示。
+		 */
+		function fullLabel(task) {
+			return (task.name || task.msg || task.id || '').trim();
+		}
+
+		/**
+		 * 失败 / 取消原因，供面板正文显示。
+		 *
+		 * 为什么不再只放在 `title` 里：悬停提示在触屏上根本够不到，键盘用户也要
+		 * 先聚焦才看得到，而失败原因恰恰是唯一需要立刻读到的东西。
+		 *
+		 * 三种情况返回空串（= 不渲染那一行），都不是「丢信息」：
+		 * - 状态不是 failed / cancelled：已完成的任务没有「原因」可讲；
+		 * - `msg` 与行标签逐字相同：轨道二（自有 JSON 格式）没有独立的状态文案，
+		 *   落到 `msg` 里的就是任务名，再显示一遍纯属重复；
+		 * - `msg` 以「失败:」开头、而冒号后面的内容就是行标签：同上，这是
+		 *   `ProgressReporter.fail(name)` 的形态。
+		 * 因此去掉可确定的重复前缀后仍与标签相同，才算重复。
+		 *
+		 * @param task 一条任务快照
+		 * @param label 该行已经显示的文字（shortLabel 的结果）
+		 * @returns 要显示的失败原因，或空串
+		 */
+		function failureReason(task, label) {
+			if (task.status !== 'failed' && task.status !== 'cancelled') return '';
+			let text = (task.msg || '').trim();
+			if (text.startsWith(FAILED_MSG_PREFIX)) {
+				text = text.slice(FAILED_MSG_PREFIX.length).trim();
+			}
+			if (text === '' || text === label.trim()) return '';
+			return text.length > FAILURE_TEXT_LIMIT
+				? text.slice(0, FAILURE_TEXT_LIMIT - 1) + '…'
+				: text;
+		}
+
 		const TONE = {
 			running: { bar: 'var(--dsw-alias-interactive-bg-primary, #4d6bfe)', text: 'var(--dsw-alias-label-primary, #1f2329)' },
 			completed: { bar: 'var(--dsw-alias-state-success-primary, #22a06b)', text: 'var(--dsw-alias-label-primary, #1f2329)' },
@@ -100,6 +166,8 @@ window.__ModuleLoader__.load({
 			const tone = TONE[task.status] || TONE.running;
 			const pct = Math.max(0, Math.min(100, Math.round(task.pct || 0)));
 			const label = shortLabel(task) || t('untitled');
+			const title = fullLabel(task);
+			const reason = failureReason(task, label);
 			const meta = [];
 			if (task.spd) meta.push(task.spd);
 			if (task.eta && task.status === 'running') meta.push(t('eta', { eta: task.eta }));
@@ -116,7 +184,9 @@ window.__ModuleLoader__.load({
 					react.createElement(
 						'span',
 						{
-							title: task.name || task.msg || task.id,
+							// title 只挂完整名字（不挂 msg）：悬停要看的是被省略号截断的
+							// 那个名字，而不是屏幕正文里已经有的那句话。
+							...(title ? { title: title } : {}),
 							style: {
 								flex: '1 1 auto',
 								minWidth: 0,
@@ -151,6 +221,9 @@ window.__ModuleLoader__.load({
 						'aria-valuenow': pct,
 						'aria-valuemin': 0,
 						'aria-valuemax': 100,
+						// 屏幕阅读器念进度条时把原因一起念出来：失败原因现在虽然进了
+						// 正文，但那是个独立的兄弟节点，读屏不会自动把它和进度条关联。
+						'aria-valuetext': reason ? pct + '% — ' + reason : pct + '%',
 						'aria-label': label,
 						style: {
 							height: 4,
@@ -181,6 +254,23 @@ window.__ModuleLoader__.load({
 							},
 						},
 						meta.join(' · '),
+					),
+				// 失败原因独立成行（不进 meta 拼接、不截断成省略号）：这行的存在本身
+				// 就是「为什么会失败」，用 `title` 悬停只能算把它藏起来。
+				reason !== '' &&
+					react.createElement(
+						'div',
+						{
+							style: {
+								fontSize: 11,
+								lineHeight: '15px',
+								// 用 error 色而非 tertiary：正文里这行是唯一需要被立刻看到的
+								color: tone.text,
+								whiteSpace: 'pre-wrap',
+								overflowWrap: 'anywhere',
+							},
+						},
+						reason,
 					),
 			);
 		}
@@ -301,6 +391,10 @@ window.__ModuleLoader__.load({
 						background: 'var(--dsw-alias-bg-module-platform, #ffffff)',
 						boxShadow: '0 8px 24px rgba(0,0,0,0.16)',
 						pointerEvents: 'auto',
+						// STATUS_LIMIT 提到 50 之后，一次批量可能同时有多行；封顶高度
+						// 让面板继续是「角落里的一个 pill」，超出的行改为内部滚动。
+						maxHeight: PANEL_MAX_HEIGHT,
+						overflowY: 'auto',
 					},
 				},
 				react.createElement(

@@ -17,6 +17,7 @@
  */
 import type { ProbeOptions, ProbeResult } from './types.js'
 import { normalizeContentEncoding } from './verify.js'
+import { headersToFetchInit } from './headers.js'
 
 /** 单次请求默认超时 5 秒 */
 const DEFAULT_TIMEOUT_MS = 5000
@@ -163,6 +164,20 @@ function toProbeResult(
 /**
  * 探测目标 URL 是否支持多线程下载。
  * 任何异常（超时、网络错误、无法获取大小）都安全地返回不支持，由调用方回退 curl。
+ *
+ * ⚠️ HEAD 抛异常时**不能直接放弃**（1.2.0 修正，实测结论，勿改回去）：
+ * 此前 HEAD 一旦抛异常（超时 / 被墙 / 连接被重置）就立刻返回「不支持多线程」，
+ * 于是三件事同时发生：
+ *   1. 每次下载白等一整个探测超时（默认 5s）；
+ *   2. 拿不到 `contentLength`，完整性校验永久退化成「跳过」；
+ *   3. `supportsMultiThread: false`，再大的文件也永远走 curl 单线程。
+ * 而「HEAD 不通、GET 正常」在 CDN / 代理上很常见。实测（本机，2026-10-12）：
+ *   smart_download("https://raw.githubusercontent.com/…/package.json")
+ *   -> via curl (fallback: HEAD 请求失败: The operation was aborted due to timeout)
+ *      (未做字节数校验：远端未声明文件长度)
+ * 也就是说同一个地址 curl 下得动，探测却宣告它「不支持多线程且大小未知」。
+ * 现在 HEAD 失败与「405 / 没有 Content-Length」走同一条 Range GET 兜底，
+ * 由 Range GET 的响应（206 + Content-Range）给出真实结论。
  */
 export async function probeUrl(
   url: string,
@@ -171,45 +186,53 @@ export async function probeUrl(
 ): Promise<ProbeResult> {
   const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS
   const threshold = options.threshold ?? DEFAULT_THRESHOLD
+  // 调用方的头与探测强制的 identity 合并；identity 最后合并，覆盖不掉
+  // （见 src/headers.ts：`accept-encoding` 同时在保留名单里，两头都堵）。
+  const baseHeaders = headersToFetchInit(options.headers, PROBE_ACCEPT_ENCODING)
 
   // 1. 先尝试 HEAD
-  let head: Response
+  let head: Response | null = null
+  let headError: string | undefined
   try {
     head = await fetch(url, {
       method: 'HEAD',
-      headers: { 'accept-encoding': PROBE_ACCEPT_ENCODING },
+      headers: baseHeaders,
       redirect: 'follow',
       signal: mergeSignal(externalSignal, timeout),
     })
   } catch (err) {
-    return notSupported(`HEAD 请求失败: ${describeError(err)}`)
+    // 刻意不在这里返回：交给下面的 Range GET 兜底再判一次（见函数头实测）
+    headError = describeError(err)
   }
 
-  const headLength = parseContentLength(head.headers.get('content-length'))
-  const headAcceptRanges = head.headers.get('accept-ranges')
-  const headContentType = head.headers.get('content-type') ?? undefined
-  const headEtag = head.headers.get('etag') ?? undefined
-  const headLastModified = head.headers.get('last-modified') ?? undefined
-  const headContentEncoding = readContentEncoding(head)
+  const headLength = head ? parseContentLength(head.headers.get('content-length')) : undefined
+  const headAcceptRanges = head?.headers.get('accept-ranges') ?? null
+  const headContentType = head?.headers.get('content-type') ?? undefined
+  const headEtag = head?.headers.get('etag') ?? undefined
+  const headLastModified = head?.headers.get('last-modified') ?? undefined
+  const headContentEncoding = head ? readContentEncoding(head) : undefined
 
   // 不消费响应体，主动取消以释放连接。
   // HEAD 通常没有 body（Node 的 undici 会给出 null），但现实里有服务器/代理
   // 在 HEAD 上返回 body —— 不取消就会一直占着这条连接。与下面 Range GET
   // 分支保持一致，两条分支都必须释放。
-  head.body?.cancel().catch(() => {})
+  head?.body?.cancel().catch(() => {})
 
-  // 2. HEAD 为 405 或缺少 Content-Length 时，改用 Range GET
-  if (head.status === 405 || headLength === undefined) {
+  // 2. HEAD 不可用（抛异常 / 405 / 缺少 Content-Length）时，改用 Range GET
+  if (!head || head.status === 405 || headLength === undefined) {
     let get: Response
     try {
       get = await fetch(url, {
         method: 'GET',
-        headers: { Range: 'bytes=0-0', 'accept-encoding': PROBE_ACCEPT_ENCODING },
+        headers: { ...baseHeaders, Range: 'bytes=0-0' },
         redirect: 'follow',
         signal: mergeSignal(externalSignal, timeout),
       })
     } catch (err) {
-      return notSupported(`Range GET 请求失败: ${describeError(err)}`)
+      // 两条路都失败才判不支持；HEAD 的失败原因保留在文案里，便于区分
+      // 「站点不通」与「站点在 HEAD 上行为异常」
+      const headNote = headError ? `HEAD 请求失败: ${headError}；` : ''
+      return notSupported(`${headNote}Range GET 请求失败: ${describeError(err)}`)
     }
 
     const contentRange = get.headers.get('content-range')
@@ -243,11 +266,22 @@ export async function probeUrl(
   }
 
   // 3. HEAD 信息足够，直接判定
+  //
+  // ⚠️ `content-range` 必须照读，不能写死 null（1.2.0 修正，实测结论）：
+  // 服务器对 HEAD 回 206 + `Content-Range: bytes 0-0/2048` 是合法行为（部分
+  // CDN / 代理就这么干）。此时 HEAD 的 `Content-Length` 是**分片**长度（实测为
+  // 1），真正的总长度只在 `Content-Range` 里。此前这里传 null，于是
+  // `evaluateRangeSupport` 取到 size = 1：
+  //   - 决策层判「文件仅 0KB，多线程无收益」，大文件被静默压成 curl 单线程；
+  //   - 更要命的是完整性校验拿 1 字节当期望值，一个**完全正确**的下载会在落盘
+  //     后被判成损坏（「落盘 2048 字节，远端声明 1 字节」）。
+  // 这与 Range GET 分支的取值规则现在完全一致：Content-Range 优先于
+  // Content-Length。
   const decision = evaluateRangeSupport({
     status: head.status,
     acceptRanges: headAcceptRanges,
     contentLength: headLength,
-    contentRange: null,
+    contentRange: head.headers.get('content-range'),
     threshold,
   })
   return toProbeResult(

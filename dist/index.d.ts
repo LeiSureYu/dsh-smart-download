@@ -13,4 +13,12 @@
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "dsh-smart-dl";
 export declare const inject: string[];
+/**
+ * `download_status` 在没有任何任务时的固定文案。
+ *
+ * 定成常量而不是就地拼串，理由与 `verify.ts` 的跳过文案相同：它现在会被
+ * 「读不到目录」的诊断信息**追加**在后面，两段文案必须各自可断言，
+ * 不能靠一个模板字符串把两件事混成一件。
+ */
+export declare const NO_TASKS_TEXT = "No download tasks found.";
 export declare function apply(ctx: Context): void;

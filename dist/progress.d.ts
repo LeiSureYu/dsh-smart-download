@@ -31,6 +31,11 @@ export declare function resolveDownloadProgressDir(): string;
 export declare class ProgressReporter {
     private readonly taskId;
     private readonly label;
+    /**
+     * 批次 ID：同一次调用（单条目或批量）里所有条目共用。
+     * 只做分组标签，任何执行/并发决策都不看它。
+     */
+    private readonly batch;
     private taskProgressFile;
     private downloadProgressFile;
     private lastPct;
@@ -61,8 +66,11 @@ export declare class ProgressReporter {
      * @param taskId 任务 ID，用于文件名与状态查询
      * @param label 人类可读的任务名（通常是输出文件名），会写入两条轨道供 UI 展示
      * @param session 当前会话；用于把轨道一写进该会话的进度目录，缺省则不写轨道一
+     * @param batch 批次 ID，可选；同一次调用产生的所有条目共用一个值。
+     *   缺省时不写该字段（老行为逐字节相同），而不是写一个空串 —— 空串会占着
+     *   字段位，让读取端以为「有批次但不知道是哪批」。
      */
-    constructor(taskId: string, label?: string, session?: ProgressSession);
+    constructor(taskId: string, label?: string, session?: ProgressSession, batch?: string);
     /**
      * 上报进度。
      * @param pct 0-100 的进度（会四舍五入为整数）

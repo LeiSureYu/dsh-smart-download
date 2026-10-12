@@ -8,9 +8,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  AUTO_MIRROR,
+  GITHUB_HOSTS,
   RECOMMENDED_MIRRORS,
   applyMirror,
+  isAutoMirror,
+  isGithubUrl,
   isHttpUrl,
+  mirrorCandidates,
   normalizeMirror,
 } from '../src/mirror.js'
 
@@ -128,4 +133,73 @@ test('RECOMMENDED_MIRRORS: 每一项都是可直接使用的 https 前缀', () =
     assert.ok(m.startsWith('https://'), m)
     assert.ok(m.endsWith('/'), m)
   }
+})
+
+/* ------------------------------ 自动镜像 ------------------------------ */
+
+test('isAutoMirror: 只认字面量 auto（大小写与首尾空白不敏感）', () => {
+  assert.equal(isAutoMirror(AUTO_MIRROR), true)
+  assert.equal(isAutoMirror('auto'), true)
+  assert.equal(isAutoMirror('  AUTO  '), true)
+  assert.equal(isAutoMirror('Auto'), true)
+  // 别的一律不是自动模式，否则会把普通前缀当成自动而悄悄改变行为
+  assert.equal(isAutoMirror('automatic'), false)
+  assert.equal(isAutoMirror('https://gh-proxy.com/'), false)
+  assert.equal(isAutoMirror(''), false)
+  assert.equal(isAutoMirror(undefined), false)
+  assert.equal(isAutoMirror(null), false)
+})
+
+test('isGithubUrl: 只认 GitHub 的下载链路', () => {
+  assert.equal(isGithubUrl(SAMPLE_URL), true)
+  assert.equal(isGithubUrl('https://raw.githubusercontent.com/o/r/main/a.json'), true)
+  assert.equal(isGithubUrl('https://objects.githubusercontent.com/x'), true)
+  assert.equal(isGithubUrl('https://codeload.github.com/o/r/zip/refs/heads/main'), true)
+  assert.equal(isGithubUrl('https://gist.githubusercontent.com/u/id/raw/a.txt'), true)
+  // 子域名也算（GitHub 会发到 release-assets 之类的子域）
+  assert.equal(isGithubUrl('https://sub.github.com/a'), true)
+  // 非 GitHub：自动镜像对它们没有意义，只会把下载绕进第三方
+  assert.equal(isGithubUrl('https://example.com/a.zip'), false)
+  assert.equal(isGithubUrl('https://notgithub.com/a.zip'), false)
+  // 关键：不能把 github.com 当成后缀匹配吃掉 —— evilgithub.com 不是 GitHub
+  assert.equal(isGithubUrl('https://evilgithub.com/a.zip'), false)
+  assert.equal(isGithubUrl('https://github.com.evil.example/a.zip'), false)
+  assert.equal(isGithubUrl('file:///C:/a.zip'), false)
+  assert.equal(isGithubUrl('not a url'), false)
+})
+
+test('GITHUB_HOSTS: 每一项都是裸域名（不带协议、不带路径）', () => {
+  assert.ok(GITHUB_HOSTS.length >= 3)
+  for (const host of GITHUB_HOSTS) {
+    assert.equal(host, host.toLowerCase(), host)
+    assert.ok(!host.includes('/'), host)
+    assert.ok(!host.includes(':'), host)
+  }
+})
+
+test('mirrorCandidates: 按前缀表顺序给出「前缀 + 完整原始 URL」', () => {
+  const candidates = mirrorCandidates(SAMPLE_URL, ['https://m1/', 'https://m2/'])
+  assert.deepEqual(candidates, [
+    { mirror: 'https://m1/', url: `https://m1/${SAMPLE_URL}` },
+    { mirror: 'https://m2/', url: `https://m2/${SAMPLE_URL}` },
+  ])
+})
+
+test('mirrorCandidates: 前缀会被归一化（裸域名补 https、补尾斜杠）', () => {
+  const candidates = mirrorCandidates(SAMPLE_URL, ['ghfast.top'])
+  assert.deepEqual(candidates, [{ mirror: 'https://ghfast.top/', url: `https://ghfast.top/${SAMPLE_URL}` }])
+})
+
+test('mirrorCandidates: 非 http(s) 的 URL 或前缀被跳过（与 applyMirror 同一套判定）', () => {
+  assert.deepEqual(mirrorCandidates('file:///C:/a.zip', ['https://m1/']), [])
+  assert.deepEqual(mirrorCandidates(SAMPLE_URL, ['file:///C:/evil?x=', 'javascript://x//']), [])
+  // 混合时只保留合法的那些
+  const mixed = mirrorCandidates(SAMPLE_URL, ['file:///C:/evil?x=', 'https://m1/'])
+  assert.deepEqual(mixed.map((c) => c.mirror), ['https://m1/'])
+})
+
+test('mirrorCandidates: 缺省用 RECOMMENDED_MIRRORS，且顺序与常量一致', () => {
+  const candidates = mirrorCandidates(SAMPLE_URL)
+  assert.deepEqual(candidates.map((c) => c.mirror), [...RECOMMENDED_MIRRORS])
+  for (const c of candidates) assert.ok(c.url.endsWith(SAMPLE_URL))
 })

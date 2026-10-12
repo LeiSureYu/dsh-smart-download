@@ -8,6 +8,31 @@
  */
 import type { ConcurrencyLevel, Decision, ProbeResult } from './types.js';
 /**
+ * 插件的并发上限。
+ *
+ * 为什么是 8 而不是实测更快的 16：32/64MB 下 x=16 确实还能再快一倍（23~24 MB/s），
+ * 但保守起见维持 8，避免触发服务器按 IP 限并发（见 `decideConcurrency` 的注释）。
+ * 这个常量是「历史抬档」也不得越过的那条线 —— 抬档的收益有界，越过它就是另一个取舍了。
+ */
+export declare const MAX_CONCURRENCY = 8;
+/**
+ * 抬档要求「上次实际开了这么多条连接」。
+ *
+ * 为什么要看实际有效连接数（`CN`）而不是只看请求的 `-x`：`-x` 是我们**请求**的并发，
+ * `CN` 才是 aria2 实际用起来的（见 src/progress-parse.ts 的字段注释）。服务器限并发、
+ * 分片不够、镜像不给 Range 时，`-x 8` 实际可能只跑 1 条 —— 那种主机的历史不能证明
+ * 「多开连接有用」。4 是「至少开出了一半的上限」这个下限，不取更高是因为文件小、
+ * 分片少时 `CN` 天然低，而那种文件本来也不在抬档的考虑范围里（见 raiseFromHistory）。
+ */
+export declare const RAISE_MIN_EFFECTIVE_CONNECTIONS = 4;
+/**
+ * 抬档文案的固定前缀。
+ *
+ * 做成常量而不是就地拼串：调用方与测试靠它区分「按大小分档」与「按历史抬档」，
+ * 两处各写一份必然漂移（并且会让「无法区分」的返回值悄悄回到代码里）。
+ */
+export declare const HISTORY_RAISE_REASON = "\u4F9D\u636E\u5386\u53F2\u541E\u5410\u62AC\u6863";
+/**
  * 低于该大小不走 aria2（建连/分片开销大于收益）。
  *
  * 依据 0.7.0 受控实测（每连接限速 2MB/s、3 轮取中位数）：
@@ -54,10 +79,27 @@ export interface DecideEnv {
     arch?: string;
 }
 /**
- * 决策函数：除「aria2 缺失」分支的提示文案会带上当前平台外，不依赖外部状态，便于单测。
+ * 历史抬档的入参（P1-2 读侧）。
+ *
+ * 只给 URL 就够：缓存按「主机 + 端口」分桶，密钥从 URL 现算（见 throughput-cache.ts）。
+ */
+export interface ThroughputHistoryInput {
+    /** 原始 URL（取主机 + 端口查历史） */
+    url: string;
+    /** 覆盖缓存目录（测试注入；生产走 `DSH_SMARTDL_THROUGHPUT_DIR` 或默认目录） */
+    dir?: string;
+    /** 注入的「现在」（毫秒），TTL 判定用；缺省取 `Date.now()` */
+    now?: number;
+}
+/**
+ * 决策函数：除「aria2 缺失」分支的提示文案会带上当前平台外，只有在**显式给了**
+ * `history` 时才会碰磁盘（读吞吐缓存），因此仍然便于单测。
  *
  * @param probe 探测结果
  * @param aria2Available 随包 aria2c 是否可定位
  * @param env 环境描述，缺省时取 `process.platform` / `process.arch`
+ * @param history 可选的历史吞吐入参；**不给就与今天逐字段相同**（不读盘、不抬档）。
+ *   注意缓存目前**还没有写入者**：写入点接在下载结束时（src/index.ts / src/downloader.ts），
+ *   是紧随本项之后的独立任务。所以现在传了历史也只会命中「手工/测试写入的记录」。
  */
-export declare function decide(probe: ProbeResult, aria2Available: boolean, env?: DecideEnv): Decision;
+export declare function decide(probe: ProbeResult, aria2Available: boolean, env?: DecideEnv, history?: ThroughputHistoryInput): Decision;

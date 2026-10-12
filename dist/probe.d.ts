@@ -64,5 +64,19 @@ export declare function evaluateRangeSupport(input: EvaluateInput): EvaluateResu
 /**
  * 探测目标 URL 是否支持多线程下载。
  * 任何异常（超时、网络错误、无法获取大小）都安全地返回不支持，由调用方回退 curl。
+ *
+ * ⚠️ HEAD 抛异常时**不能直接放弃**（1.2.0 修正，实测结论，勿改回去）：
+ * 此前 HEAD 一旦抛异常（超时 / 被墙 / 连接被重置）就立刻返回「不支持多线程」，
+ * 于是三件事同时发生：
+ *   1. 每次下载白等一整个探测超时（默认 5s）；
+ *   2. 拿不到 `contentLength`，完整性校验永久退化成「跳过」；
+ *   3. `supportsMultiThread: false`，再大的文件也永远走 curl 单线程。
+ * 而「HEAD 不通、GET 正常」在 CDN / 代理上很常见。实测（本机，2026-10-12）：
+ *   smart_download("https://raw.githubusercontent.com/…/package.json")
+ *   -> via curl (fallback: HEAD 请求失败: The operation was aborted due to timeout)
+ *      (未做字节数校验：远端未声明文件长度)
+ * 也就是说同一个地址 curl 下得动，探测却宣告它「不支持多线程且大小未知」。
+ * 现在 HEAD 失败与「405 / 没有 Content-Length」走同一条 Range GET 兜底，
+ * 由 Range GET 的响应（206 + Content-Range）给出真实结论。
  */
 export declare function probeUrl(url: string, externalSignal?: AbortSignal, options?: ProbeOptions): Promise<ProbeResult>;

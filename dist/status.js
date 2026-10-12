@@ -83,14 +83,24 @@ function statusFrom(pct, msg, state) {
         return 'completed';
     return 'running';
 }
-/** 收集一个目录下的任务快照（.jsonl 或 .json） */
-function collectFromDir(dir, ext) {
+/**
+ * 收集一个目录下的任务快照（.jsonl 或 .json）。
+ *
+ * @param dir 待扫描目录
+ * @param ext 该目录下的进度文件后缀
+ * @param onScanError 目录读不到时回调（收到目录路径）。**必须由调用方透出**：
+ *   此前这里静默 `return out`，于是「权限不足 / 路径不存在 / 磁盘故障」与
+ *   「目录里确实没有任务」产出同一个空 Map —— 一次失败的查询看起来和一次干净的
+ *   空查询完全一样，正是本项目反复出问题的静默失败形态。
+ */
+function collectFromDir(dir, ext, onScanError) {
     const out = new Map();
     let entries;
     try {
         entries = fs.readdirSync(dir);
     }
     catch {
+        onScanError?.(dir);
         return out;
     }
     for (const name of entries) {
@@ -121,6 +131,8 @@ function collectFromDir(dir, ext) {
                 status: statusFrom(pct, msg, rec.state),
                 spd: str(rec.spd),
                 eta: str(rec.eta),
+                // 老记录没有 batch：`str()` 收敛成空串，解析结果与 1.2.0 逐字段相同
+                batch: str(rec.batch),
                 updatedAt: mtimeMs,
             });
             continue;
@@ -153,6 +165,8 @@ function collectFromDir(dir, ext) {
             status,
             spd: str(rec.speed),
             eta: str(rec.eta),
+            // 与轨道一同理：老任务文件没有 batch 时为 ''
+            batch: str(rec.batch),
             updatedAt: Number.isFinite(updatedRaw) && updatedRaw > 0 ? updatedRaw : mtimeMs,
         });
     }
@@ -161,7 +175,8 @@ function collectFromDir(dir, ext) {
 /**
  * 读取下载任务进度快照。
  *
- * 只做只读扫描；两条轨道任一不可用都跳过，整体仍返回 ok=true（只要扫到任意任务）。
+ * 只做只读扫描；两条轨道任一不可用都跳过，**但跳过不再静默** ——
+ * 读不到的目录会被收进 `scanFailedDirs`，两个都读不到时 `ok` 为 `false`。
  *
  * @param limit 最多返回多少个任务，默认 10
  * @param taskId 指定任务 ID 时只返回该任务
@@ -170,15 +185,29 @@ function collectFromDir(dir, ext) {
 export function readDownloadStatus(limit = DEFAULT_STATUS_LIMIT, taskId, session) {
     const taskDir = resolveTaskProgressDir(session);
     const downloadDir = resolveDownloadProgressDir();
+    const scanFailedDirs = [];
+    const noteScanError = (dir) => {
+        scanFailedDirs.push(dir);
+    };
     const merged = new Map();
     // 先铺轨道二（JSON，含明确的 status/updatedAt），再用轨道一（JSONL，含 msg/spd/eta）覆盖补充
-    for (const [id, task] of collectFromDir(downloadDir, '.json'))
+    for (const [id, task] of collectFromDir(downloadDir, '.json', noteScanError)) {
         merged.set(id, task);
+    }
     if (taskDir) {
-        for (const [id, task] of collectFromDir(taskDir, '.jsonl')) {
+        for (const [id, task] of collectFromDir(taskDir, '.jsonl', noteScanError)) {
             const existing = merged.get(id);
-            // 轨道一的 name 可能为空（老版本进度文件），此时保留轨道二给出的名字
-            merged.set(id, existing ? { ...existing, ...task, name: task.name || existing.name } : task);
+            // 轨道一的 name / batch 可能为空（老版本进度文件没有这些字段），此时保留
+            // 轨道二给出的值：与 name 完全同一个理由 —— 让「老文件 + 新文件」合并后
+            // 仍然拿得到较新的那个轨道已经写下来的信息。
+            merged.set(id, existing
+                ? {
+                    ...existing,
+                    ...task,
+                    name: task.name || existing.name,
+                    batch: task.batch || existing.batch,
+                }
+                : task);
         }
     }
     let tasks = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -189,7 +218,20 @@ export function readDownloadStatus(limit = DEFAULT_STATUS_LIMIT, taskId, session
         ? Math.min(MAX_STATUS_LIMIT, Math.floor(limit))
         : DEFAULT_STATUS_LIMIT;
     tasks = tasks.slice(0, cap);
+    // 只有「两个目录都读不到」才判失败：那时调用方拿到的空列表是**无信息**的，
+    // 必须能与「扫过了、确实没有任务」区分开。没有会话上下文时 taskDir 为 null
+    // （轨道一压根不参与扫描），因此不构成失败 —— 那是正常的单轨模式。
+    const scannedDirs = taskDir ? 2 : 1;
+    const ok = scanFailedDirs.length < scannedDirs;
     // taskDir 可能是 null（没有会话上下文且未设 DSH_PROGRESS_DIR）；schema 要求
     // string，因此统一收敛成空串，避免 download_status 因类型不合法而报错。
-    return { ok: true, taskDir: taskDir ?? '', downloadDir, total, tasks };
+    // scanFailedDirs 只在有失败时出现：正常路径上返回结构与收紧前逐字段相同。
+    return {
+        ok,
+        taskDir: taskDir ?? '',
+        downloadDir,
+        total,
+        tasks,
+        ...(scanFailedDirs.length > 0 ? { scanFailedDirs } : {}),
+    };
 }

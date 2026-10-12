@@ -424,3 +424,47 @@ test('resolveDownloadProgressDir：走 DSH_HOME 而不是 USERPROFILE/HOME', () 
 test('resolveDownloadProgressDir：DSH_DOWNLOAD_PROGRESS_DIR 优先', () => {
   assert.equal(resolveDownloadProgressDir(), dlDir)
 })
+
+/* ---------------- 1.3.0：批次 ID（P0-5 贯通两条轨道） ---------------- */
+
+test('批次 ID：提供时两条轨道写入同一个值', async () => {
+  const r = new ProgressReporter('task-batch-1', 'a.bin', undefined, 'b-abc123')
+  r.report(10, '下载中')
+  r.report(100, '下载完成', undefined, undefined, 'done')
+  await r.awaitFlush()
+
+  const lines = readJsonl(path.join(taskDir, 'task-batch-1.jsonl'))
+  assert.equal(lines.length, 2)
+  // 每一条记录都要带批次 ID：读取端按最后一行判定状态，只写首条等于没写
+  for (const line of lines) assert.equal(line.batch, 'b-abc123')
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-batch-1.json'), 'utf-8')) as {
+    batch?: string
+  }
+  assert.equal(task.batch, 'b-abc123', '轨道二也要能还原批次')
+})
+
+test('批次 ID：未提供时两条轨道都不出现该字段（与 1.2.0 逐字节相同）', async () => {
+  const r = new ProgressReporter('task-batch-2', 'b.bin')
+  r.report(50, '下载中')
+  await r.awaitFlush()
+
+  const lines = readJsonl(path.join(taskDir, 'task-batch-2.jsonl'))
+  assert.equal(Object.hasOwn(lines[0]!, 'batch'), false, '轨道一不得凭空多出 batch 字段')
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-batch-2.json'), 'utf-8')) as object
+  assert.equal(Object.hasOwn(task, 'batch'), false, '轨道二不得凭空多出 batch 字段')
+})
+
+test('批次 ID：不同批次互不相同（单条目调用也要有唯一值）', async () => {
+  // 单条目调用的批次 ID 由调用方生成后传进来，这里验证「不同的值确实被分别写入」，
+  // 否则两台并发的单条目调用会在读取端被误判成同一批。
+  const a = new ProgressReporter('task-batch-a', 'a.bin', undefined, 'b-one')
+  const b = new ProgressReporter('task-batch-b', 'b.bin', undefined, 'b-two')
+  a.report(1, '下载中')
+  b.report(1, '下载中')
+  await a.awaitFlush()
+  await b.awaitFlush()
+
+  assert.equal(readJsonl(path.join(taskDir, 'task-batch-a.jsonl'))[0]!.batch, 'b-one')
+  assert.equal(readJsonl(path.join(taskDir, 'task-batch-b.jsonl'))[0]!.batch, 'b-two')
+})

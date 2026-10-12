@@ -11,6 +11,337 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-12
+
+三件事：**一次调用下一批文件**（下载队列）、**把「静默失败」的出口补上人话**（错误提示与进度面板）、
+**把观测到的数据用起来**（实际连接数解析 + 吞吐缓存）。另外把 P2 的核对结论写进文档 ——
+结论是「macOS 仍然不做」，但理由从「没找到」升级为「逐个来源核对后仍不成立」。
+
+Three things: **downloading a batch inside one call** (the download queue), **giving the
+"silent failure" exits human-readable text** (error messages and the progress panel), and
+**putting the observed data to use** (real connection-count parsing plus a throughput cache).
+P2's findings are also written down — macOS is still not done, but the reason is upgraded from
+"not found" to "checked every source and it still does not hold up".
+
+### 新增 / Added
+
+- **`targets` 参数：单次调用内批量下载（P0 的核心交付）。** 传一个数组，每个条目带自己的
+  `url` 与可选的 `output` / `sha256`，`mirror` / `userAgent` / `referer` / `headers` /
+  `maxBandwidth` / `timeoutMs` 整批共享。批内用**滑动窗口**并发，窗口宽度按「批内总连接数
+  有界」反推（预算 = 单条目最高档 × 2 = 16，窗口 = 预算 ÷ 单条目可能占用的连接数，当前恒为 2）——
+  刻意**不取**单条目最高档 8，否则 8 条 × 8 连接 = 峰值 64，会把「单文件压在 8 连接以避免触发
+  服务器按 IP 限并发」这条既定取舍整个抵消。单条目内部开 4 还是 8 仍由 `decide()` 按实际
+  文件大小决定，两者互不影响。
+  **失败语义（用户拍板 D4=②）：部分成功照常返回**，返回值带 `batch`（批次 ID）、
+  `succeeded` / `failed` / `cancelled` 三个计数与逐条的 `results[]`，一行一条 `success` /
+  `path` / `error` —— 只给「N 条成功 M 条失败」的话，调用方仍然不知道要不要重试、重试哪一条。
+  失败与取消分开计数：`failed` 是「下载坏了」，`cancelled` 是「整批被取消」；整批取消时还没
+  开工的条目也各留一条取消记录，不会凭空消失。
+  **`targets` parameter for downloading several files inside one call** (route A: synchronous
+  return, no background jobs), with a sliding-window concurrency derived from a bounded
+  in-batch connection budget, per-entry results so a failing entry never discards the ones
+  that succeeded, and failures counted separately from cancellations.
+
+- **`maxBandwidth` 参数：一批内所有任务共享的总带宽上限。** 接受裸字节数或 K/M/G 后缀
+  （1024 进制），如 `"4M"` / `"500K"` / `"1500000"`。它是**一次调用**的上限而不是每条的上限：
+  批量时按实际并发位均分（`"4M"` + 窗口 2 → 每条 2M），因此一次调用的合计吞吐不会超过它。
+  落到子进程上是 aria2 的 `--max-overall-download-limit` 与 curl 的 `--limit-rate`。
+  **为什么不需要跨调用状态**：`smart_download` 未声明 `isConcurrencySafe`，DSH 的
+  executionMode 规则是「未声明即 exclusive」，同一时刻只可能有一个调用在跑，所以上限天然
+  只需在批内共享。**非法值在发起任何请求之前抛错** —— 交给子进程等于「用户以为限了速，
+  其实没限」（它们对非法参数是静默忽略的）。缺省时两条命令行逐字节不变。
+  **`maxBandwidth`** a bandwidth cap shared by every task in one call (divided across the
+  entries running concurrently in a batch); no cross-call state is needed because the tool
+  is exclusive, and an invalid value is refused before any request is made.
+
+- **`timeoutMs` 参数：单条目超时。** 毫秒，`1000`..`1800000`（1 秒到 30 分钟）。为什么需要它：
+  路线 A 是同步调用，一个卡死的条目会让整批一直不返回。30 分钟是保守上限
+  （1GB @ 1MB/s ≈ 17 分钟）；更长的等待说明应当改用「先返回、后台继续」的形态 ——
+  那个形态明确不做（见下方「不做」），所以宁可让它在这里失败，也不挂住整个会话。
+  超时之后：**那一条记 `failed` 而不是 `cancelled`**（用户并没有按取消，两者在面板上是两个
+  状态），同批其余条目继续跑，已完成条目的结果不会被改判，超时**不**回退到 curl
+  （回退等于把同一份等待再花一遍）。它对**单条目调用同样有效**；不传时单条目路径与 1.2.0
+  逐字段相同，传了但未超时时返回结构的键集合也不变。
+  **`timeoutMs`** a per-entry timeout (1000..1800000 ms) that exists because route A is a
+  synchronous call; a timed-out entry is reported as `failed` (not `cancelled`), the batch's
+  other entries keep running, and there is no fallback to curl.
+
+- **进度记录加 `batch` 字段（批次 ID，P0-5）。** 一次调用的所有条目共享同一个 ID，两条进度
+  轨道都写入，`download_status` 与面板因此能把它们归到一起。字段**可选**：老进度文件缺它时
+  读取端不报错、不改变原有 `status` / `pct` / `msg` 解析结果。它只做**分组标签**，
+  不参与任何执行 / 并发决策。单条目调用也生成一个（不进返回值，返回结构必须与 1.2.0 相同），
+  便于统一显示。
+  **A `batch` field on progress records** shared by every entry of one call on both progress
+  tracks; optional for backward compatibility, a grouping label only, never an input to any
+  execution or concurrency decision.
+
+- **`/api/smartdl.cleanup` Host 端点：历史进度文件清理入口（D7-②）。** 此前 `cleanup()` 是
+  给调用方准备的显式接口但没有任何触发入口，进度文件只增不减。删除范围被严格限制在两条进度
+  轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的
+  **普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），
+  单次默认删 200 个（硬上限 500），最旧优先。它**不**删下载产物、**不**递归、**不**碰其它目录；
+  参数非法直接 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。
+  要清轨道一必须在 payload 里带 `session: { id, cwd }`，不带时返回里用 `taskDirSkipped`
+  明确说明「轨道一未参与」，而不是假装清完了。
+  **A `/api/smartdl.cleanup` endpoint** for pruning historical progress files, strictly
+  scoped to the two progress directories, regular files only (`lstat`), with an explicit
+  `taskDirSkipped` when track 1 is not reachable.
+
+- **吞吐缓存（P1-2 读侧 + 写入侧）。** 新增 `src/throughput-cache.ts`：按**主机 + 端口**分桶，
+  **只存主机名的 sha256 前缀**（缓存文件里 grep 不到任何明文域名），每条记录保留最近 5 次样本的
+  吞吐中位数、当时的并发数与**实际有效连接数**、更新时间；TTL 24 小时，过期顺手淘汰。
+  读侧：`decide()` 新增可选 `history` 入参，命中且历史并发达到上限时**只做抬档**，且抬档理由
+  必须显式写明「依据历史吞吐抬档」并带上主机标识与数值；不给 `history` 时与今天逐字段相同
+  （不读盘、不抬档）。写入侧：下载成功且完整性校验通过之后记录一次观测值
+  （放在校验之后是刻意的 —— 校验失败说明这次字节不可信，那种速度不代表这台主机的能力），
+  写失败静默忽略（与 `writeMarker()` 同构：缓存是优化而不是功能）。
+  目录可用 `DSH_SMARTDL_THROUGHPUT_DIR` 覆盖。隐私口径见 `docs/SECURITY.md`。
+  **A throughput cache** keyed by host + port, storing only a sha256 prefix of the hostname,
+  read by `decide()` to raise (never lower) the concurrency tier with an explicit reason, and
+  written after a verified successful download.
+
+- **解析出 aria2 的「实际有效连接数」`CN`（P1-1，纯观测）。** `parseAria2Summary()` 此前已经
+  匹配 `CN:\d+` 却只取了 `pct` / `spd` / `eta`，把这个白拿的观测值丢掉了。现在返回 `cn`，
+  语义与 `-x/-s` 不同：后者是**请求**的并发数，前者是**实际用起来**的连接数，两者不等说明
+  瓶颈不在并发档位。本项**不消费**这个字段（零行为变更），它是上面那条缓存的数据来源之一。
+  **Parsing aria2's real connection count `CN`** (observation only, zero behaviour change):
+  `-x/-s` is what was requested, `CN` is what actually got used.
+
+- **`download_status` 区分「读不到」与「没有任务」（P0-3）。** 新增可选 `scanFailedDirs` 字段，
+  只在真有目录读不到时出现；两个目录都读不到时 `ok` 为 `false`（此前恒为 `true`），
+  于是「权限不足」与「确实没有任务」不再同形。可读的空目录返回结构与之前逐字段相同。
+  模型可见回执也会追加诊断段，并且**否定**那句空列表结论。
+  **`download_status` now distinguishes "unreadable" from "no tasks"** via an optional
+  `scanFailedDirs` field and a tightened `ok`.
+
+### 变更 / Changed
+
+- **子进程退出码翻译层（P0-1）。** 此前非零退出时用户看到的是原始 stderr 直出，没有任何
+  「下一步」。现在 curl 18 / 22 / 28 / 33 / 56 与 aria2 1 / 3 / 9 / 13 / 24 都会给出中文原因
+  与下一步；**未知码原样保留退出码与 stderr 尾部**，不编造原因。退出码 0 仍 `resolve()` 且
+  不产生任何文案。文案里的命令收敛为 `curl` / `aria2c`，绝对路径不再出现。
+  **每个码都追到官方来源**：curl 取 man page 的 "Exit codes"，aria2 取官方手册的
+  "EXIT STATUS"（随包二进制查不到退出码表，`--help=#exit-status` 只回一句
+  「Refer to man page for more information.」）—— 宁可不翻译，不可翻译错。
+  **An exit-code translation layer** mapping curl 18/22/28/33/56 and aria2 1/3/9/13/24 to a
+  cause plus a next step, each traced to its official documentation; unknown codes keep the
+  exit code and stderr verbatim.
+
+- **校验失败文案补「下一步」（P0-2）。** 四条失败路径（长度不符 / 文件不存在 / SHA-256 不匹配 /
+  无法读取）都补上下一步，并保留原有的可核对数据（落盘字节数、远端声明字节数、期望与实际摘要）。
+  SHA-256 不匹配改为**分行**呈现（原因 / 期望摘要 / 实际摘要），两个 64 位 hex 不再并排。
+  **Integrity-failure messages gained a "what to do next"** while keeping every previously
+  reported number, and a SHA-256 mismatch now prints expected and actual on separate lines.
+
+- **进度面板：失败原因进正文 + 容量对齐批量（P0-4）。** `STATUS_LIMIT` 由 5 提到 **50**，
+  与服务端 `MAX_STATUS_LIMIT` 对齐 —— 一次批量可能同时有多行，5 条装不下。`failed` /
+  `cancelled` 的失败原因从此在**面板正文可见**，不再只存在于悬停 `title`。单行信息位数量
+  不减少（文件名 / 百分比 / 进度条 / 速度·ETA 全部保留），`role="progressbar"` 与
+  `aria-valuenow` 保持。批量超过面板高度时可滚动（`maxHeight: 260` + `overflowY: auto`）——
+  这是 `STATUS_LIMIT` 提升的必要配套，不是新增交互。
+  **The progress panel shows failure reasons in the row itself**, raises `STATUS_LIMIT` to 50
+  to match the server cap, and scrolls when a batch is longer than the panel.
+
+- **`curl -C -` 退出码 33 的表述按官方定义对齐。** 此前把它解释成「服务器不支持 Range」，
+  而 curl 官方定义里 **33 = HTTP range error**（我们发出的 Range 请求未被服务器接受），
+  「服务器不支持续传」对应的是 **36 = bad download resume** —— 两者不是一回事。本机实测
+  （curl 8.13.0）：服务器**忽略**我们发的 `Range` 且本地已有半截文件时以 33 失败；
+  同一场景不带 `-C -` 能正常全量重下。据此推断「服务器永久不支持续传」是不成立的（那要按 36 判）。
+  **curl exit code 33 is now described per its official definition** (HTTP range error),
+  distinguished from 36 (bad download resume).
+
+### 修复 / Fixed
+
+- **取消文案泄漏可执行文件绝对路径（P0V-01）。** `runProcess` 的两处取消分支此前插值原始
+  `command`，aria2 取消时用户可见文案里出现完整的 `node_modules` 绝对路径。现在改用
+  `executableName(command)`，并在原地留下注释说明这条不变量。测试连带加强：除了「等于整句」，
+  还加了四条 `doesNotMatch`（`/node_modules/i`、`/[A-Za-z]:[\\/]/`、`/[\\/]/`、`/.exe/i`），
+  其中一条**故意用形状与随包 aria2 完全一致的绝对路径**当命令 —— 将来若改成用解析出来的
+  绝对路径启动 curl，这条用例就是拦住泄漏的那一道。
+  **Cancellation messages no longer leak the executable's absolute path**; the new assertions
+  also refuse any path separator at all, so a future change in how the binary is located
+  cannot silently reintroduce the leak.
+
+- **`targets` 与 `url` 的二选一约束（P0R-01 修法）。** 目标是「两个都给、或两个都不给都要被
+  拒绝」。曾尝试在 schema 根节点写 `oneOf: [{required:['url']}, {required:['targets']}]`，
+  **无法经 parameters 的 DSL 表达**：`ParameterSchemaSpec` 就是一个属性映射，没有根级 `oneOf`
+  的位置；把 `oneOf` 写成 parameters 的一个键，DSL 会把它当成**一个名叫 `oneOf` 的入参属性**。
+  给两者都标 `required: true` 则会挡下 targets-only 的合法调用。因此采用：schema 只表达
+  「各自是什么」，强制放在执行层，并把后果写进两个参数的 description；根节点必须保持没有
+  `required` 列表 —— 一旦有人把 `required` 加回来（退回被否掉的方案），测试立刻红。
+  **The `url` / `targets` mutual exclusion is enforced in the execution layer**, because the
+  parameter DSL cannot express a root-level `oneOf`; the design decision and its evidence are
+  recorded in `test/tool-schema.test.ts`.
+
+- **清理端点的两处静默回落（P0R-02 / P0R-03）。** 参数越界此前会被静默夹到边界后照删，
+  现在直接 `ok:false` + 文案点名字段与范围，且**一个文件都不删**；扫不到轨道一时返回
+  `taskDir === ''` + `taskDirSkipped` 固定文案说明「轨道一未参与」及原因与解法，
+  而不是安静地只扫轨道二、假装清完了。
+  **The cleanup endpoint no longer silently clamps out-of-range parameters**, and reports
+  `taskDirSkipped` instead of pretending it cleaned track 1 when that directory is unreachable.
+
+- **面板轮询计时器泄漏（t13 修复）。** `test/client.test.ts` 的 11 条断言此前被 skip 屏蔽
+  （等于零覆盖）。恢复成真跑后发现 18 个面板轮询计时器只清了 10 个；修复后 11/11 通过、
+  0 skip。**Panel polling timers were leaking** (18 created, 10 cleared); found by un-skipping
+  11 previously disabled assertions.
+
+### 文档 / Docs
+
+- **README 新增「一次下载多个文件」整节**，并把批量语义（二选一、50 条上限、逐条结果、
+  批内并发推导、带宽均分、超时四条定义）与 P0 新增的 11 条「返回默认值」路径补进
+  「静默失败防护」契约表。`README.en.md` 同步同等深度。
+  **A whole README section for batch downloads**, plus 11 new rows in the silent-failure
+  contract table for the paths P0 added; `README.en.md` mirrors it.
+
+- **P2 的核对结论写进既有文档（P2-1）。** `docs/COMPATIBILITY.md` 的 macOS 搁置理由从
+  「没找到满足条件的来源」升级为「逐个来源核对后仍不成立」，并**明确写出卡点是「来源不可信」
+  而不是「没有二进制」**（macOS 二进制确实存在，`FerroDownload/aria2-static-builds` 也确实
+  提供 x64 + arm64 且公布 SHA256，但仓库 0★、无许可证、创建于 2026-06-20、构建证明实测 404、
+  构建不可复现）；README 与 `docs/SECURITY.md` 明确写出**不支持 FTP / SFTP / BitTorrent**
+  及其一句话理由。所有外部结论都带来源 URL 与核对日期（2026-10-12）。
+  **P2's findings are written into the existing docs**: the macOS blocker is restated as
+  "no trustworthy source" rather than "no binary", and FTP / SFTP / BitTorrent support is
+  explicitly ruled out with reasons and dated sources.
+
+### 已知折衷与明确不做 / Known trade-offs and explicit non-goals
+
+- **面板交互（取消 / 重试）明确不做（D6-②）。** 卡点经查证真实存在：宿主客户端面
+  （`@deepseek-ai/dsh-client-connection` 的 `ClientConnectionRpc`）只暴露 `call` 与 `open`，
+  **没有任何「触发宿主动作」的 API**；handler 拿得到 `payload` 与 `peer`，拿不到 `execute()`
+  栈帧里的 `AbortController`（进程内没有 `taskId → AbortController` 映射）；进度文件里也
+  **没有** `url` / `output` / `sha256` —— 连「重试什么」都无法表达。因此本轮只做展示，
+  **没有死按钮**：`src/client.js` 全文无 `onClick` / `<button>`。要做需先扩建 RPC 写端点
+  与任务元数据持久化。
+  **No panel buttons this round.** The blocker is real and verified against the host's own
+  type definitions: there is no client-side API to trigger a host action, the handler cannot
+  reach the `AbortController`, and the progress files do not record enough to retry anything.
+
+- **后台常驻任务（路线 B）不做（D1=A）。** 队列只做「单次调用内批量、同步返回」，不动 DSH 的
+  工具调用模型。跨进程 / 跨重启持久化、服务器端队列协议（aria2 RPC / `--input-file`）、
+  断点续传的跨任务合并、把 `download_status` 改成可写工具，同样不做。
+  **No background jobs (route B)**: the queue is in-call batching with a synchronous return.
+
+- **下载中动态调并发不做（P1-3）。** 有实测证据：命令行方式不可能改（argv 启动即固定）；
+  RPC 方式方向不对称 —— 上调 3/3 成功，**下调 2/2 失败**（`errorCode=1` "No URI available."、
+  落盘缺字节）；而 32MB 上「先慢后快」反而比固定 x8 慢 2.2s，收益 ≤2.2s 却要付 5 类新增失败面。
+  本轮改为做「记录实际吞吐与实际有效连接数」这件不需要 RPC 的事。
+  **No mid-download concurrency adjustment**: measured evidence shows down-scaling fails and
+  the upside does not justify the new failure surface.
+
+- **macOS 随包 aria2 仍不做（D9=①）。** 唯一带哈希的候选过不了可信门槛（见上方 P2-1）。
+  macOS 上插件照常安装并工作，只是永远走单线程 `curl`。
+  **Still no bundled aria2 for macOS**; the plugin installs and works there over single-threaded curl.
+
+### 验证 / Verification
+
+- `pnpm test`：**445 例（443 通过 / 2 跳过 / 0 失败）**；规格基线为 343 / 341 / 2 / 0，
+  即 **+102 条用例、fail 仍 0、skip 仍 2**（2 条 skip 是平台相关，只在 Linux 复现，由 CI 的
+  Ubuntu job 真跑）。
+- `pnpm check`（两个 tsconfig）exit 0。
+- `pnpm build` exit 0；`dist/client.js` 与 `src/client.js` SHA256 相同。
+- 测试弱化核查：`git diff -U0 -- test` 逐文件统计，10 条被删断言**全部**是「被更严格的断言
+  替换」，无一条是为过测而删（其中 `runprocess.test.ts` 的 2 条从 `assert.match` 升级为
+  `assert.equal` + 四条 `doesNotMatch`，是收紧）。
+- **`pnpm test`: 445 tests (443 pass / 2 skip / 0 fail)**, `pnpm check` and `pnpm build`
+  both exit 0, and every deleted assertion was replaced by a stricter one.
+
+## [1.2.0] - 2026-10-12
+
+围绕「照着官方文档把文件下对」这一件事：官方文档给了摘要就核对摘要，给了需要
+Referer / UA 的地址就带上头，给的是原始 GitHub 地址就让插件自己找可用镜像。
+同时修掉审查中发现的三处探测与回退缺陷。
+
+This release is about downloading the right bytes from an official documentation page:
+verify against the checksum the docs print, send the UA/Referer the docs' link needs,
+and let the plugin pick a working mirror when the docs only give a raw GitHub URL.
+Three probe/fallback defects found during review are fixed alongside.
+
+### 新增 / Added
+
+- **`sha256` 参数：按官方文档给出的摘要核对下载内容。** 接受裸十六进制、
+  `sha256:<hex>` / `sha256=<hex>` / `SHA256(<hex>)` 前缀写法，以及 SRI 的
+  `sha256-<base64>`；不合法会在**下载开始前**直接拒绝。校验通过时返回值带
+  `sha256` 字段，失败则抛错并保留旁车指纹。它补上了长度校验挡不住的那一类
+  ——「等长但内容不同」；而且**不依赖任何远端信息**，因此在「远端未声明长度」
+  或「远端声明了压缩编码」导致长度校验跳过时，它依然能给出确定结论（此时
+  不再报 `verifySkipped`，因为内容已经逐字节核对过了）。流式计算，不把大文件
+  读进内存。逐条依据见下方「不做内容哈希校验」这条已知折衷的更新。
+  **`sha256` parameter** verifying the downloaded bytes against the checksum printed
+  in a project's official documentation; rejects a malformed digest before downloading,
+  streams the file instead of buffering it, and works even where the byte-length check
+  has to be skipped.
+
+- **`userAgent` / `referer` / `headers` 参数：给官方文档里那些「直接 GET 拿不到」的地址
+  带上请求头。** 三者合成**一份**头表，探测与下载共用 —— 两边不一致会让探测结论
+  与真实下载错位（站点按 UA 分流时尤其明显）。`headers` 接受 `{"Name": "value"}` 映射，
+  命名参数优先。插件自身管理的头（`Range` / `Accept-Encoding` / `Host` / 连接级头）
+  一律拒绝覆盖；头值含 CR / LF / NUL 直接判为**请求头注入**并拒绝。
+  **`userAgent` / `referer` / `headers`** feeding one shared header set to both the probe
+  and the download; reserved transport headers are refused, and header values carrying
+  CR/LF/NUL are rejected as header injection.
+
+- **`mirror: "auto"`：内置镜像自动挑选。** 此前 `mirror` 只能由调用方手填，也就是
+  说模型得先「知道」gh-proxy 这类域名。现在候选表内置（`RECOMMENDED_MIRRORS`，
+  此前是死代码，只有测试引用），插件按顺序探测并采用第一个**被证实与原地址
+  同源**的镜像。自动模式**必须显式传入**才会生效 —— 它会让下载内容经过第三方
+  服务器，这是调用方该做的决定，不能默认开启；且只对 GitHub 域名生效。
+  **`mirror: "auto"`** picking a built-in GitHub mirror that provably serves the same
+  file; opt-in only, GitHub hosts only.
+
+- **`DSH_SMARTDL_MIRRORS` 环境变量：覆盖内置候选镜像表。** 逗号分隔的前缀表，
+  顺序即优先级。内置候选是三个公开第三方服务，企业内网 / 自建代理的场景下一个
+  都用不了，此前除了手填 `mirror` 没有别的办法。
+  **`DSH_SMARTDL_MIRRORS`** overriding the built-in mirror list (comma-separated,
+  order = priority).
+
+- 返回值新增三个字段：`sha256`（实际算出的摘要，仅在核对通过时出现）、
+  `mirror`（实际使用的镜像前缀）、`mirrorSkipped`（请求了自动镜像但未启用时的
+  说明）。`mirrorSkipped` 与 `verifySkipped` 同理：**静默失效是不允许的**。
+
+### 修复 / Fixed
+
+- **HEAD 抛异常时不再直接放弃探测。** 此前 HEAD 一旦超时 / 被墙 / 连接被重置就
+  立刻返回「不支持多线程」，连带三件事一起发生：每次下载白等一整个探测超时、
+  拿不到 `contentLength`（完整性校验永久退化成「跳过」）、再大的文件也永远走
+  curl 单线程。而「HEAD 不通、GET 正常」在 CDN / 代理上很常见 —— 本机实测
+  `raw.githubusercontent.com` 就是：`smart_download` 返回
+  `via curl (fallback: HEAD 请求失败: The operation was aborted due to timeout)`
+  且附带「未做字节数校验」。现在 HEAD 失败与「405 / 无 Content-Length」走同一条
+  Range GET 兜底；两条路都失败才判不支持，且文案同时带上两者。
+  **HEAD failures now fall through to the Range GET probe** instead of giving up.
+
+- **HEAD 分支必须照读 `Content-Range`。** 此前该分支把 `contentRange` 写死成
+  `null`，于是对「HEAD 回 206 + `Content-Range`」的服务器（合法，部分 CDN / 代理
+  如此）会把 `Content-Length` 的**分片长度**当成总长度。后果有两层：决策层把大
+  文件判成「太小」压成单线程；更要命的是完整性校验拿分片长度当期望值，一个
+  **完全正确**的下载会在落盘后被判成损坏。现在与 Range GET 分支取值规则一致：
+  `Content-Range` 优先。
+  **The HEAD branch now reads `Content-Range`**, so a server answering HEAD with 206
+  no longer makes a correct download fail its size check.
+
+- **完整性校验失败不再回退 curl 重下。** aria2 分支的 `catch` 此前把校验失败也
+  当成「aria2 失败」，于是会换 curl 把同一个地址重下一遍。产物已经落盘且内容
+  不对，换下载器不会改变结果，只会让调用方白等一遍 —— 传了 `sha256` 时尤其
+  明显（摘要不符是内容问题，不是传输问题）。现在校验失败以独立的
+  `IntegrityError` 抛出，直接透出。
+  **Integrity failures no longer trigger a pointless curl re-download.**
+
+- **aria2 路径显式传入 `resume`。** 此前该调用漏传参数、走的是默认值 `true`，
+  等于 `planResume()` 的结论对 aria2 完全不起作用。它至今没暴露成缺陷，只是因为
+  「判定不能续传时必然先删掉本地半包」，于是 `-c` 恰好落在一个不存在的文件上
+  —— 这是巧合，不是设计。
+  **The aria2 call now receives `resume` explicitly.**
+
+### 文档 / Docs
+
+- README 新增「照着官方文档下载」一节：从官方文档取 URL / 摘要 / 需要哪些头，
+  到 `smart_download` 参数怎么填，并给出可直接照抄的调用示例。
+- README 的「权限说明」补上 `DSH_SMARTDL_MIRRORS` 与自定义请求头这两项；
+  「已知折衷」里「不做内容哈希校验」一条更新为「调用方传 `sha256` 时做」。
+- 基线更新：用例数 262 → **343**（341 通过 / 2 跳过 / 0 失败），行覆盖
+  **99.74%** / 分支 **94.18%** / 函数 **96.99%**（同环境实测基线为
+  99.81% / 92.53% / 96.09%）。
+
 ## [1.1.2] - 2026-10-02
 
 ### 修复 / Fixed

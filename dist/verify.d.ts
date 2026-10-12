@@ -92,6 +92,18 @@ export declare function expectedFromProbe(probe: ProbeResult): {
     expected: number | undefined;
     contentEncoding: string | undefined;
 };
+/**
+ * 长度校验失败后「下一步做什么」的固定文案。
+ *
+ * 为什么必须有：这条路径的产物**已经落盘**，而调用方看到一句「校验失败」时最
+ * 可能的反应是「那就重下」—— 但在重下之前必须知道两件事：文件与旁车指纹都还在
+ * （所以续传安全判定下次仍有基准），以及落盘的是坏文件而不是被悄悄删掉。
+ * 缺了这两句，用户要么白下几百 MB，要么以为产物已经没了。
+ *
+ * 定成常量而不是就地拼串，理由与 `describeSkip` 相同：让「这条路径只能输出
+ * 这一个值」成为可断言的事实。
+ */
+export declare const VERIFY_MISMATCH_NEXT_STEP = "\u4E0B\u4E00\u6B65\uFF1A\u4EA7\u7269\u3001\u534A\u5305\u4E0E\u65C1\u8F66\u6307\u7EB9\u5747\u5DF2\u4FDD\u7559\uFF08\u4FBF\u4E8E\u6838\u5BF9\u4E0E\u7EED\u4F20\uFF09\uFF0C\u53EF\u76F4\u63A5\u91CD\u8DD1\u4E00\u6B21";
 /** 把校验失败翻译成给人看的错误信息 */
 export declare function describeMismatch(outcome: Extract<VerifyOutcome, {
     kind: 'mismatch';

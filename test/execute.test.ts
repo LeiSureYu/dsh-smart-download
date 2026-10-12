@@ -11,10 +11,12 @@
  */
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -27,7 +29,23 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { apply } from '../src/index.js'
 import { getAria2Path } from '../src/downloader.js'
-import type { SmartDownloadResult } from '../src/types.js'
+import { readThroughput, throughputKey } from '../src/throughput-cache.js'
+import { AUTO_MIRROR_SKIP_NOT_GITHUB } from '../src/auto-mirror.js'
+import {
+  HISTORY_RAISE_REASON,
+  MAX_CONCURRENCY,
+  RAISE_MIN_EFFECTIVE_CONNECTIONS,
+  decide,
+  decideConcurrency,
+  LARGE_FILE,
+} from '../src/decision.js'
+import { MAX_STATUS_LIMIT } from '../src/status.js'
+
+import type {
+  BatchDownloadResult,
+  BatchItemResult,
+  SmartDownloadResult,
+} from '../src/types.js'
 
 /**
  * 取宿主真正用来判定「结果是否是 lossless JSON」的函数。
@@ -46,6 +64,30 @@ async function loadSnapshotJsonValue(): Promise<(value: unknown) => unknown> {
   }
   assert.equal(typeof mod.snapshotJsonValue, 'function', '应能取到 snapshotJsonValue')
   return mod.snapshotJsonValue
+}
+
+/**
+ * 取宿主自己的 JSON Schema 校验器。
+ *
+ * 为什么必须用它而不是「看着像就行」：`smart_download` 的 output schema 在 1.3.0
+ * 变成了 oneOf（单条目 / 批量两种形态），而 oneOf 是**恰好匹配一支**才算通过 ——
+ * 批量分支里少声明一个字段，真实调用就会因为多出来的键被 additionalProperties
+ * 拒掉，而单测如果只断言「字段值对不对」是发现不了的。
+ *
+ * `lib/types/json-schema.js` 不在包的 exports 里，因此按文件位置解析（与
+ * snapshotJsonValue 同一套 createRequire + 文件 URL 的做法）。
+ */
+async function loadSchemaValidator(): Promise<
+  (schema: unknown, value: unknown) => string[]
+> {
+  const require = createRequire(import.meta.url)
+  const toolsEntry = require.resolve('@deepseek-ai/dsh-tools')
+  const resolved = path.join(path.dirname(toolsEntry), 'types', 'json-schema.js')
+  const mod = (await import(pathToFileURL(resolved).href)) as {
+    validateJsonSchemaValue: (schema: unknown, value: unknown, path?: string) => string[]
+  }
+  assert.equal(typeof mod.validateJsonSchemaValue, 'function', '应能取到 validateJsonSchemaValue')
+  return mod.validateJsonSchemaValue
 }
 
 /* ------------------------------ 桩 ctx ------------------------------ */
@@ -109,19 +151,26 @@ function startServer(
 let tmpRoot = ''
 let tool: RegisteredTool
 let snapshotJsonValue: (value: unknown) => unknown
+let validateSchema: (schema: unknown, value: unknown) => string[]
 
 before(async () => {
   tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'execute-test-'))
   // 进度目录指向临时目录，避免污染真实 home
   process.env.DSH_PROGRESS_DIR = path.join(tmpRoot, 'progress')
   process.env.DSH_DOWNLOAD_PROGRESS_DIR = path.join(tmpRoot, 'downloads')
+  // 吞吐缓存同样要隔离：1.3.0 起成功的 aria2 下载会写它，不隔离就会往真实 `~/.dsh` 里拉屎
+  const cacheDir = path.join(tmpRoot, 'throughput')
+  mkdirSync(cacheDir, { recursive: true })
+  process.env.DSH_SMARTDL_THROUGHPUT_DIR = cacheDir
   tool = loadTool()
   snapshotJsonValue = await loadSnapshotJsonValue()
+  validateSchema = await loadSchemaValidator()
 })
 
 after(async () => {
   delete process.env.DSH_PROGRESS_DIR
   delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  delete process.env.DSH_SMARTDL_THROUGHPUT_DIR
   rmSync(tmpRoot, { recursive: true, force: true })
 })
 
@@ -343,6 +392,14 @@ test('download_status：带会话上下文时能读到本次会话的轨道一',
       assert.equal(snap.total, 1)
       assert.equal(snap.tasks[0]?.status, 'completed', '终态应被 state 正确映射')
       assert.equal(snap.tasks[0]?.pct, 100)
+      // 1.3.0：快照里多了 batch 字段，而 download_status 的 tasks 项是
+      // additionalProperties:false —— 少了那条 schema 声明，任何带批次 ID 的
+      // 任务都会让工具输出校验失败。这里用宿主校验器把活数据真的跑一遍。
+      assert.deepEqual(
+        validateSchema(loadToolNamed('download_status').output.schema, snapshotJsonValue(snap)),
+        [],
+        'download_status 的快照（含 batch 字段）必须通过它自己的 output schema',
+      )
     } finally {
       if (saved !== undefined) process.env.DSH_PROGRESS_DIR = saved
       rmSync(cwd, { recursive: true, force: true })
@@ -753,4 +810,1232 @@ test('完整性校验：aria2 被 chunked 截断 -> 退出码 0 但必须判为�
     // 正向断言：确实只落盘了 1MB（证实这条用例真的构造出了静默损坏）
     assert.equal(readFileSync(out).length, ACTUAL)
   })
+})
+
+/* ---------------- 1.2.0：SHA-256 校验 / 自定义请求头 / 自动镜像 ---------------- */
+
+/** 一段固定内容与它的 SHA-256，供下面几条用例复用 */
+const SHA_BODY = Buffer.from('dsh-smart-dl sha256 end-to-end\n')
+const SHA_DIGEST = createHash('sha256').update(SHA_BODY).digest('hex')
+
+/** 声明长度、支持 Range、内容固定的响应；探测走 HEAD 分支 */
+function serveBody(body: Buffer): (req: IncomingMessage, res: ServerResponse) => void {
+  return (_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }
+}
+
+test('sha256：摘要一致 -> 返回实际摘要，且不再报「未做字节数校验」', async () => {
+  await withServer(serveBody(SHA_BODY), async (base) => {
+    const out = path.join(tmpRoot, 'sha-ok.bin')
+    const result = await run({ url: `${base}/sha-ok.bin`, output: out, sha256: SHA_DIGEST })
+
+    assert.equal(result.success, true)
+    assert.equal(result.sha256, SHA_DIGEST, '校验通过时必须带回实际算出的摘要')
+    assert.equal(
+      result.verifySkipped,
+      undefined,
+      '内容已逐字节核对，不该再报「未做字节数校验」',
+    )
+    assert.equal(snapshotJsonValue(result) === undefined, false, '结果必须是 lossless JSON')
+    assert.equal(readFileSync(out).toString(), SHA_BODY.toString())
+  })
+})
+
+test('sha256：接受官方文档里的各种写法（sha256: 前缀 / 大写 / SRI）', async () => {
+  const forms = [
+    SHA_DIGEST,
+    SHA_DIGEST.toUpperCase(),
+    `sha256:${SHA_DIGEST}`,
+    `SHA256(${SHA_DIGEST})`,
+    `sha256-${Buffer.from(SHA_DIGEST, 'hex').toString('base64')}`,
+  ]
+  await withServer(serveBody(SHA_BODY), async (base) => {
+    for (const [index, form] of forms.entries()) {
+      const out = path.join(tmpRoot, `sha-form-${index}.bin`)
+      const result = await run({ url: `${base}/sha-form.bin`, output: out, sha256: form })
+      assert.equal(result.sha256, SHA_DIGEST, `${form} 应被归一化成同一个小写十六进制`)
+    }
+  })
+})
+
+test('sha256：远端不声明长度时依然给出确定结论（长度校验跳过，内容哈希照常）', async () => {
+  const body = Buffer.alloc(4096, 0x51)
+  const digest = createHash('sha256').update(body).digest('hex')
+  await withServer((_req, res) => {
+    // chunked：HEAD 与 Range GET 都拿不到长度，字节数校验必然「跳过」
+    res.writeHead(200, { 'content-type': 'application/octet-stream' })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'sha-chunked.bin')
+    const result = await run({ url: `${base}/sha-chunked.bin`, output: out, sha256: digest })
+
+    assert.equal(result.success, true)
+    assert.equal(result.sha256, digest, '哈希不依赖远端长度，跳过长度校验也要能给出结论')
+    assert.equal(
+      result.verifySkipped,
+      undefined,
+      '长度那层跳过了，但内容已经核对过，再报「未做校验」只会误导',
+    )
+  })
+})
+
+test('sha256：摘要不符 -> 抛错、不返回 success，且保留旁车指纹', async () => {
+  const wrong = 'f'.repeat(64)
+  await withServer(serveBody(SHA_BODY), async (base) => {
+    const out = path.join(tmpRoot, 'sha-bad.bin')
+    await assert.rejects(
+      () => run({ url: `${base}/sha-bad.bin`, output: out, sha256: wrong }),
+      /完整性校验失败.*SHA-256 不匹配/,
+    )
+    // 正向断言：文件确实落盘了（证明确实是「内容不对」而不是「没下下来」）
+    assert.equal(readFileSync(out).toString(), SHA_BODY.toString())
+    assert.equal(existsSync(`${out}.part.json`), true, '校验失败时必须保留旁车指纹')
+  })
+})
+
+test('sha256：摘要不合法 -> 在发起任何请求之前就拒绝', async () => {
+  let requests = 0
+  await withServer((_req, res) => {
+    requests++
+    res.writeHead(200, { 'content-length': '1' })
+    res.end('x')
+  }, async (base) => {
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/never.bin`,
+          output: path.join(tmpRoot, 'never.bin'),
+          sha256: 'not-a-hash',
+        }),
+      /拒绝下载.*sha256 不是合法/,
+    )
+    assert.equal(requests, 0, '参数不合法必须在下载前拒绝，不能白下一遍')
+  })
+})
+
+test('自定义请求头：探测与下载使用同一套（UA / Referer / 自定义头都到达服务器）', async () => {
+  const seen: Array<IncomingMessage['headers']> = []
+  const body = Buffer.alloc(2048, 0x53)
+  await withServer((req, res) => {
+    seen.push(req.headers)
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'headers.bin')
+    const result = await run({
+      url: `${base}/headers.bin`,
+      output: out,
+      userAgent: 'dsh-smart-dl-test/1.0',
+      referer: 'https://docs.example.com/install',
+      headers: { 'X-Trace-Id': 'trace-42' },
+    })
+
+    assert.equal(result.success, true)
+    assert.ok(seen.length >= 2, `应至少被探测与下载各访问一次，实际 ${seen.length} 次`)
+    for (const headers of seen) {
+      // 每个请求都必须带同一套头：站点按 UA 分流时，两边不一致会让探测结论
+      // 与真实下载错位（见 src/headers.ts 文件头）
+      assert.equal(headers['user-agent'], 'dsh-smart-dl-test/1.0')
+      assert.equal(headers.referer, 'https://docs.example.com/install')
+      assert.equal(headers['x-trace-id'], 'trace-42')
+    }
+  })
+})
+
+test('自定义请求头：值含换行 -> 下载前拒绝（请求头注入）', async () => {
+  let requests = 0
+  await withServer((_req, res) => {
+    requests++
+    res.writeHead(200, { 'content-length': '1' })
+    res.end('x')
+  }, async (base) => {
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/never.bin`,
+          output: path.join(tmpRoot, 'never.bin'),
+          headers: { 'X-Test': 'a\r\nX-Evil: 1' },
+        }),
+      /拒绝下载.*注入/,
+    )
+    assert.equal(requests, 0)
+  })
+})
+
+test("mirror: 'auto' 对非 GitHub 地址 -> 明确说明未启用，并照常从原始地址下载", async () => {
+  const body = Buffer.alloc(1024, 0x54)
+  await withServer(serveBody(body), async (base) => {
+    const out = path.join(tmpRoot, 'auto-mirror-local.bin')
+    const result = await run({ url: `${base}/auto-mirror-local.bin`, output: out, mirror: 'auto' })
+
+    assert.equal(result.success, true)
+    assert.equal(result.mirrored, false)
+    assert.equal(result.mirror, undefined, '未启用时不得报出一个镜像前缀')
+    assert.equal(
+      result.mirrorSkipped,
+      AUTO_MIRROR_SKIP_NOT_GITHUB,
+      '自动镜像没生效时必须说明原因，不得静默',
+    )
+    assert.equal(result.requestedUrl, `${base}/auto-mirror-local.bin`, '请求地址必须是原始地址')
+    assert.equal(readFileSync(out).length, body.length)
+  })
+})
+
+test("mirror: 'auto' 对 GitHub 地址但探测失败 -> 不会把下载本身带崩", async () => {
+  // 用已取消的信号让探测立即失败：此时拿不到原始长度，自动镜像无从证实同源，
+  // 必须原样退回原始地址继续走下载流程（随后被取消），而不是抛镜像相关的错。
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    () =>
+      tool.execute(
+        {
+          url: 'https://github.com/owner/repo/releases/download/v1/a.zip',
+          output: path.join(tmpRoot, 'never.bin'),
+          mirror: 'auto',
+        },
+        { signal: controller.signal },
+      ),
+    /取消/,
+  )
+})
+
+test("mirror: 'auto' 命中镜像 -> 请求地址换成镜像地址，结果带回 mirror 字段", async () => {
+  const GITHUB = 'https://github.com/owner/repo/releases/download/v1/a.zip'
+  const body = Buffer.alloc(2048, 0x55)
+  const etag = '"auto-mirror-etag"'
+  const realFetch = globalThis.fetch
+
+  // 本地 server 扮演「镜像」。候选地址是 <前缀> + 完整原始 URL，所以它收到的
+  // 路径会长成 `/https://github.com/...`；这里不关心路径，只回同一份内容。
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+      etag,
+    })
+    res.end(body)
+  }, async (base) => {
+    const mirrorPrefix = `${base}/`
+    // 用环境变量把候选表指向本地 server —— 内置候选是公开第三方服务，
+    // 单测不能也不该去联网。
+    process.env.DSH_SMARTDL_MIRRORS = mirrorPrefix
+    // 只对原始 GitHub 地址打桩（真实 github.com 不可达）；候选镜像地址照常
+    // 走真实 fetch，打到上面的本地 server。
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      if (String(input).startsWith(GITHUB)) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            'content-length': String(body.length),
+            'accept-ranges': 'bytes',
+            etag,
+          },
+        })
+      }
+      return realFetch(input as never, init as never)
+    }) as typeof fetch
+
+    try {
+      const out = path.join(tmpRoot, 'auto-mirror-hit.bin')
+      const result = await run({ url: GITHUB, output: out, mirror: 'auto' })
+
+      assert.equal(result.success, true)
+      assert.equal(result.mirrored, true, '被证实同源的候选必须被采用')
+      assert.equal(result.mirror, mirrorPrefix, '结果必须带回实际使用的镜像前缀')
+      assert.equal(
+        result.requestedUrl,
+        `${mirrorPrefix}${GITHUB}`,
+        '请求地址应为「镜像前缀 + 完整原始 URL」',
+      )
+      assert.equal(result.mirrorSkipped, undefined, '启用镜像时不得同时给出去启用说明')
+      assert.equal(readFileSync(out).length, body.length)
+      assert.equal(snapshotJsonValue(result) === undefined, false, '结果必须是 lossless JSON')
+    } finally {
+      globalThis.fetch = realFetch
+      delete process.env.DSH_SMARTDL_MIRRORS
+    }
+  })
+})
+
+/* ============== P0-6：单次调用内批量下载（路线 A，用户决策 D1=A） ============== */
+
+/** 批量结果里的一行（断言用别名，避免每处都写一遍类型断言）。 */
+type Item = BatchItemResult
+
+/** 跑一次批量下载；exec 可注入自定义 signal（取消用例用）。 */
+async function runBatch(
+  targets: Array<{ url: string; output?: string; sha256?: string }>,
+  extra: Record<string, unknown> = {},
+  exec?: Record<string, unknown>,
+): Promise<BatchDownloadResult> {
+  const execCtx = exec ?? { signal: new AbortController().signal }
+  const value = (await tool.execute({ targets, ...extra }, execCtx)) as BatchDownloadResult
+  assert.ok(Array.isArray(value.results), '批量结果必须带 results 数组')
+  return value
+}
+
+/** 某目录下指定后缀的文件名集合（用于「本次新写了哪些文件」）。 */
+function filesIn(dir: string, ext: string): Set<string> {
+  return new Set(readdirSync(dir).filter((f) => f.endsWith(ext)))
+}
+
+/** 集合差：after 里新出现的文件。 */
+function newFiles(before: Set<string>, after: Set<string>): string[] {
+  return [...after].filter((f) => !before.has(f))
+}
+
+test('批量：url 与 targets 同时给出 -> 拒绝（行为确定，不发任何请求）', async () => {
+  await assert.rejects(
+    () => run({ url: 'http://127.0.0.1:9/one', targets: [{ url: 'http://127.0.0.1:9/two' }] }),
+    /二选一/,
+  )
+})
+
+test('批量：url 与 targets 都不给 -> 拒绝', async () => {
+  await assert.rejects(() => run({}), /必须提供 url/)
+})
+
+test('批量：targets 为空数组 -> 拒绝', async () => {
+  await assert.rejects(() => run({ targets: [] }), /空数组/)
+})
+
+test('批量：超过 MAX_STATUS_LIMIT 条 -> 显式拒绝并说明上限（不静默丢弃进度记录）', async () => {
+  // 51 条（超出 1 条）就足以触发：进度读取端一次只读 50 条，多出来的任务会
+  // 「下过了但查不到」，因此必须在发请求之前拒绝。
+  const tooMany = Array.from({ length: MAX_STATUS_LIMIT + 1 }, (_, i) => ({
+    url: `http://127.0.0.1:9/x${i}`,
+  }))
+  await assert.rejects(
+    () => run({ targets: tooMany }),
+    (err: Error) => {
+      assert.match(err.message, new RegExp(String(MAX_STATUS_LIMIT)), '必须说明上限是多少')
+      assert.match(err.message, new RegExp(String(MAX_STATUS_LIMIT + 1)), '必须说明这次给了多少条')
+      return true
+    },
+  )
+})
+
+test('带宽上限：非法值在发起任何请求之前抛错（不是先下几百 MB 再报参数错）', async () => {
+  let hits = 0
+  const body = Buffer.alloc(2048, 0x51)
+  await withServer((_req, res) => {
+    hits += 1
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    for (const bad of ['2X', '0', '-1', '2 M', '', '1.5M']) {
+      await assert.rejects(
+        () => run({ url: `${base}/bw.bin`, output: path.join(tmpRoot, 'bw.bin'), maxBandwidth: bad }),
+        /maxBandwidth/,
+        `maxBandwidth=${JSON.stringify(bad)} 必须在发请求前拒绝`,
+      )
+    }
+    assert.equal(hits, 0, '参数非法时一个请求都不该发出')
+
+    // 正向：合法值必须被接受并且照常下载（否则「只校验、不生效」也能骗过上面那批断言）
+    const ok = await run({
+      url: `${base}/bw-ok.bin`,
+      output: path.join(tmpRoot, 'bw-ok.bin'),
+      maxBandwidth: '1M',
+    })
+    assert.equal(ok.success, true)
+    assert.ok(hits > 0, '合法带宽值必须真的发起下载')
+
+    // 正向（批量）：带总带宽上限时整批照常完成 —— 上限按批内并发位均分后
+    // 传给每个条目，任何一条都不该因为「分到的份额」而出错。
+    const before = hits
+    const batched = await tool.execute(
+      {
+        maxBandwidth: '2M',
+        targets: [
+          { url: `${base}/bw-b1.bin`, output: path.join(tmpRoot, 'bw-b1.bin') },
+          { url: `${base}/bw-b2.bin`, output: path.join(tmpRoot, 'bw-b2.bin') },
+        ],
+      },
+      { signal: new AbortController().signal },
+    )
+    const batchValue = batched as BatchDownloadResult
+    assert.equal(batchValue.succeeded, 2, '带总带宽上限的批量必须照常成功')
+    assert.equal(batchValue.failed, 0)
+    assert.ok(hits > before, '批量也得真的发请求')
+  })
+})
+
+test('批量：3 条全部成功，逐条给出结果，且两条轨道都带同一个批次 ID', async () => {
+  const body = Buffer.alloc(1024, 0x52)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+    const taskDir = process.env.DSH_PROGRESS_DIR!
+    const beforeJson = filesIn(dlDir, '.json')
+    const beforeJsonl = filesIn(taskDir, '.jsonl')
+
+    const targets = [0, 1, 2].map((i) => ({
+      url: `${base}/f${i}.bin`,
+      output: path.join(tmpRoot, `batch-${i}.bin`),
+    }))
+    const result = await runBatch(targets)
+
+    assert.match(result.batch, /^b-/, '批次 ID 必须有可辨认的前缀')
+    assert.equal(result.succeeded, 3)
+    assert.equal(result.failed, 0)
+    assert.equal(result.cancelled, 0)
+    assert.equal(result.results.length, 3)
+    assert.deepEqual(
+      result.results.map((r) => r.url),
+      targets.map((t) => t.url),
+      '逐条结果的顺序必须与入参一致，否则调用方对不上',
+    )
+    for (const [i, item] of result.results.entries()) {
+      assert.equal(item.success, true, `第 ${i} 条应成功`)
+      assert.equal(item.output, targets[i]!.output)
+      assert.equal(item.path, targets[i]!.output)
+      assert.ok(item.method === 'aria2' || item.method === 'curl')
+      assert.equal(existsSync(targets[i]!.output!), true, '成功条目必须真的落盘')
+    }
+    assert.equal(snapshotJsonValue(result) === undefined, false, '批量结果必须是 lossless JSON')
+    // 关键：批量形态必须真的通过工具自己的 output schema（oneOf 的批量分支）。
+    // 少声明一个字段，真实调用就会因 additionalProperties 被拒。
+    assert.deepEqual(
+      validateSchema(tool.output.schema, snapshotJsonValue(result)),
+      [],
+      '批量结果必须通过 output schema 校验',
+    )
+
+    // 轨道二：本次新增 3 个任务文件，且都带同一个批次 ID
+    const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+    assert.equal(newJson.length, 3, `轨道二应新增 3 个任务文件，实际 ${newJson.length}`)
+    const taskIds = new Set<string>()
+    for (const file of newJson) {
+      const rec = JSON.parse(readFileSync(path.join(dlDir, file), 'utf-8')) as {
+        id: string
+        batch?: string
+        status: string
+      }
+      assert.equal(rec.batch, result.batch, '轨道二的每条记录都必须带上批次 ID')
+      assert.equal(rec.status, 'completed')
+      taskIds.add(rec.id)
+    }
+    assert.equal(taskIds.size, 3, '每条目一个 taskId（同一条目不得共用）')
+    assert.equal(taskIds.has(result.batch), false, '批次 ID 不是任务 ID：两者必须能分辨')
+
+    // 轨道一：同理，末尾记录的 state 必须是 done，且带同一个批次 ID
+    const newJsonl = newFiles(beforeJsonl, filesIn(taskDir, '.jsonl'))
+    assert.equal(newJsonl.length, 3, `轨道一应新增 3 个任务文件，实际 ${newJsonl.length}`)
+    for (const file of newJsonl) {
+      const lines = readFileSync(path.join(taskDir, file), 'utf-8').trim().split('\n')
+      const last = JSON.parse(lines[lines.length - 1]!) as { batch?: string; state?: string }
+      assert.equal(last.batch, result.batch, '轨道一的每条记录都必须带上批次 ID')
+      assert.equal(last.state, 'done')
+    }
+  })
+})
+
+test('批量：单条目路径的返回值与 1.2.0 逐字段相同（没有 batch/results）', async () => {
+  const body = Buffer.alloc(1536, 0x53)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+    const beforeJson = filesIn(dlDir, '.json')
+    const result = await run({ url: `${base}/single.bin`, output: path.join(tmpRoot, 'single.bin') })
+
+    assert.equal(result.success, true)
+    // 硬回归项：单条目返回值不得多出任何批量字段
+    assert.equal(Object.hasOwn(result, 'batch'), false, '单条目返回值不得带 batch')
+    assert.equal(Object.hasOwn(result, 'results'), false, '单条目返回值不得带 results')
+    assert.deepEqual(
+      Object.keys(result).sort(),
+      ['fellback', 'method', 'mirrored', 'path', 'reason', 'requestedUrl', 'size', 'success'],
+      '字段集合必须与 1.2.0 一致',
+    )
+
+    // 但进度记录里仍然要有批次 ID（P0-5：单条目调用的批次 id 存在且唯一）
+    const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+    assert.equal(newJson.length, 1)
+    const rec = JSON.parse(readFileSync(path.join(dlDir, newJson[0]!), 'utf-8')) as {
+      batch?: string
+    }
+    assert.match(rec.batch ?? '', /^b-/, '单条目调用也必须写入批次 ID')
+
+    // 单条目形态同样要过 output schema（oneOf 的另一支，回归项：
+    // 加了批量分支之后，老形态不得因为 oneOf 变成「两支都不匹配」）
+    assert.deepEqual(
+      validateSchema(tool.output.schema, snapshotJsonValue(result)),
+      [],
+      '单条目结果必须仍通过 output schema 校验',
+    )
+  })
+})
+
+test('批量：一条失败不影响另一条成功（D4=② 逐条给出原因，成功结果不丢）', async () => {
+  const body = Buffer.alloc(2048, 0x54)
+  await withServer((req, res) => {
+    if (req.url?.includes('missing')) {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('nope')
+      return
+    }
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const okOut = path.join(tmpRoot, 'partial-ok.bin')
+    const badOut = path.join(tmpRoot, 'partial-bad.bin')
+    const result = await runBatch([
+      { url: `${base}/ok.bin`, output: okOut },
+      { url: `${base}/missing.bin`, output: badOut },
+    ])
+
+    assert.equal(result.succeeded, 1)
+    assert.equal(result.failed, 1)
+    assert.equal(result.cancelled, 0)
+
+    const ok = result.results[0] as Item
+    const bad = result.results[1] as Item
+    // 成功条目的结果必须完整保留（失败条目不得把它一起吞掉）
+    assert.equal(ok.success, true)
+    assert.equal(ok.path, okOut)
+    assert.equal(existsSync(okOut), true, '成功条目必须真的落盘')
+    // 失败条目必须逐条给出原因
+    assert.equal(bad.success, false)
+    assert.equal(bad.cancelled, undefined, '失败不是取消')
+    assert.equal(typeof bad.error, 'string')
+    assert.ok((bad.error ?? '').length > 0, '失败条目必须带原因')
+    assert.match(bad.error ?? '', /404|HTTP|22|失败/, '原因必须是可读的下载器报错')
+    assert.equal(snapshotJsonValue(result) === undefined, false)
+  })
+})
+
+test('批量：整批在开工前已取消 -> 逐条标为取消（不是失败），并各写一条取消记录', async () => {
+  const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+  const taskDir = process.env.DSH_PROGRESS_DIR!
+  const beforeJson = filesIn(dlDir, '.json')
+  const beforeJsonl = filesIn(taskDir, '.jsonl')
+
+  const controller = new AbortController()
+  controller.abort()
+  const targets = [0, 1, 2].map((i) => ({
+    url: `http://127.0.0.1:9/cancel${i}`,
+    output: path.join(tmpRoot, `cancel-${i}.bin`),
+  }))
+  const result = await runBatch(targets, {}, { signal: controller.signal })
+
+  // 取消必须**正常返回**（不抛错）：已完成条目的结果不能被一个异常吞掉
+  assert.equal(result.succeeded, 0)
+  assert.equal(result.failed, 0, '取消不是失败：failed 计数必须为 0')
+  assert.equal(result.cancelled, 3)
+  const outputByUrl = new Map(targets.map((t) => [t.url, t.output]))
+  for (const item of result.results) {
+    assert.equal(item.success, false)
+    assert.equal(item.cancelled, true)
+    assert.match(item.error ?? '', /已取消/)
+    // 未开工的条目也要报出「本该落到哪」，否则用户无从判断它有没有留下半包
+    assert.equal(item.output, outputByUrl.get(item.url), 'output 必须与入参该条目的 output 一致')
+  }
+  assert.equal(snapshotJsonValue(result) === undefined, false)
+
+  // 未开工的条目也要各留下一条「已取消」记录（否则面板上它们凭空消失）
+  const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+  assert.equal(newJson.length, 3, '每条被取消的条目都要写轨道二')
+  for (const file of newJson) {
+    const rec = JSON.parse(readFileSync(path.join(dlDir, file), 'utf-8')) as {
+      status: string
+      batch?: string
+    }
+    assert.equal(rec.status, 'cancelled')
+    assert.equal(rec.batch, result.batch)
+  }
+  const newJsonl = newFiles(beforeJsonl, filesIn(taskDir, '.jsonl'))
+  assert.equal(newJsonl.length, 3, '每条被取消的条目都要写轨道一')
+  for (const file of newJsonl) {
+    const lines = readFileSync(path.join(taskDir, file), 'utf-8').trim().split('\n')
+    const last = JSON.parse(lines[lines.length - 1]!) as { state?: string; batch?: string }
+    assert.equal(last.state, 'cancelled')
+    assert.equal(last.batch, result.batch)
+  }
+})
+
+test('批量：中途取消时，没有任何条目被改判成失败（已完成照旧成功）', async () => {
+  const body = Buffer.alloc(1024, 0x55)
+  await withServer((req, res) => {
+    if (req.url?.includes('slow')) {
+      // 永不结束：等待测试中途 abort
+      res.writeHead(200, { 'content-length': '9999999' })
+      res.write(body)
+      return
+    }
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const controller = new AbortController()
+    const pending = tool.execute(
+      {
+        targets: [
+          { url: `${base}/fast.bin`, output: path.join(tmpRoot, 'mid-fast.bin') },
+          { url: `${base}/slow.bin`, output: path.join(tmpRoot, 'mid-slow.bin') },
+        ],
+      },
+      { signal: controller.signal },
+    ) as Promise<BatchDownloadResult>
+    // 给 fast 条目足够时间完成；slow 会一直挂着
+    await new Promise((r) => setTimeout(r, 400))
+    controller.abort()
+    const result = await pending
+
+    // 关键不变量（与竞态无关）：取消归取消，**没有任何条目被标成失败**；
+    // fast 要么成功（它的结果必须还在），要么也被取消 —— 二者都不能变成 failed。
+    assert.equal(result.failed, 0, '取消不得把任何条目改判为失败')
+    assert.equal(result.cancelled >= 1, true, '至少有一条未完成的条目被标为取消')
+    for (const item of result.results) {
+      assert.equal(item.success || item.cancelled === true, true, '每条只能是成功或取消')
+    }
+    const fast = result.results.find((r) => r.url.includes('fast')) as Item
+    if (fast.success) {
+      assert.equal(existsSync(path.join(tmpRoot, 'mid-fast.bin')), true, '成功条目的文件必须还在')
+    }
+  })
+})
+
+test('批量：没有会话也没有 DSH_PROGRESS_DIR 时只写轨道二（缺轨道一不报错）', async () => {
+  const body = Buffer.alloc(768, 0x57)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const savedTask = process.env.DSH_PROGRESS_DIR
+    const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+    const beforeJson = filesIn(dlDir, '.json')
+    delete process.env.DSH_PROGRESS_DIR
+    try {
+      const result = await runBatch([
+        { url: `${base}/n1.bin`, output: path.join(tmpRoot, 'n1.bin') },
+        { url: `${base}/n2.bin`, output: path.join(tmpRoot, 'n2.bin') },
+      ])
+      assert.equal(result.succeeded, 2, '缺轨道一时批量必须照常成功（不是报错）')
+      const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+      assert.equal(newJson.length, 2, '轨道二照写')
+      for (const file of newJson) {
+        const rec = JSON.parse(readFileSync(path.join(dlDir, file), 'utf-8')) as { batch?: string }
+        assert.equal(rec.batch, result.batch, '轨道二仍带批次 ID')
+      }
+    } finally {
+      if (savedTask !== undefined) process.env.DSH_PROGRESS_DIR = savedTask
+    }
+  })
+})
+
+test('批量：并发窗口按「批内总连接数有界」反推（不再是单条目最高档 8）', async () => {
+  // 期望值从与实现相同的规则算出来，而不是写死一个数字：单条目最高档 × 2 的连接预算
+  // 除以单条目可能占用的连接数。规则一旦改（或档位阶梯改），这里会跟着变红/变绿。
+  const perItemTier = decideConcurrency(LARGE_FILE)
+  const expectedWindow = Math.max(1, Math.floor((perItemTier * 2) / perItemTier))
+  // 规则在当前阶梯下的取值本身也是要守的事实：8 连接 → 窗口 2（峰值 ~16，不是 64）
+  assert.equal(expectedWindow, 2, `当前档位 ${perItemTier} 下窗口应为 2`)
+  assert.ok(
+    expectedWindow < perItemTier,
+    '窗口必须比单条目最高档小：否则峰值连接数 = 窗口 × 高档，仍然会触发按 IP 限并发',
+  )
+  assert.equal(expectedWindow * perItemTier, perItemTier * 2, '窗口 × 单条目档位 = 批内连接预算')
+
+  let active = 0
+  let maxActive = 0
+  const body = Buffer.alloc(512, 0x56)
+  await withServer((_req, res) => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    setTimeout(() => {
+      res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+      res.end(body)
+      active -= 1
+    }, 40)
+  }, async (base) => {
+    // 12 条与 t8 实测时用的条数一致：条目够多才能看出窗口的真实宽度
+    const targets = Array.from({ length: 12 }, (_, i) => ({
+      url: `${base}/c${i}.bin`,
+      output: path.join(tmpRoot, `conc-${i}.bin`),
+    }))
+    const result = await runBatch(targets)
+    assert.equal(result.succeeded, targets.length)
+    assert.equal(
+      maxActive,
+      expectedWindow,
+      `实测峰值并发 ${maxActive} 必须等于推导出的窗口 ${expectedWindow}（12 条足够把窗口占满）`,
+    )
+  })
+})
+
+/* ---------------- timeoutMs（D3）：超时后的进度呈现 ---------------- */
+
+test('timeoutMs：非法值在发起任何请求之前抛错（与 maxBandwidth 同一套做法）', async () => {
+  let hits = 0
+  const body = Buffer.alloc(1024, 0x61)
+  await withServer((_req, res) => {
+    hits += 1
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    // 0 / 负数 / 低于下限 / 高于上限 / 小数 / null / NaN / 非数字
+    for (const bad of [0, -1, 999, 1_800_001, 1.5, null, Number.NaN, 'abc']) {
+      await assert.rejects(
+        () =>
+          run({
+            url: `${base}/to.bin`,
+            output: path.join(tmpRoot, 'to.bin'),
+            timeoutMs: bad,
+          }),
+        /timeoutMs/,
+        `timeoutMs=${JSON.stringify(bad)} 必须在发请求前拒绝`,
+      )
+    }
+    assert.equal(hits, 0, '超时参数非法时一个请求都不该发出')
+
+    // 正向：两个边界值都必须被接受并照常下载 —— 否则「只校验、不生效」也能骗过上面那批断言
+    for (const ok of [1_000, 1_800_000]) {
+      const result = await run({
+        url: `${base}/to-ok-${ok}.bin`,
+        output: path.join(tmpRoot, `to-ok-${ok}.bin`),
+        timeoutMs: ok,
+      })
+      assert.equal(result.success, true, `timeoutMs=${ok} 是合法边界值，必须照常下载`)
+    }
+    assert.ok(hits >= 3, '合法超时值必须真的发起下载')
+  })
+})
+
+test('timeoutMs：批量下超时的条目失败、其余条目继续、已完成条目不被改判', async () => {
+  const body = Buffer.alloc(1024, 0x62)
+  const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+  const taskDir = process.env.DSH_PROGRESS_DIR!
+  const beforeJson = filesIn(dlDir, '.json')
+  const beforeJsonl = filesIn(taskDir, '.jsonl')
+  await withServer((req, res) => {
+    if (req.url?.includes('hang')) {
+      // 声明 9MB、只发 1KB 后既不结束也不关闭：只有超时能结束这一条
+      res.writeHead(200, { 'content-length': '9999999' })
+      res.write(body)
+      return
+    }
+    res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+    res.end(body)
+  }, async (base) => {
+    const result = await runBatch(
+      [
+        { url: `${base}/first.bin`, output: path.join(tmpRoot, 'to-first.bin') },
+        { url: `${base}/hang.bin`, output: path.join(tmpRoot, 'to-hang.bin') },
+        { url: `${base}/last.bin`, output: path.join(tmpRoot, 'to-last.bin') },
+      ],
+      { timeoutMs: 1_000 },
+    )
+
+    // 超时那一条：失败（不是取消），原因里带出超时与毫秒数
+    assert.equal(result.succeeded, 2, '没超时的两条必须照常成功')
+    assert.equal(result.failed, 1, '超时的那一条记失败')
+    assert.equal(result.cancelled, 0, '超时不是取消：cancelled 计数必须为 0')
+    const hang = result.results.find((r) => r.url.includes('hang')) as BatchItemResult
+    assert.equal(hang.success, false)
+    assert.notEqual(hang.cancelled, true, '超时不得被标成取消')
+    assert.match(hang.error ?? '', /下载超时/)
+    assert.match(hang.error ?? '', /1000ms/, '文案必须带出设置的毫秒数，便于核对')
+    assert.doesNotMatch(hang.error ?? '', /取消/, '超时文案不得说成取消')
+
+    // 已完成条目不被改判：两条成功的文件必须真的落盘
+    for (const name of ['to-first.bin', 'to-last.bin']) {
+      assert.equal(existsSync(path.join(tmpRoot, name)), true, `${name} 必须落盘`)
+    }
+    assert.equal(result.results[0]?.success, true, '第一条已完成的条目不得被改判')
+
+    // 进度呈现：轨道二里超时那条必须是 failed（不是 running、也不是 cancelled）——
+    // 这正是「超时后进度如何呈现」要守的东西。
+    const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+    assert.equal(newJson.length, 3, '三条都要有轨道二记录')
+    const byTask = newJson.map((file) => {
+      const rec = JSON.parse(readFileSync(path.join(dlDir, file), 'utf-8')) as {
+        id: string
+        status: string
+        name: string
+      }
+      return rec
+    })
+    const statuses = byTask.map((r) => r.status).sort()
+    assert.deepEqual(statuses, ['completed', 'completed', 'failed'])
+    const timedOut = byTask.find((r) => r.status === 'failed') as { id: string; name: string }
+    assert.equal(timedOut.name, path.join(tmpRoot, 'to-hang.bin'), 'failed 记录必须属于超时那一条')
+
+    // 轨道一的终态同理：done / done / failed，且不得停在 running
+    const newJsonl = newFiles(beforeJsonl, filesIn(taskDir, '.jsonl'))
+    assert.equal(newJsonl.length, 3)
+    const states = newJsonl.map((file) => {
+      const lines = readFileSync(path.join(taskDir, file), 'utf-8').trim().split('\n')
+      return (JSON.parse(lines[lines.length - 1]!) as { state?: string }).state
+    })
+    assert.deepEqual(states.sort(), ['done', 'done', 'failed'])
+  })
+})
+
+test('timeoutMs：单条目超时 -> 抛错（不返回 success），且进度记成失败而不是取消', async () => {
+  const body = Buffer.alloc(1024, 0x63)
+  const dlDir = process.env.DSH_DOWNLOAD_PROGRESS_DIR!
+  const beforeJson = filesIn(dlDir, '.json')
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-length': '9999999' })
+    res.write(body)
+  }, async (base) => {
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/hang-single.bin`,
+          output: path.join(tmpRoot, 'to-single.bin'),
+          timeoutMs: 1_000,
+        }),
+      /下载超时/,
+      '单条目超时必须抛错，而不是「成功但没下完」',
+    )
+
+    const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
+    assert.equal(newJson.length, 1, '单条目也要留下一条轨道二记录')
+    const rec = JSON.parse(readFileSync(path.join(dlDir, newJson[0]!), 'utf-8')) as {
+      status: string
+    }
+    assert.equal(rec.status, 'failed', '超时的终态是 failed（不是 cancelled，也不是停在 running）')
+  })
+})
+
+/* ---------------- P1-2 抬档路径：真实下载建桶 → 命中历史 → decide() 抬档 ---------------- */
+
+/**
+ * 端到端串联（P1-2 的「抬档侧」证据，数值全部来自真实下载）：
+ *
+ *   真实 aria2 下 8MB（走满上限档 8 连接）→ 缓存里出现该主机的记录，`cn` 达到抬档门槛
+ *   → 同一主机「第二次调用」时 `decide()` 按这条历史把 4MB 文件的档位从 4 抬到 8；
+ *   清空缓存后同一个 4MB 只拿到 4 —— 这个差值就是抬档生效的证明。
+ *
+ * 为什么第一次是 8MB 而不是更大的文件（t25 起）：观测取整段的 **CN 峰值**，所以收尾排空
+ * 不再污染记录。t24 时这里被迫用 32MB —— 那时取的是「最后一条摘要」，8MB 的最后一条是
+ * `(96%) CN:1`（中途 `{60%, CN:8}`），正好落在门槛之下。现在 8MB 就够了，而「小文件也满足
+ * 门槛」本身就是那条修复的守护。
+ */
+test('P1-2 抬档路径（端到端）：真实 8MB 下载写入门槛内历史后，同一主机第二次 decide() 真的抬档', async (t) => {
+  if (getAria2Path() === null) {
+    t.skip('本机无 aria2 子包，无法覆盖真实下载建桶')
+    return
+  }
+  const cacheDir = process.env.DSH_SMARTDL_THROUGHPUT_DIR!
+  const firstSize = 8 * 1024 * 1024 // 走满上限档；F2 修好后小文件的 CN 峰值也进记录
+  const secondSize = 4 * 1024 * 1024 // 第二次「按文件大小」只该给 4
+  const env = { platform: 'linux', arch: 'x64' }
+
+  await withServer(
+    serveThrottledRanged(firstSize, {
+      chunk: 32 * 1024,
+      delayMs: 40,
+      stallAt: 4 * 1024 * 1024,
+      stallMs: 1000,
+    }),
+    async (base) => {
+      const url = `${base}/raise-path.bin`
+      // ① 第一次调用：真实下载
+      const first = await run({ url, output: path.join(tmpRoot, 'raise-path-1.bin') })
+      assert.equal(first.method, 'aria2')
+      assert.equal(first.success, true)
+      assert.equal(first.size, firstSize)
+
+      // ② 真实写入的记录必须自己满足抬档的两条证据（否则后面的抬档没有依据）
+      const recorded = readThroughput(url, { dir: cacheDir })
+      assert.ok(recorded, '第一次下载必须写出该主机的记录')
+      assert.equal(recorded.record.concurrency, MAX_CONCURRENCY, '第一次必须走满上限档')
+      assert.ok(
+        recorded.record.cn >= RAISE_MIN_EFFECTIVE_CONNECTIONS,
+        `实测实际有效连接数必须达到门槛 ${RAISE_MIN_EFFECTIVE_CONNECTIONS}，实际 ${recorded.record.cn}`,
+      )
+      assert.ok(recorded.record.medianThroughput > 0, '吞吐中位数必须是正数')
+
+      const emptyDir = mkdtempSync(path.join(os.tmpdir(), 'raise-path-empty-'))
+      try {
+        // ③ 对照：清空缓存（换一个空目录）后，同一个文件大小只能按大小分档
+        const withoutHistory = decide(
+          { supportsMultiThread: true, contentLength: secondSize },
+          true,
+          env,
+          { url, dir: emptyDir },
+        )
+        assert.equal(withoutHistory.concurrency, 4, '对照：无历史时必须按大小给 4')
+        assert.doesNotMatch(withoutHistory.reason, new RegExp(HISTORY_RAISE_REASON))
+
+        // ④ 第二次调用：同一主机 + 真实历史 → 必须抬到上限档
+        const withHistory = decide(
+          { supportsMultiThread: true, contentLength: secondSize },
+          true,
+          env,
+          { url, dir: cacheDir },
+        )
+        assert.equal(withHistory.concurrency, MAX_CONCURRENCY, '命中历史后必须抬到上限档')
+        assert.ok(
+          withHistory.concurrency > withoutHistory.concurrency,
+          `抬档必须体现为档位上升（对照 ${withoutHistory.concurrency} → 本次 ${withHistory.concurrency}）`,
+        )
+        assert.notEqual(withHistory.reason, withoutHistory.reason, '两种决策的文案必须可区分')
+        assert.match(withHistory.reason, new RegExp(HISTORY_RAISE_REASON))
+        const key = throughputKey(url)
+        assert.ok(key)
+        assert.match(withHistory.reason, new RegExp(key.hostHash), 'reason 必须带主机标识')
+        assert.match(withHistory.reason, new RegExp(`端口 ${key.port}`))
+        assert.match(
+          withHistory.reason,
+          new RegExp(`实测实际有效 ${recorded.record.cn} 条`),
+          'reason 里的连接数必须与真实写入的记录一致',
+        )
+        assert.match(withHistory.reason, /按大小只给 4/)
+        assert.match(withHistory.reason, /提到 8/)
+      } finally {
+        rmSync(emptyDir, { recursive: true, force: true })
+      }
+    },
+  )
+})
+
+/**
+ * F1 的端到端守护（t25 起）：**真实的第二次工具调用**必须抬档。
+ *
+ * t24 时这条用例断言的是反面（「第二次仍按大小分档、只有 4 连接」），因为 `src/index.ts`
+ * 的调用点漏传了 history；t25 把 `decide(probe, aria2Path !== null, {}, { url: requestedUrl })`
+ * 接上之后，这里翻转成断言抬档 —— 若有人再把那个参数拿掉，本用例立刻变红。
+ *
+ * 两个文件落在**同一个 host:port**（同一个缓存桶）上：第一次 8MB（走满上限档，
+ * F2 修好后观测到的 CN 峰值 ≥ 4），第二次 4MB（按大小只该给 4，必须被历史抬到 8）。
+ */
+test('P1-2 抬档路径：同一主机的第二次真实工具调用必须抬档到 8（F1 端到端守护）', async (t) => {
+  if (getAria2Path() === null) {
+    t.skip('本机无 aria2 子包')
+    return
+  }
+  const cacheDir = process.env.DSH_SMARTDL_THROUGHPUT_DIR!
+  // 第一次用 8MB（不是 32MB）：F2 修好后小文件也能满足 cn ≥ 4 —— 这条尺寸本身就是 F2 的守护
+  const bigSize = 8 * 1024 * 1024
+  const smallSize = 4 * 1024 * 1024
+  await withServer(
+    // 同一个 server（同一 host:port，同一个缓存桶）按路径给两种大小
+    serveThrottledRanged(
+      (reqUrl) => (reqUrl.includes('small') ? smallSize : bigSize),
+      { chunk: 32 * 1024, delayMs: 40, stallAt: 4 * 1024 * 1024, stallMs: 1000 },
+    ),
+    async (base) => {
+      const bigUrl = `${base}/big.bin`
+      const first = await run({ url: bigUrl, output: path.join(tmpRoot, 'wired-1.bin') })
+      assert.equal(first.method, 'aria2')
+      assert.equal(first.success, true)
+      const recorded = readThroughput(bigUrl, { dir: cacheDir })
+      assert.ok(recorded)
+      // 这道门槛是 F2 的守护：修之前 8MB 记下来的是尾部排空的 cn=1，这里就会红
+      assert.ok(
+        recorded.record.cn >= RAISE_MIN_EFFECTIVE_CONNECTIONS,
+        `8MB 的观测也必须满足门槛（F2：取整段峰值而不是尾部摘要），实际 cn=${recorded.record.cn}`,
+      )
+      assert.equal(recorded.record.concurrency, MAX_CONCURRENCY)
+
+      // 对照：同一条历史直接交给 decide()，4MB 会被抬到 8（读侧行为）
+      const direct = decide(
+        { supportsMultiThread: true, contentLength: smallSize },
+        true,
+        { platform: 'linux', arch: 'x64' },
+        { url: bigUrl, dir: cacheDir },
+      )
+      assert.equal(direct.concurrency, MAX_CONCURRENCY)
+
+      // 真实工具调用的第二次：同一 host:port、4MB —— 必须抬档（F1 就是这条）
+      const second = await run({ url: `${base}/small.bin`, output: path.join(tmpRoot, 'wired-2.bin') })
+      assert.equal(second.success, true)
+      assert.equal(second.size, smallSize)
+      assert.match(
+        String(second.reason),
+        new RegExp(HISTORY_RAISE_REASON),
+        `第二次真实调用必须写明依据历史抬档：${second.reason}`,
+      )
+      assert.match(String(second.reason), /提到 8/, '必须抬到上限档 8')
+      assert.doesNotMatch(
+        String(second.reason),
+        /使用 4 连接/,
+        '不得再出现「按大小分档给 4」的结论（那就是没抬档）',
+      )
+      assert.match(String(second.reason), /按大小只给 4/, 'reason 要说明按大小本来只给 4')
+    },
+  )
+})
+
+/* ---------------- P1-2 写入接线：下载结束点真的写缓存 ---------------- */
+
+
+/**
+ * 限速 + 支持 Range 的本地服务。
+ *
+ * 为什么要限速：不延迟的话 8MB 本地下载几十毫秒就结束，aria2 的 `--summary-interval=1`
+ * 一条带速度的摘要都来不及吐 —— 那就没有任何观测值可写，用例变成「因为太快所以没缓存」
+ * 的假绿（既有进度透传用例踩过同一个坑）。中途再插一段停顿，保证跨过摘要周期。
+ */
+function serveThrottledRanged(
+  size: number | ((reqUrl: string) => number),
+  opts: { chunk?: number; delayMs?: number; stallAt?: number; stallMs?: number } = {},
+): (req: IncomingMessage, res: ServerResponse) => void {
+  const chunk = opts.chunk ?? 32 * 1024
+  const delayMs = opts.delayMs ?? 40
+  const stallAt = opts.stallAt ?? -1
+  const stallMs = opts.stallMs ?? 0
+  // size 支持传函数：同一个 server（= 同一个 host:port = 同一个缓存桶）下按路径给不同大小，
+  // 「第一次下大文件、第二次下小文件」这种场景才能落在同一个桶里。
+  const bodies = new Map<number, Buffer>()
+  const bodyFor = (n: number): Buffer => {
+    const cached = bodies.get(n)
+    if (cached) return cached
+    const created = Buffer.alloc(n, 0x6b)
+    bodies.set(n, created)
+    return created
+  }
+  return (req, res) => {
+    const reqUrl = req.url ?? ''
+    const total = typeof size === 'function' ? size(reqUrl) : size
+    const body = bodyFor(total)
+    const range = typeof req.headers.range === 'string' ? req.headers.range : undefined
+    let start = 0
+    let end = total - 1
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range)
+      start = m && m[1] ? Number(m[1]) : 0
+      end = m && m[2] ? Math.min(Number(m[2]), total - 1) : total - 1
+      res.writeHead(206, {
+        'content-range': `bytes ${start}-${end}/${total}`,
+        'content-length': String(end - start + 1),
+        'accept-ranges': 'bytes',
+        'content-type': 'application/octet-stream',
+      })
+    } else {
+      res.writeHead(200, {
+        'content-length': String(total),
+        'accept-ranges': 'bytes',
+        'content-type': 'application/octet-stream',
+      })
+    }
+    if (req.method === 'HEAD') {
+      res.end()
+      return
+    }
+    let off = start
+    const tick = (): void => {
+      if (off > end) {
+        res.end()
+        return
+      }
+      const next = Math.min(off + chunk, end + 1)
+      res.write(body.subarray(off, next))
+      const crossedStall = stallAt > 0 && off <= stallAt && next > stallAt
+      off = next
+      setTimeout(tick, crossedStall ? stallMs : delayMs)
+    }
+    tick()
+  }
+}
+
+test('P1-2 写入接线（端到端）：真实 aria2 下载成功后，缓存里出现该主机的哈希记录', async (t) => {
+  if (getAria2Path() === null) {
+    t.skip('本机无 aria2 子包，无法覆盖 aria2 观测写入')
+    return
+  }
+  const cacheDir = process.env.DSH_SMARTDL_THROUGHPUT_DIR!
+  const size = LARGE_FILE // 8MB：档位就是上限档 8，与抬档判定要的「历史那次用满上限」一致
+  const before = filesIn(cacheDir, '.json')
+  await withServer(
+    serveThrottledRanged(size, { chunk: 32 * 1024, delayMs: 40, stallAt: 4 * 1024 * 1024, stallMs: 1000 }),
+    async (base) => {
+      const result = await run({ url: `${base}/observed.bin`, output: path.join(tmpRoot, 'observed.bin') })
+      assert.equal(result.method, 'aria2', '这条用例要的就是 aria2 路径（只有它有 CN 可观测）')
+      assert.equal(result.success, true)
+      assert.equal(result.size, size)
+
+      const created = newFiles(before, filesIn(cacheDir, '.json'))
+      assert.equal(
+        created.length,
+        1,
+        '成功的 aria2 下载必须写出一条缓存记录（t20 交付时这里是零调用点，本项就是来消掉它的）',
+      )
+      const file = path.join(cacheDir, created[0]!)
+      const text = readFileSync(file, 'utf-8')
+      const record = JSON.parse(text) as {
+        hostHash: string
+        port: string
+        samples: number[]
+        medianThroughput: number
+        concurrency: number
+        cn: number
+        updatedAt: number
+      }
+      const parsed = new URL(base)
+      assert.equal(
+        record.hostHash,
+        createHash('sha256').update(parsed.hostname).digest('hex').slice(0, 32),
+        '记录必须按「主机名的 sha256」分桶（同时证明没存明文）',
+      )
+      assert.equal(record.port, parsed.port, '端口必须进键')
+      assert.equal(
+        record.concurrency,
+        decideConcurrency(size),
+        '写入的并发数必须是本次请求的档位（不是猜的）',
+      )
+      assert.ok(
+        Number.isInteger(record.cn) && record.cn >= 1,
+        `cn 必须来自 aria2 摘要里的实际连接数，实际 ${record.cn}`,
+      )
+      assert.equal(record.samples.length, 1, '首次观测只有 1 个样本')
+      assert.ok(
+        (record.samples[0] as number) > 0 && record.medianThroughput > 0,
+        '吞吐必须是正数（同时挡住「单位换算搞反」这类错）',
+      )
+      assert.ok(record.updatedAt > 0)
+      // 隐私口径：缓存里只应有哈希，不该出现明文主机名
+      assert.equal(text.includes(parsed.hostname), false, '缓存内容里不得出现明文主机名')
+      assert.equal(
+        created[0]!.includes(parsed.hostname),
+        false,
+        '缓存文件名里同样不得出现明文主机名',
+      )
+
+      // 写→读闭环：t20 的读侧真的能把这条记录解析回来（形状写歪了这里会返回 null）
+      const hit = readThroughput(`${base}/observed.bin`, { dir: cacheDir })
+      assert.ok(hit, '刚写下的记录必须能被读侧解析（写侧与读侧的形状契约）')
+      assert.equal(hit.record.concurrency, decideConcurrency(size))
+      assert.deepEqual(hit.record.samples, record.samples)
+    },
+  )
+})
+
+test('P1-2 写入接线：下载完成但 sha256 校验失败的条目也不写缓存（而观测值确实产生过）', async (t) => {
+  if (getAria2Path() === null) {
+    t.skip('本机无 aria2 子包，无法覆盖 aria2 观测路径')
+    return
+  }
+  const cacheDir = process.env.DSH_SMARTDL_THROUGHPUT_DIR!
+  const before = filesIn(cacheDir, '.json')
+  const size = LARGE_FILE
+  // 故意给一个与内容不符的摘要：下载本身**完整成功**（aria2 退出码 0、跨过摘要周期、
+  // 观测值真的产生过），失败发生在校验层。用例必须这么构造 —— 若失败发生在下载阶段，
+  // 「不写缓存」的断言会因为「压根没有观测值」而恒真，那种绿是假的。
+  const wrongSha = createHash('sha256').update(Buffer.alloc(size, 0x00)).digest('hex')
+  await withServer(
+    serveThrottledRanged(size, { chunk: 32 * 1024, delayMs: 40, stallAt: 4 * 1024 * 1024, stallMs: 1000 }),
+    async (base) => {
+      const out = path.join(tmpRoot, 'sha-failed-write.bin')
+      await assert.rejects(
+        () => run({ url: `${base}/sha-failed-write.bin`, output: out, sha256: wrongSha }),
+        /完整性校验失败.*SHA-256 不匹配/,
+      )
+      // 正向断言（证明前提成立）：文件确实完整落盘 —— 也就是说下载阶段是成功的，
+      // 观测值在那一刻是存在的，只是不该被写进缓存。
+      assert.equal(readFileSync(out).length, size, '下载阶段必须真的完成，否则前提不成立')
+      assert.deepEqual(
+        newFiles(before, filesIn(cacheDir, '.json')),
+        [],
+        '校验失败的条目不得写缓存（它的速度不代表这台主机的能力）',
+      )
+    },
+  )
+})
+
+test('P1-2 写入接线：缓存目录不可写时下载照常成功（写缓存失败不得让下载失败）', async (t) => {
+  if (getAria2Path() === null) {
+    t.skip('本机无 aria2 子包，无法覆盖 aria2 观测路径')
+    return
+  }
+  const saved = process.env.DSH_SMARTDL_THROUGHPUT_DIR
+  const root = mkdtempSync(path.join(os.tmpdir(), 'throughput-blocked-'))
+  const blocker = path.join(root, 'blocker')
+  const size = 4 * 1024 * 1024
+  try {
+    // 父路径被一个文件占住 → mkdir 必然失败 → recordThroughput 只能静默放弃。
+    // 这条用例守的是「缓存是优化而不是功能」：写不进去不该让已经成功的下载变成失败
+    // （与 writeMarker() 的既有处理方式同构）。
+    writeFileSync(blocker, 'occupied', 'utf-8')
+    process.env.DSH_SMARTDL_THROUGHPUT_DIR = path.join(blocker, 'throughput')
+    await withServer(
+      serveThrottledRanged(size, { chunk: 32 * 1024, delayMs: 40, stallAt: 2 * 1024 * 1024, stallMs: 800 }),
+      async (base) => {
+        const out = path.join(tmpRoot, 'unwritable-cache.bin')
+        const result = await run({ url: `${base}/unwritable.bin`, output: out })
+        assert.equal(result.success, true, '缓存写不进去绝不能让成功的下载失败')
+        assert.equal(result.method, 'aria2')
+        assert.equal(readFileSync(out).length, size, '文件必须完整落盘')
+        assert.equal(
+          existsSync(path.join(blocker, 'throughput')),
+          false,
+          '写不进去时不该在那里留下任何东西',
+        )
+      },
+    )
+  } finally {
+    if (saved === undefined) delete process.env.DSH_SMARTDL_THROUGHPUT_DIR
+    else process.env.DSH_SMARTDL_THROUGHPUT_DIR = saved
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('P1-2 写入接线：取消与 curl 路径都不写缓存（样本不得污染中位数）', async () => {
+  const cacheDir = process.env.DSH_SMARTDL_THROUGHPUT_DIR!
+  const before = filesIn(cacheDir, '.json')
+
+  // ① 取消：下载中途 abort
+  await withServer(
+    (req, res) => {
+      res.writeHead(200, { 'content-length': '9999999', 'accept-ranges': 'bytes' })
+      if (req.method === 'HEAD') res.end()
+      else res.write(Buffer.alloc(1024, 0x22))
+    },
+    async (base) => {
+      const controller = new AbortController()
+      const pending = tool.execute(
+        { url: `${base}/cancelled.bin`, output: path.join(tmpRoot, 'cancelled.bin') },
+        { signal: controller.signal },
+      )
+      await new Promise((r) => setTimeout(r, 400))
+      controller.abort()
+      await assert.rejects(() => pending, /取消|终止/)
+      assert.deepEqual(
+        newFiles(before, filesIn(cacheDir, '.json')),
+        [],
+        '被取消的下载不得留下缓存记录',
+      )
+    },
+  )
+
+  // ② curl 路径成功也不写：curl 的进度解析只给百分比、没有字节速率，硬写只能编数字
+  const small = Buffer.alloc(512 * 1024, 0x33) // < 1MB 阈值 -> 固定走 curl
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { 'content-length': String(small.length), 'accept-ranges': 'bytes' })
+      res.end(small)
+    },
+    async (base) => {
+      const result = await run({ url: `${base}/small.bin`, output: path.join(tmpRoot, 'small.bin') })
+      assert.equal(result.success, true)
+      assert.equal(result.method, 'curl')
+      assert.deepEqual(
+        newFiles(before, filesIn(cacheDir, '.json')),
+        [],
+        'curl 路径没有 CN / 字节速率可观测，因此不写（刻意的，见 recordObservedThroughput 的注释）',
+      )
+    },
+  )
 })

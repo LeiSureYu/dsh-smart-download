@@ -133,6 +133,11 @@ function inferStateFromMessage(msg) {
 export class ProgressReporter {
     taskId;
     label;
+    /**
+     * 批次 ID：同一次调用（单条目或批量）里所有条目共用。
+     * 只做分组标签，任何执行/并发决策都不看它。
+     */
+    batch;
     taskProgressFile = null;
     downloadProgressFile = null;
     lastPct = -1;
@@ -163,10 +168,14 @@ export class ProgressReporter {
      * @param taskId 任务 ID，用于文件名与状态查询
      * @param label 人类可读的任务名（通常是输出文件名），会写入两条轨道供 UI 展示
      * @param session 当前会话；用于把轨道一写进该会话的进度目录，缺省则不写轨道一
+     * @param batch 批次 ID，可选；同一次调用产生的所有条目共用一个值。
+     *   缺省时不写该字段（老行为逐字节相同），而不是写一个空串 —— 空串会占着
+     *   字段位，让读取端以为「有批次但不知道是哪批」。
      */
-    constructor(taskId, label, session) {
+    constructor(taskId, label, session, batch) {
         this.taskId = taskId;
         this.label = label;
+        this.batch = batch;
         const taskDir = resolveTaskProgressDir(session);
         if (taskDir) {
             const ready = ensureDir(taskDir);
@@ -210,6 +219,9 @@ export class ProgressReporter {
             rec.spd = spd;
         if (eta)
             rec.eta = eta;
+        // 批次 ID 只在真的有时才写：缺省路径上轨道一记录与 1.2.0 逐字节相同
+        if (this.batch)
+            rec.batch = this.batch;
         this.pending.push(rec);
         this.scheduleFlush();
     }
@@ -259,6 +271,9 @@ export class ProgressReporter {
                 task.speed = rec.spd;
             if (rec.eta)
                 task.eta = rec.eta;
+            // 与轨道一同理：缺省不写，老读取端拿到的 JSON 与 1.2.0 逐字节相同
+            if (this.batch)
+                task.batch = this.batch;
             const file = this.downloadProgressFile;
             jobs.push(fsp.writeFile(file, JSON.stringify(task, null, 2), 'utf-8').catch(() => { }));
         }

@@ -6,18 +6,62 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   parseAria2Summary,
   parseCurlProgress,
   splitIntoLines,
 } from '../src/progress-parse.js'
 
+const here = dirname(fileURLToPath(import.meta.url))
+const fixtureDir = join(here, 'fixtures')
+
 test('解析真实 aria2 1.37.0 摘要行（DL，十六进制 GID）', () => {
   const r = parseAria2Summary('[#de8d33 11MiB/40MiB(27%) CN:4 DL:10MiB ETA:2s]')
   assert.ok(r)
   assert.equal(r.pct, 27)
+  assert.equal(r.cn, 4)
   assert.equal(r.spd, '10MiB/s')
   assert.equal(r.eta, '2s')
+})
+
+/* ---------------------- 实际有效连接数 CN（P1-1，纯观测） ---------------------- */
+
+test('CN: 被解析成整数 cn，且不干扰 pct / spd / eta（值取自 test/fixtures/）', async () => {
+  // fixture 里真实存在的三行（CN:4），外加 compat fixture 的 CN:1 / CN:8 ——
+  // 覆盖「同一文件下并发不同」的真实取值，避免只用单一数字蒙对。
+  const real = splitIntoLines(
+    await readFile(join(fixtureDir, 'aria2-summary-real.txt'), 'utf8'),
+  )
+  const compat = splitIntoLines(
+    await readFile(join(fixtureDir, 'aria2-summary-compat.txt'), 'utf8'),
+  )
+
+  // 27% 行（有 ETA）：四字段一起断言，顺带锁住既有字段没被捕获组顺序改动带偏
+  const p27 = parseAria2Summary(real.find((l) => l.includes('(27%)'))!)
+  assert.ok(p27, 'fixture 里应有 27% 摘要行')
+  assert.equal(p27.cn, 4)
+  assert.equal(p27.pct, 27)
+  assert.equal(p27.spd, '10MiB/s')
+  assert.equal(p27.eta, '2s')
+
+  // 55% 行
+  const p55 = parseAria2Summary(real.find((l) => l.includes('(55%)'))!)
+  assert.equal(p55?.cn, 4)
+
+  // 82% 行（aria2 省略 ETA）：cn 仍然必须取到
+  const p82 = parseAria2Summary(real.find((l) => l.includes('(82%)'))!)
+  assert.ok(p82, 'fixture 里应有 82% 摘要行')
+  assert.equal(p82.cn, 4)
+  assert.equal(p82.eta, undefined)
+
+  // 旧 readout 格式（SIZE:/SPD:）：CN 同样要取到，且不依赖 DL 分支
+  const p1 = parseAria2Summary(compat.find((l) => l.includes('(1%)'))!)
+  assert.equal(p1?.cn, 1)
+  const p24 = parseAria2Summary(compat.find((l) => l.includes('(24%)'))!)
+  assert.equal(p24?.cn, 8)
 })
 
 test('解析兼容格式（SIZE 前缀 + SPD，KiBs 写法）', () => {
@@ -26,6 +70,7 @@ test('解析兼容格式（SIZE 前缀 + SPD，KiBs 写法）', () => {
   )
   assert.ok(r)
   assert.equal(r.pct, 1)
+  assert.equal(r.cn, 1)
   assert.equal(r.spd, '115.7KiB/s')
   assert.equal(r.eta, '4m51s')
 })
@@ -34,6 +79,7 @@ test('100% 行可解析', () => {
   const r = parseAria2Summary('[#ab12 40MiB/40MiB(100%) CN:4 DL:0B ETA:0s]')
   assert.ok(r)
   assert.equal(r.pct, 100)
+  assert.equal(r.cn, 4)
 })
 
 test('非摘要行返回 null', () => {

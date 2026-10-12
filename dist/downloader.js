@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve as resolvePath, } from 'node:path';
 import { parseAria2Summary, parseCurlProgress, splitIntoLines, } from './progress-parse.js';
+import { headersToAria2Args, headersToCurlArgs } from './headers.js';
 const require = createRequire(import.meta.url);
 /**
  * 平台 → 子包映射表。
@@ -69,7 +70,7 @@ export function getAria2Path() {
  * 另外实测 `--min-split-size=512K` 会让 aria2 以退出码 28 直接失败，
  * 说明该值有下限，1M 是当前验证过的安全取值。
  */
-export function buildAria2Args(url, outputPath, concurrency = 8, resume = true) {
+export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, headers, maxDownloadLimitBytes) {
     const dir = dirname(outputPath);
     const base = basename(outputPath);
     const args = [
@@ -84,6 +85,14 @@ export function buildAria2Args(url, outputPath, concurrency = 8, resume = true) 
         '--console-log-level=warn',
         '--summary-interval=1', // 每秒输出一次进度摘要
         '--show-console-readout=false', // 关闭原地刷新，改用摘要行
+        // 带宽上限（可选）：一个 aria2 进程内的**合计**上限，因此批量时必须把总量
+        // 按并发位分给每个进程（见 src/index.ts 的批量编排），否则一批会翻 N 倍。
+        // 缺省时这一项整个不出现 —— 命令行与 1.2.0 逐字节相同（回归项）。
+        ...(maxDownloadLimitBytes === undefined
+            ? []
+            : [`--max-overall-download-limit=${String(maxDownloadLimitBytes)}`]),
+        // 自定义头（UA / Referer / …）与探测用的是同一份，见 src/headers.ts
+        ...headersToAria2Args(headers),
     ];
     if (dir && dir !== '.') {
         args.push('-d', isAbsolute(dir) ? dir : resolvePath(dir));
@@ -103,8 +112,16 @@ export function buildAria2Args(url, outputPath, concurrency = 8, resume = true) 
  * 而不带 -C - 时同一个场景能正常全量重新下载成功。
  * 因此只在探测确认支持 Range（或文件尚不存在）时才加 -C -。
  * 支持 Range 的场景实测三种情况均正确：半包续传、已完成后重跑、无文件从头下。
+ *
+ * 退出码 33 的含义要按官方定义读（1.3.0 收口）：**33 = HTTP range error**，即「我们发出去的
+ * Range 请求没被接受」。它既可能是服务器真的不支持 Range，也可能只是**忽略了这一次**请求带上的
+ * Range —— t8 复现时 curl 自己的 stderr 就是
+ * `HTTP server does not seem to support byte ranges. Cannot resume.`，
+ * 注意是 does not *seem*：那是 curl 的推测，不是服务器给出的声明。
+ * 因此**不能**拿 33 推断「这台服务器永久不支持续传」（那要按 **36 = bad download resume** 判）；
+ * 上面那句「服务器不支持 Range」只是对那次实测场景的描述，不是对 33 的定义。
  */
-export function buildCurlArgs(url, outputPath, resume = false) {
+export function buildCurlArgs(url, outputPath, resume = false, headers, maxDownloadLimitBytes) {
     // 用条件展开代替 `splice(2, 0, ...)`：位置魔法意味着「在数组字面量中间插入
     // 一个元素」，一旦前面插入/删除任何开关，续传开关就会插错位置（曾经一次
     // 误插让 `-o` 与输出路径分离）。条件展开让顺序由字面量本身表达。
@@ -116,6 +133,14 @@ export function buildCurlArgs(url, outputPath, resume = false) {
         '-o', outputPath,
         '--fail', // HTTP 错误时返回非零退出码
         '--show-error', // 输出错误信息
+        // 带宽上限（可选）：curl 是单连接，--limit-rate 就是这一条任务的上限；
+        // 批量时由调用方按并发位分好份额再传进来（见 src/index.ts 的批量编排）。
+        // 缺省时这一项整个不出现 —— 命令行与 1.2.0 逐字节相同（回归项）。
+        ...(maxDownloadLimitBytes === undefined
+            ? []
+            : ['--limit-rate', String(maxDownloadLimitBytes)]),
+        // 自定义头（UA / Referer / …）与探测用的是同一份，见 src/headers.ts
+        ...headersToCurlArgs(headers),
         url,
     ];
 }
@@ -144,6 +169,83 @@ export class LineBuffer {
             this.pending = '';
         }
     }
+}
+/** 退出码映射表（两个下载工具各一张，来源见上方说明） */
+export const EXIT_CODE_DESCRIPTIONS = Object.freeze({
+    curl: Object.freeze({
+        18: {
+            reason: '传输不完整：只收到一部分数据，连接就被对端或中间设备断开',
+            next: '可重试；半包与旁车指纹已保留，下次会先核对同源再续传',
+        },
+        22: {
+            reason: 'HTTP 错误：服务器返回了 400 及以上的状态码（本插件固定带 --fail）',
+            next: '确认地址是否有效、是否已过期；需要鉴权时用 headers / referer 传凭证',
+        },
+        28: {
+            reason: '超时：在约定的时限内没有完成传输',
+            next: '可重试；若站点较慢，请检查网络或改用镜像（mirror 参数）',
+        },
+        33: {
+            reason: 'HTTP Range 请求未被服务器接受',
+            next: '本地半包已删除，重跑一次会全量重新下载',
+        },
+        56: {
+            reason: '接收数据失败：连接被重置或对端中途关闭',
+            next: '可重试；半包与旁车指纹已保留，下次会先核对同源再续传',
+        },
+    }),
+    aria2: Object.freeze({
+        1: {
+            reason: '未知错误',
+            next: '重试一次；仍失败请把下面的 stderr 尾部一并反馈',
+        },
+        3: {
+            reason: '资源不存在（服务器返回 404 一类）',
+            next: '确认地址是否有效、是否已过期',
+        },
+        9: {
+            reason: '磁盘空间不足',
+            next: '清理磁盘或换一个 output 路径后重试',
+        },
+        13: {
+            reason: '文件已存在且不允许覆盖',
+            next: '本插件固定带 --allow-overwrite=true，出现这条通常意味着目标路径不可写',
+        },
+        24: {
+            reason: 'HTTP 鉴权失败',
+            next: '用 headers / referer 传凭证（例如 Authorization），或确认凭证是否过期',
+        },
+    }),
+});
+/** 从命令行取可执行文件名（去掉目录与 `.exe`）：用户不需要看到绝对路径 */
+function executableName(command) {
+    return basename(command).replace(/\.exe$/i, '');
+}
+/**
+ * 把退出码翻译成给用户看的错误消息；退出码为 0 时返回 `null`。
+ *
+ * 返回 `null` 而不是空串：调用方据此决定「正常结束、不产生任何文案」，
+ * 空串会让 `if (message)` 这类判断失效。
+ *
+ * @param command 子进程命令（可能是绝对路径，文案里只取可执行文件名）
+ * @param code 退出码；被信号终止时 Node 可能给 `null`
+ * @param signal 终止该进程的信号名（Windows 上恒为 `null`）
+ * @param stderrTail 子进程 stderr 尾部；**任何分支都原样保留**，不得丢弃
+ */
+export function describeExitCode(command, code, signal, stderrTail) {
+    if (code === 0)
+        return null;
+    const name = executableName(command);
+    const head = `${name} 退出码 ${code ?? '未知'}${signal ? `（信号 ${signal}）` : ''}`;
+    const detail = stderrTail ? `\nstderr:\n${stderrTail}` : '';
+    const method = /aria2/i.test(name) ? 'aria2' : 'curl';
+    const known = code === null ? undefined : EXIT_CODE_DESCRIPTIONS[method][code];
+    if (!known) {
+        // 未知码必须原样保留退出码与 stderr：丢掉它们等于把唯一能排查的线索删了；
+        // 而编一个原因更糟 —— 用户会照着一个不存在的原因去排查。
+        return `${head}${detail}`;
+    }
+    return `${head}：${known.reason}\n下一步：${known.next}${detail}`;
 }
 /**
  * 启动子进程并等待其结束。
@@ -218,7 +320,9 @@ export function runProcess(command, args, signal, handlers = {}) {
             exited = true;
             signal?.removeEventListener('abort', onAbort);
             if (aborted) {
-                reject(new Error(`下载已取消：${command} 被 AbortSignal 终止`));
+                // 与退出码分支同一条不变量：用户可见文案里只出现可执行文件名，
+                // 绝不出现 node_modules 里的绝对路径（1.3.0 收口，见 executableName）。
+                reject(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`));
             }
             else {
                 reject(err);
@@ -230,7 +334,7 @@ export function runProcess(command, args, signal, handlers = {}) {
             outBuffer.flush((line) => handlers.onStdout?.(line));
             errBuffer.flush((line) => handlers.onStderr?.(line));
             if (aborted) {
-                reject(new Error(`下载已取消：${command} 被 AbortSignal 终止`));
+                reject(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`));
                 return;
             }
             if (code === 0) {
@@ -238,28 +342,78 @@ export function runProcess(command, args, signal, handlers = {}) {
                 return;
             }
             const tail = stderr.trim();
-            reject(new Error(`${command} 退出码 ${code}${closeSignal ? `（信号 ${closeSignal}）` : ''}` +
-                (tail ? `\nstderr:\n${tail}` : '')));
+            // 退出码翻译与命令名收敛都收在 describeExitCode 里：这里只负责「非零退出
+            // 必须有消息」这一条不变量，退出码为 0 的分支在上面已经 resolve 掉了。
+            const message = describeExitCode(command, code, closeSignal, tail);
+            reject(new Error(message ?? `${executableName(command)} 退出码 ${code ?? '未知'}`));
         });
     });
 }
-/** 使用 aria2 多线程下载，并把摘要进度透传给 reporter */
-export async function downloadWithAria2(aria2Path, url, outputPath, concurrency, signal, reporter, resume = true) {
+/**
+ * 把摘要里的速度字符串换算成字节/秒；解析不出来返回 `undefined`。
+ *
+ * 单位语义按国际惯例分开：带 `i` 的（KiB/MiB/GiB）是 1024 进制，不带的（KB/MB）是 1000 进制。
+ * aria2 实测吐的是 `MiB` 这类二进制单位，但 `progress-parse.ts` 的正则也接受不带 `i` 的写法，
+ * 所以两种都要给对。解析不出来时宁可不记 —— 一个错数字会一直躺在中位数里。
+ */
+export function summarySpeedBytes(spd) {
+    const m = /^([\d.]+)\s*([KMGTPE]?i?B)\/s$/i.exec(spd.trim());
+    if (!m)
+        return undefined;
+    const value = Number.parseFloat(m[1]);
+    if (!Number.isFinite(value) || value < 0)
+        return undefined;
+    const unit = m[2].toUpperCase();
+    const letter = unit.replace('I', '').replace('B', '');
+    // 正则已经保证前缀只可能是 '' 或 K/M/G/T/P/E，因此这里不需要再挡未知前缀
+    const exponent = letter === '' ? 0 : 'KMGTPE'.indexOf(letter) + 1;
+    // 二进制单位写作 `MiB`：`i` 在 `B` **之前**，所以要判 `IB` 结尾而不是 `I` 结尾
+    // （写成 endsWith('I') 会把 10MiB 算成 10000000 —— 单测当场抓到了这个错）
+    const base = unit.endsWith('IB') ? 1024 : 1000;
+    return exponent === 0 ? value : value * base ** exponent;
+}
+/**
+ * 使用 aria2 多线程下载，并把摘要进度透传给 reporter。
+ *
+ * 返回值是**最后一次**有效摘要里的观测（调用方据此写吞吐缓存）：为什么取最后一次而不是平均
+ * ——摘要是一秒一次的瞬时值，最后一次最接近结束时的真实带宽，早期样本会被建连与慢启动拉低。
+ *
+ * @returns 观测到的吞吐；一次摘要都没解析出来（下载太快 / 输出被改）时返回 `undefined`
+ */
+export async function downloadWithAria2(aria2Path, url, outputPath, concurrency, signal, reporter, resume = true, headers, maxDownloadLimitBytes) {
     await ensureOutputDir(outputPath);
-    const args = buildAria2Args(url, outputPath, concurrency, resume);
+    const args = buildAria2Args(url, outputPath, concurrency, resume, headers, maxDownloadLimitBytes);
+    let observed;
     await runProcess(aria2Path, args, signal, {
         onStdout: (line) => {
             const parsed = parseAria2Summary(line);
-            if (parsed && reporter) {
+            if (!parsed)
+                return;
+            if (reporter) {
                 reporter.report(parsed.pct, '下载中（aria2）', parsed.spd, parsed.eta);
+            }
+            const throughput = summarySpeedBytes(parsed.spd);
+            // 速度为 0 或解析不出来时**跳过这一行**，而不是把 cn 单独更新：观测的两个数字必须
+            // 成对（否则会留下「结束时 DL:0B 的 cn」配上一个早先的速度，两个值不是同一时刻的）。
+            //
+            // cn 取整段的**峰值**（而不是最后一条）：aria2 收尾时会把连接逐条关掉，最后一条摘要
+            // 反映的是排空阶段 —— t24 实测 8MB/8 连接的摘要序列是 {60%, CN:8} → {96%, CN:1}，
+            // 尾部那个 1 会把「这台主机上次给了我们几条连接」答错，抬档门槛（≥4）就此被错过。
+            if (throughput !== undefined && throughput > 0) {
+                observed = {
+                    throughput,
+                    concurrency,
+                    cn: Math.max(parsed.cn, observed?.cn ?? 0),
+                };
             }
         },
     });
+    return observed;
 }
 /** 使用 curl 单线程下载（回退方案），解析进度条百分比透传给 reporter */
-export async function downloadWithCurl(url, outputPath, signal, reporter, resume = false) {
+export async function downloadWithCurl(url, outputPath, signal, reporter, resume = false, headers, maxDownloadLimitBytes) {
     await ensureOutputDir(outputPath);
-    const args = buildCurlArgs(url, outputPath, resume);
+    const args = buildCurlArgs(url, outputPath, resume, headers, maxDownloadLimitBytes);
     await runProcess('curl', args, signal, {
         onStderr: (line) => {
             const pct = parseCurlProgress(line);

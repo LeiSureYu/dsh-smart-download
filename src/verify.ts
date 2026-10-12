@@ -125,8 +125,25 @@ export function expectedFromProbe(probe: ProbeResult): {
   return { expected: probe.contentLength, contentEncoding: probe.contentEncoding }
 }
 
+/**
+ * 长度校验失败后「下一步做什么」的固定文案。
+ *
+ * 为什么必须有：这条路径的产物**已经落盘**，而调用方看到一句「校验失败」时最
+ * 可能的反应是「那就重下」—— 但在重下之前必须知道两件事：文件与旁车指纹都还在
+ * （所以续传安全判定下次仍有基准），以及落盘的是坏文件而不是被悄悄删掉。
+ * 缺了这两句，用户要么白下几百 MB，要么以为产物已经没了。
+ *
+ * 定成常量而不是就地拼串，理由与 `describeSkip` 相同：让「这条路径只能输出
+ * 这一个值」成为可断言的事实。
+ */
+export const VERIFY_MISMATCH_NEXT_STEP =
+  '下一步：产物、半包与旁车指纹均已保留（便于核对与续传），可直接重跑一次'
+
 /** 把校验失败翻译成给人看的错误信息 */
 export function describeMismatch(outcome: Extract<VerifyOutcome, { kind: 'mismatch' }>): string {
   const actualText = outcome.actual === null ? '文件不存在' : `${outcome.actual} 字节`
-  return `下载完整性校验失败：落盘 ${actualText}，远端声明 ${outcome.expected} 字节`
+  return (
+    `下载完整性校验失败：落盘 ${actualText}，远端声明 ${outcome.expected} 字节\n` +
+    VERIFY_MISMATCH_NEXT_STEP
+  )
 }

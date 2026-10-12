@@ -83,6 +83,39 @@ before(async () => {
             }
           }, 1000)
           return
+        case '/head-timeout':
+          // HEAD 迟迟不响应，GET 却正常：模拟「HEAD 不通但能下载」的 CDN / 代理。
+          // 实测 raw.githubusercontent.com 就是这一类（1.2.0 的修正依据）。
+          setTimeout(() => {
+            try {
+              res.writeHead(200, { 'accept-ranges': 'bytes', 'content-length': String(BIG) })
+              res.end()
+            } catch {
+              // 客户端可能已超时断开
+            }
+          }, 2000)
+          return
+        case '/head-206':
+          // 对 HEAD 回 206 + Content-Range：合法但少见，实测部分 CDN / 代理如此。
+          // 此时 Content-Length 只是分片长度（1），总长度只在 Content-Range 里。
+          res.writeHead(206, {
+            'content-range': `bytes 0-0/${BIG}`,
+            'accept-ranges': 'bytes',
+            'content-length': '1',
+          })
+          res.end()
+          return
+        case '/both-timeout':
+          // HEAD 与 GET 都不响应：两条路都失败，错误文案必须同时带上两者
+          setTimeout(() => {
+            try {
+              res.writeHead(200, { 'content-length': String(BIG) })
+              res.end()
+            } catch {
+              // 客户端可能已超时断开
+            }
+          }, 2000)
+          return
         default:
           res.writeHead(404)
           res.end()
@@ -114,6 +147,27 @@ before(async () => {
         // 忽略 Range，返回 200 且不声明 bytes
         res.writeHead(200, { 'content-length': '50' })
         res.end('x')
+        return
+      }
+      if (path === '/head-timeout') {
+        // HEAD 被挂起，但 GET 正常给出 206 + 总长度 —— 这正是 1.2.0 要救回来的场景
+        res.writeHead(206, {
+          'content-range': `bytes 0-0/${BIG}`,
+          'accept-ranges': 'bytes',
+          'content-length': '1',
+        })
+        res.end('x')
+        return
+      }
+      if (path === '/both-timeout') {
+        setTimeout(() => {
+          try {
+            res.writeHead(200, { 'content-length': String(BIG) })
+            res.end()
+          } catch {
+            // 客户端可能已超时断开
+          }
+        }, 2000)
         return
       }
     }
@@ -252,10 +306,47 @@ test('Range GET 被忽略返回 200 -> 不支持', async () => {
   assert.equal(r.supportsMultiThread, false)
 })
 
-test('探测超时 -> 安全返回不支持', async () => {
+/**
+ * 1.2.0 修正：HEAD 抛异常时不再直接放弃。
+ *
+ * 此前 HEAD 一旦超时/被墙就立刻返回「不支持多线程」，连带三件事一起发生：
+ * 白等一整个探测超时、拿不到文件大小（完整性校验被迫跳过）、再大的文件也
+ * 永远走 curl 单线程。实测 `raw.githubusercontent.com` 就是这类站点。
+ * 现在 HEAD 失败与「405 / 无 Content-Length」走同一条 Range GET 兜底。
+ */
+test('HEAD 超时但 Range GET 正常 -> 判为支持多线程，且长度取自 Content-Range', async () => {
+  const r = await probeUrl(`${base}/head-timeout`, undefined, { timeout: 200 })
+  assert.equal(r.supportsMultiThread, true, 'HEAD 不通不代表服务器不支持 Range')
+  assert.equal(r.contentLength, BIG, '长度必须来自 Range GET 的 Content-Range')
+})
+
+test('HEAD 超时 + Range GET 也拿不到长度 -> 仍安全返回不支持（不静默当作支持）', async () => {
+  // /slow 只挂起 HEAD；GET 会立刻返回 404（无 Content-Length）。
+  // 兜底跑过了、但兜底本身也给不出结论，此时必须照旧判不支持。
   const r = await probeUrl(`${base}/slow`, undefined, { timeout: 200 })
   assert.equal(r.supportsMultiThread, false)
+  assert.match(r.reason ?? '', /无法获取 Content-Length/)
+})
+
+test('探测超时（HEAD 与 Range GET 都超时）-> 安全返回不支持，文案带上两条失败原因', async () => {
+  const r = await probeUrl(`${base}/both-timeout`, undefined, { timeout: 200 })
+  assert.equal(r.supportsMultiThread, false)
   assert.match(r.reason ?? '', /HEAD 请求失败/)
+  assert.match(r.reason ?? '', /Range GET 请求失败/)
+})
+
+/**
+ * 1.2.0 修正：HEAD 分支必须照读 Content-Range。
+ *
+ * 此前 HEAD 分支把 `contentRange` 写死成 null，于是「HEAD 回 206 + Content-Range」
+ * 的服务器会被取到 `Content-Length`（分片长度，这里实测为 1）当作总长度：
+ * 决策层把大文件判成「太小」，完整性校验更是拿 1 字节当期望值，一个完全正确
+ * 的下载会在落盘后被判成损坏。这条用例断言总长度取自 Content-Range。
+ */
+test('HEAD 回 206 + Content-Range -> 总长度取自 Content-Range，而不是分片 Content-Length', async () => {
+  const r = await probeUrl(`${base}/head-206`)
+  assert.equal(r.contentLength, BIG, '总长度必须是 Content-Range 里的 5MB，而不是分片长度 1')
+  assert.equal(r.supportsMultiThread, true, '5MB 且支持 Range，必须判为值得多线程')
 })
 
 test('外部 AbortSignal 已取消 -> 不支持', async () => {

@@ -368,9 +368,13 @@ window.__ModuleLoader__.load({
 		 * 每一行/每一段的**语义色**。
 		 *
 		 * 为什么集中在这里而不是写在各个 style 里：颜色是「状态」的另一种说法，
-		 * 散落到行、进度条、徽标三处就会各自漂移（改一处忘两处）。这里只认
-		 * `--dsw-alias-*` 宿主变量并给固定兜底色 —— 主题切换（明/暗）由宿主负责，
-		 * 我们不自己发明颜色。
+		 * 散落到行、进度条、徽标三处就会各自漂移（改一处忘两处）。
+		 *
+		 * 为什么「完成」用**固定绿**而不是宿主变量：宿主没有 success/warning 这类
+		 * 语义变量（只有 primary / error / secondary / tertiary / deep），用
+		 * `label-secondary` 顶替会让完成态和取消态一样是灰色 —— 用户分不出来。
+		 * 语义色就该是语义色：完成=绿、失败=红、进行中=主色、取消=中性灰。
+		 * 取值挑的是明暗主题下都可读的那一档（#16a34a / #22c55e）。
 		 *
 		 * @param kind `'task'` 取任务状态色；`'presence'` 取产物状态色
 		 * @param value 状态值
@@ -380,7 +384,8 @@ window.__ModuleLoader__.load({
 			if (kind === 'task') {
 				switch (value) {
 					case 'completed':
-						return 'var(--dsw-alias-label-secondary, #16a34a)';
+						// 固定绿：不跟 `--dsw-alias-*` 走（宿主没有 success 语义变量）
+						return '#16a34a';
 					case 'failed':
 						return 'var(--dsw-alias-label-error, #dc2626)';
 					case 'cancelled':
@@ -392,11 +397,12 @@ window.__ModuleLoader__.load({
 			}
 			switch (value) {
 				case 'present':
-					return 'var(--dsw-alias-label-secondary, #16a34a)';
+					// 原位 = 好事，同样用固定绿（与任务「完成」一致）
+					return '#16a34a';
 				case 'missing':
-					return 'var(--dsw-alias-label-deep, #b45309)';
 				case 'changed':
-					return 'var(--dsw-alias-label-deep, #b45309)';
+					// 需要用户注意，但不是错误：琥珀色（明暗都可读）
+					return '#b45309';
 				case 'blocked':
 					return 'var(--dsw-alias-label-error, #dc2626)';
 				default:

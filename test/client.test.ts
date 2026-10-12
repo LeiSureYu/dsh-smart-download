@@ -2596,3 +2596,31 @@ test('管理器：已完成的行不显示 ETA（剩余 0s 是噪声）', async 
     panel.dispose()
   }
 })
+
+test('管理器（视觉）：完成态必须是绿色，且与取消/中性色明显不同', async () => {
+  // 回归护栏：宿主没有 success 语义变量，曾用 label-secondary 顶替，结果完成态
+  // 和取消态一样是灰色 —— 用户分不出来。语义色必须自己取，不能被中性变量绑架。
+  const { request } = serve([
+    managedTask({ id: 'c1', status: 'completed', pct: 100 }),
+    managedTask({ id: 'cc1', status: 'cancelled', pct: 10 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const dots = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'status-dot')
+    const done = (dots[0].props?.style as { background?: string }).background ?? ''
+    const cancelled = (dots[1].props?.style as { background?: string }).background ?? ''
+    assert.equal(done, '#16a34a', '完成态必须是绿色（固定语义色，不走宿主中性变量）')
+    assert.notEqual(done, cancelled, '完成态不得与取消态同色')
+  } finally {
+    panel.dispose()
+  }
+})

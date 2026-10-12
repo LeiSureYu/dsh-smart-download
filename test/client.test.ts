@@ -2542,3 +2542,57 @@ test('管理器：部分删除失败 → 如实报告，不假装全成功', asy
     panel.dispose()
   }
 })
+
+/* ---------------- 进行中的行：速度 + ETA ---------------- */
+
+test('管理器：下载中的行显示速度与 ETA', async () => {
+  const { request } = serve([managedTask({ id: 'run1', status: 'running', pct: 40, spd: '1.2 MB/s', eta: '4m51s' })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const spd = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'speed')[0]
+    const eta = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'eta')[0]
+    assert.ok(spd, '下载中的行必须显示速度')
+    // React 桩把文本子节点收成数组，取首元素比
+    assert.equal(String((spd.props?.children as string[])?.[0] ?? ''), '1.2 MB/s')
+    assert.ok(eta, '下载中的行必须显示 ETA')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：已完成的行不显示 ETA（剩余 0s 是噪声）', async () => {
+  const { request } = serve([managedTask({ id: 'done1', status: 'completed', pct: 100, eta: '0s' })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    assert.equal(
+      findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'eta').length,
+      0,
+      '已完成的行不得显示 ETA',
+    )
+    assert.equal(
+      findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'speed').length,
+      0,
+      '没有速度数据时不得占位',
+    )
+  } finally {
+    panel.dispose()
+  }
+})

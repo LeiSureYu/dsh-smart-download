@@ -1537,6 +1537,31 @@ window.__ModuleLoader__.load({
 					state.size !== undefined && state.size !== null
 						? react.createElement('span', { key: 'size', style: { opacity: 0.75 } }, formatBytes(state.size, t('sizeUnknown')))
 						: null,
+					// 速度：只在**还有速度可报**时出现（进度的 spd 是 aria2/curl 摘要里
+					// 解析出来的瞬时值，完成/失败后就不再有）—— 与浮层行同一约定。
+					task.spd
+						? react.createElement(
+								'span',
+								{
+									key: 'spd',
+									'data-dsh-smart-dl': 'speed',
+									style: { opacity: 0.75, fontVariantNumeric: 'tabular-nums' },
+								},
+								task.spd,
+							)
+						: null,
+					// ETA 只在下载中才有意义：已完成的任务报「剩余 0s」是噪声。
+					task.eta && task.status === 'running'
+						? react.createElement(
+								'span',
+								{
+									key: 'eta',
+									'data-dsh-smart-dl': 'eta',
+									style: { opacity: 0.75, fontVariantNumeric: 'tabular-nums' },
+								},
+								t('eta', { eta: task.eta }),
+							)
+						: null,
 					when !== ''
 						? react.createElement(
 								'span',

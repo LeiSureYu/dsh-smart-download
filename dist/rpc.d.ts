@@ -61,9 +61,19 @@ export interface ManageInspectResult {
     /** 记录里的任务状态（`running` / `completed` / `failed` / `cancelled`），无记录时为 '' */
     state: string;
 }
+/** `reveal` 的返回形状（契约）。 */
+export interface ManageRevealResult {
+    found: boolean;
+    presence: ManagePresence;
+    /** 是否真的让系统文件管理器定位了它 */
+    revealed: boolean;
+    outPath?: string;
+    reason?: DeleteReason;
+    errorCode?: string;
+}
 /** 已校验的管理请求。 */
 export interface ManageRequest {
-    op: 'inspect' | 'forget' | 'delete';
+    op: 'inspect' | 'forget' | 'delete' | 'reveal';
     taskId: string;
     confirm: boolean;
     session?: ProgressSession;
@@ -134,6 +144,21 @@ export declare function checkManagedTarget(outPath: string, recordedSize: number
  * 「没有这条记录」与「记录里没有路径」在 UI 上是两种文案，不能混。
  */
 export declare function inspectManagedTask(taskId: string, session?: ProgressSession): ManageInspectResult;
+/**
+ * `op:'reveal'`：在系统的文件管理器里**定位**该任务的产物。
+ *
+ * 为什么需要它：客户端插件拿不到 `remote.session`（`ctx.remote.session` 在这份
+ * profile 下是 undefined，实测「在文件夹中显示」一直失败），而**宿主进程**能起
+ * 子进程 —— Windows 用 `explorer.exe /select,<file>`，macOS 用 `open -R`，
+ * Linux 用 `xdg-open <dir>`。所以把这一步挪到服务端，客户端只发 `taskId`，
+ * 功能不再依赖任何客户端注入。
+ *
+ * 安全边界与 `delete` 完全一致：路径**只能来自本插件自己的记录**（调用方给不了
+ * 路径），并走同一套 `checkManagedTarget` 校验（绝对路径 / 归一化 / lstat /
+ * 拒目录与符号链接 / 尺寸不符…）。产物不在原位置时如实报 `presence` 且**什么
+ * 都不打开** —— 打开一个「看起来对」的邻居路径比什么都不做更糟。
+ */
+export declare function revealManagedTask(taskId: string, session?: ProgressSession): ManageRevealResult;
 /**
  * `op:'forget'`：只删本插件的两条进度记录（不碰任何产物）。
  *

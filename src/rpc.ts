@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { spawn } from 'node:child_process'
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import { cleanupHistory, readCleanupQuery } from './cleanup.js'
 import {
@@ -345,9 +346,20 @@ export interface ManageInspectResult {
   state: string
 }
 
+/** `reveal` 的返回形状（契约）。 */
+export interface ManageRevealResult {
+  found: boolean
+  presence: ManagePresence
+  /** 是否真的让系统文件管理器定位了它 */
+  revealed: boolean
+  outPath?: string
+  reason?: DeleteReason
+  errorCode?: string
+}
+
 /** 已校验的管理请求。 */
 export interface ManageRequest {
-  op: 'inspect' | 'forget' | 'delete'
+  op: 'inspect' | 'forget' | 'delete' | 'reveal'
   taskId: string
   confirm: boolean
   session?: ProgressSession
@@ -369,8 +381,8 @@ export function readManagePayload(
   if (payload === null || typeof payload !== 'object') return { error: MANAGE_BAD_PAYLOAD }
   const body = payload as { op?: unknown; taskId?: unknown; confirm?: unknown; session?: unknown }
   const op = body.op
-  if (op !== 'inspect' && op !== 'forget' && op !== 'delete') {
-    return { error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete）` }
+    if (op !== 'inspect' && op !== 'forget' && op !== 'delete' && op !== 'reveal') {
+    return { error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete / reveal）` }
   }
   // **R2 落点**：taskId 会被拼进文件名，必须过白名单；带分隔符 / `..` / 驱动器号
   // 的 id 能让 path.join 指到记录目录之外，而删除是不可逆的。
@@ -513,6 +525,65 @@ export function inspectManagedTask(
 }
 
 /**
+ * `op:'reveal'`：在系统的文件管理器里**定位**该任务的产物。
+ *
+ * 为什么需要它：客户端插件拿不到 `remote.session`（`ctx.remote.session` 在这份
+ * profile 下是 undefined，实测「在文件夹中显示」一直失败），而**宿主进程**能起
+ * 子进程 —— Windows 用 `explorer.exe /select,<file>`，macOS 用 `open -R`，
+ * Linux 用 `xdg-open <dir>`。所以把这一步挪到服务端，客户端只发 `taskId`，
+ * 功能不再依赖任何客户端注入。
+ *
+ * 安全边界与 `delete` 完全一致：路径**只能来自本插件自己的记录**（调用方给不了
+ * 路径），并走同一套 `checkManagedTarget` 校验（绝对路径 / 归一化 / lstat /
+ * 拒目录与符号链接 / 尺寸不符…）。产物不在原位置时如实报 `presence` 且**什么
+ * 都不打开** —— 打开一个「看起来对」的邻居路径比什么都不做更糟。
+ */
+export function revealManagedTask(
+  taskId: string,
+  session?: ProgressSession,
+): ManageRevealResult {
+  const task = findTask(taskId, session)
+  if (!task) {
+    return { found: false, presence: 'unknown', revealed: false, reason: 'no-path' }
+  }
+  const check = checkManagedTarget(task.outPath, task.size, session)
+  // 与删除同一条红线：只有「文件确实还在原位」才对它做动作。
+  if (check.kind !== 'present') {
+    return {
+      found: true,
+      presence: presenceOf(check, true),
+      revealed: false,
+      reason: check.kind === 'changed' ? 'changed' : 'gone',
+    }
+  }
+  const target = task.outPath
+  try {
+    if (process.platform === 'win32') {
+      // `/select,` 后**不加空格**（Explorer 的命令行约定）；用 spawn 传参数数组，
+      // 不拼成 shell 字符串 —— 路径里的空格与 & 不会被解释成别的含义。
+      spawn('explorer.exe', [`/select,${target}`], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref()
+    } else if (process.platform === 'darwin') {
+      spawn('open', ['-R', target], { detached: true, stdio: 'ignore' }).unref()
+    } else {
+      // Linux 没有统一的「选中文件」参数：退化为打开所在目录。
+      spawn('xdg-open', [path.dirname(target)], { detached: true, stdio: 'ignore' }).unref()
+    }
+    return { found: true, presence: 'present', outPath: target, revealed: true }
+  } catch (error) {
+    return {
+      found: true,
+      presence: 'present',
+      revealed: false,
+      reason: 'busy',
+      errorCode: reasonFromErrno(errnoOf(error)),
+    }
+  }
+}
+
+/**
  * `op:'forget'`：只删本插件的两条进度记录（不碰任何产物）。
  *
  * 与产物删除的区别：这一步只删**我们自己写的文件**，路径由 taskId + 目录规则
@@ -643,6 +714,12 @@ function reasonFromErrno(code: string): DeleteReason {
   }
 }
 
+/** 从 catch 到的 unknown 里取 errno（拿不到就给空串，调用方据此省略该字段）。 */
+function errnoOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : ''
+}
+
 /**
  * 注册本插件的三个 HTTP 端点：`/api/smartdl.status`（读快照）、
  * `/api/smartdl.cleanup`（按保留窗口清历史）与 `/api/smartdl.manage`
@@ -685,6 +762,9 @@ export function registerStatusRpc(ctx: Context): void {
       const { op, taskId, confirm, session } = parsed.request
 
       if (op === 'inspect') return ok(inspectManagedTask(taskId, session))
+  // op === 'reveal'：打开系统文件管理器定位产物。**不需要 confirm** —— 它不
+  // 修改任何东西，且路径只能来自本插件自己的记录（调用方给不了路径）。
+  if (op === 'reveal') return ok(revealManagedTask(taskId, session))
       if (op === 'forget') {
         return ok({ recordRemoved: forgetManagedTask(taskId, session) })
       }

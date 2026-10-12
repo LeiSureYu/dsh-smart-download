@@ -402,6 +402,15 @@ window.__ModuleLoader__.load({
 			return code === '' ? base : `${base}（${code}）`;
 		}
 
+		/**
+		 * 打开失败的具体文案（复用删除原因那套字典键：都是「这个文件现在是什么状态」）。
+		 */
+		function revealFailureText(value, t) {
+			if (!value) return t('revealFailed');
+			const key = deleteReasonKey(value.reason);
+			return key ? t(key) : t('revealFailed');
+		}
+
 		/** Human byte size; falls back to the caller's "unknown" copy. */
 		function formatBytes(bytes, unknownText) {
 			const n = Number(bytes);
@@ -1619,12 +1628,25 @@ window.__ModuleLoader__.load({
 				const verdict = panelStore_PresenceOf(state.presence, task.id);
 				const outPath = verdict.outPath !== '' ? verdict.outPath : task.outPath;
 				if (typeof outPath !== 'string' || outPath === '') return;
+				// ① 首选宿主能力：remote.session 可用时它最贴合（原生「选中文件」）。
 				try {
-					// `reveal` 在「宿主没有 remote.session」「调用抛错」「宿主拒绝」三种
-					// 情况下都是**返回 { ok:false }** 而不是抛异常 —— 所以只靠 try/catch
-					// 会让「点了没反应」变成静默失败，用户不知道发生了什么。
 					const result = await reveal(outPath);
-					if (result && result.ok === false) setNotice(t('revealFailed'));
+					// `reveal` 在「没有 remote.session」「抛错」「宿主拒绝」三种情况下都是
+					// **返回 { ok:false }** 而不是抛异常 —— 只看 try/catch 会让「点了没反应」
+					// 变成静默失败。
+					if (result && result.ok !== false) return;
+				} catch {
+					// 落到 ②
+				}
+				// ② 降级：让**宿主进程**去开文件管理器（服务端 op:'reveal'）。
+				// 这份 profile 下 ctx.remote.session 拿不到（实测一直 undefined），
+				// 而服务端能起子进程（explorer /select, 等），路径仍只来自插件自己的
+				// 记录并走同一套校验，所以安全性和 ① 一样。
+				try {
+					const result = await manage({ op: 'reveal', taskId: task.id });
+					const value = result && result.ok ? result.value : null;
+					if (value && value.revealed === true) return;
+					setNotice(value ? revealFailureText(value, t) : t('revealFailed'));
 				} catch {
 					setNotice(t('revealFailed'));
 				}

@@ -1342,3 +1342,39 @@ test('manage forget：带 session 能删掉会话隔离的轨道一记录（修�
     assert.equal(existsSync(jsonl), false, '记录文件必须真的没了')
   })
 })
+
+/* ---------------- op:'reveal'：让宿主进程开文件管理器（remote.session 的降级路径） ---------------- */
+
+test('manage reveal：文件在原位 → revealed:true（Windows 走 explorer /select,）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const artifact = path.join(downloadDir, '..', 'reveal-me.bin')
+    writeFileSync(artifact, '0123456789')
+    seedTask(downloadDir, 'dl-reveal1', { outPath: artifact, size: 10 })
+    const res = (await (
+      await manageHandler()(manageRequest({ op: 'reveal', taskId: 'dl-reveal1' }))
+    ).json()) as { result: { value: { revealed: boolean; presence: string } } }
+    assert.equal(res.result.value.revealed, true, '文件在原位必须报告已定位')
+    assert.equal(res.result.value.presence, 'present')
+  })
+})
+
+test('manage reveal：产物已不在原位 → 不打开任何东西（打开邻居路径比不做更糟）', async () => {
+  await withDirs(async ({ downloadDir }) => {
+    const gone = path.join(downloadDir, '..', 'gone-nowhere.bin')
+    seedTask(downloadDir, 'dl-reveal2', { outPath: gone, size: 10 })
+    const res = (await (
+      await manageHandler()(manageRequest({ op: 'reveal', taskId: 'dl-reveal2' }))
+    ).json()) as { result: { value: { revealed: boolean; reason: string } } }
+    assert.equal(res.result.value.revealed, false, '产物不在原位时不得打开任何东西')
+    assert.equal(res.result.value.reason, 'gone', '必须如实报「文件已不在」')
+  })
+})
+
+test('manage reveal：taskId 不在白名单 → 拒绝（不接受调用方给的路径）', async () => {
+  await withDirs(async () => {
+    const res = (await (
+      await manageHandler()(manageRequest({ op: 'reveal', taskId: '..\\evil' }))
+    ).json()) as { result: { ok: boolean } }
+    assert.equal(res.result.ok, false, '非法 taskId 必须被白名单拒')
+  })
+})

@@ -2230,3 +2230,34 @@ test('管理器：reveal 抛异常 → 必须提示（既有的兜底路径不�
     panel.dispose()
   }
 })
+
+test('管理器：remote.session 不可用时，降级到服务端 op:reveal（不能静默）', async () => {
+  installFakePage()
+  const { request } = serve([managedTask()])
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    // 宿主没有 remote.session：reveal 返回 ok:false
+    ;(panel.__mainSlot.inject as { reveal: unknown }).reveal = () => Promise.resolve({ ok: false })
+    // 服务端 reveal 成功
+    const manage = manageStub((body) =>
+      body.op === 'inspect'
+        ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+        : body.op === 'reveal'
+          ? { ok: true, value: { found: true, presence: 'present', revealed: true } }
+          : { ok: true, value: {} },
+    )
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    clickByData(tree, 'reveal', '在文件夹中显示')
+    await settle()
+    const revealCalls = manage.calls.filter((c) => c.op === 'reveal')
+    assert.ok(
+      revealCalls.length > 0,
+      'remote.session 不可用时必须降级到服务端 op:reveal —— 这正是这份 profile 的实际情况',
+    )
+  } finally {
+    panel.dispose()
+  }
+})

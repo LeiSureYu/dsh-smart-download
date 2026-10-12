@@ -11,6 +11,47 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-12
+
+**下载管理器**：侧边栏新增「下载管理」入口，点开是占满主区的列表页 —— 能看到全部任务（进行中 + 已完成，
+不再受浮层 30 秒回执期的限制），每行提供「在文件夹中显示」与「删除记录」。删除记录时会显示**完整绝对路径、
+文件大小与不可恢复声明**；「同时删除本地文件」只在文件仍在原位时提供 —— **文件已被移走或改动时，
+只能删除记录**（这是「删除的是当初下载的那个文件」的安全边界，不是偷懒）。
+
+A **download manager**: a new sidebar entry opens a full-page list of every task (in-progress and
+finished, no longer bounded by the overlay's 30-second receipt window), with per-row
+"Show in folder" and "Delete record". Deleting shows the **absolute path, size, and a
+non-recoverable notice**; "also delete the local file" is offered only while the file is still
+in place — **moved or changed files allow deleting the record only**.
+
+### 新增 / Added
+
+- 侧边栏「下载管理」入口（`sidebar.panellist`）与主区面板（`main` keyed slot，`ctx.layout.selectPanel` 开合）；
+  原 1.3.0 的会话头部入口移除，浮层只保留播报职责（进度 + 回执 + 提示音）。
+- `POST /api/smartdl.manage`：`inspect` / `forget` / `delete` 三个操作。删除本地文件按 14 条安全规则执行：
+  路径只能来自本插件自己的记录（客户端只发 `taskId`）、只接受绝对路径、`normalize` 一致且无 `..`/NUL、
+  只用 `lstat`（拒目录与符号链接）、尺寸不符即拒、任务未终态拒、拒删记录目录内的路径、
+  **先删文件再删记录**、失败按 `gone`/`busy`/`denied`/`is-dir`/`is-link`/`changed`/`no-path`/`running` 分类回告、
+  **绝不假装成功**。
+- 两条进度轨道新增可选 `outPath` / `size` / `fileMtimeMs`（与 `batch` 同构：有值才写，老记录照常可读）。
+- 下载管理器行内显示最近更新时间（手写 `MM-DD HH:mm`，不用 `toLocaleString` —— locale 相关格式随浏览器变，
+  撑不住行宽也没法断言）。
+- 下载失败/删除失败的提示按具体原因区分（8 种 reason 各自的文案 + errno 次要信息），不再一律「操作失败」。
+- `docs/SECURITY.md` 新增「本地持久化：输出路径与产物指纹」与「删除本地文件（不可逆，不进回收站）」的隐私与边界说明。
+
+### 变更 / Changed
+
+- **返回值里的输出路径改为绝对路径**：`smart_download` 成功结果的 `path` 与批量条目的 `output` 现在由
+  `path.resolve` 得到。此前它们是「调用方传入的 `output` 原样回显」，未传 `output` 时则是**单段文件名**
+  （含义为相对进程 cwd）。**落盘位置不变** —— 相对路径此前就是按 Host 进程 cwd 解析的，这次只是把这个含义
+  写进返回值，不再留给调用方去猜。传绝对 `output` 的调用方拿到逐字节相同的结果（含 `..` 或多重分隔符的
+  输入会被规范化，指向同一个文件）。
+- 删除失败时面板**保留该行**并显示具体原因（此前 `ok:true` 被当成「已删除」，行会闪一下又回来且无解释）。
+
+### 修复 / Fixed
+
+- 删除失败时该行短暂消失又出现、且无任何解释（`ok` 的语义是「请求被处理」而非「文件已删」）。
+
 ## [1.3.0] - 2026-10-12
 
 三件事：**一次调用下一批文件**（下载队列）、**把「静默失败」的出口补上人话**（错误提示与进度面板）、

@@ -725,6 +725,8 @@ window.__ModuleLoader__.load({
 			 * Absent entry = "not inspected yet", which the UI treats as
 			 * conservative (no destructive option until the Host has answered).
 			 */
+			/** 当前会话 { id, cwd }：由浮层 pill 写入，供 manage 定位会话隔离的轨道一。轨道一路径是 <cwd>/.dsh-progress/<session.id>/，没有 session 就解析不出来——那正是「文件删得掉、记录删不掉」的根因（status 带 session 所以看得到行，manage 不带所以只扫到轨道二）。 */
+			let session = null;
 			const presence = new Map();
 			const seenIds = new Set();
 			const announcer = createTerminalAnnouncer((kind) => {
@@ -772,6 +774,15 @@ window.__ModuleLoader__.load({
 					return () => listeners.delete(listener);
 				},
 				getSnapshot: snapshot,
+			setSession(next) {
+				const id = next && next.id;
+				const cwd = next && next.cwd;
+				session = typeof id === 'string' && typeof cwd === 'string' && id !== '' && cwd !== '' ? { id: id, cwd: cwd } : null;
+			},
+			/** 给 manage 端点用：没有会话时返回 null（宿主会退回只扫轨道二）。 */
+			getSession() {
+				return session;
+			},
 				/**
 				 * Feed a fresh Host snapshot in. A task id we have never seen
 				 * means a new download started: that is the one event that
@@ -1087,6 +1098,8 @@ window.__ModuleLoader__.load({
 						// Only send a session the Host can validate; without one the
 						// Host falls back to scanning just the JSON track.
 						if (sessionId && sessionCwd) payload.session = { id: sessionId, cwd: sessionCwd };
+					panelStore.setSession(payload.session);
+					// 无条件写：会话消失时也要清掉，否则 manage 会带着过期的 session。
 						const result = await requestStatus(payload, controller.signal);
 						if (cancelled) return;
 						if (result && result.ok && result.value && Array.isArray(result.value.tasks)) {
@@ -1785,8 +1798,10 @@ window.__ModuleLoader__.load({
 				 * cut of this function did.
 				 */
 				manage: async (body) => {
-					const result = await ctx.connection.rpc.call(API_PATH, MANAGE_ENDPOINT, body);
-					return result;
+				const session = panelStore.getSession();
+				const payload = session ? Object.assign({}, body, { session: session }) : body;
+				const result = await ctx.connection.rpc.call(API_PATH, MANAGE_ENDPOINT, payload);
+				return result;
 				},
 				reveal: async (outPath) => {
 					// Read defensively: `remote.session` is declared in `inject`, but a

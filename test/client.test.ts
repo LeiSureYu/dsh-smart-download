@@ -372,6 +372,8 @@ interface Panel {
   /** 渲染 main 下载管理页面 */
   renderManager: () => unknown
   /** main slot 本身：供 mountWithManage 在渲染前替换注入面上的 manage */
+  /** 每次 rpc.call 的记录（endpoint + payload）：断言 manage 真发出了什么。 */
+  rpcCalls: Array<{ path: string; endpoint: string; payload: unknown }>
   __mainSlot: { inject: Record<string, unknown> }
   /** main 页面注入面上的 manage（Host 调用替身） */
   manage: (body: Record<string, unknown>) => Promise<unknown>
@@ -417,6 +419,8 @@ function mountPanel(
     throw new Error(`unexpected require: ${name}`)
   }) as { apply: (ctx: unknown) => void }
 
+  /** 记录每次 rpc.call（endpoint + payload），用于断言「manage 真的带了 session」。 */
+  const rpcCalls: Array<{ path: string; endpoint: string; payload: unknown }> = []
   const ctx = {
     locale: { register: () => () => undefined },
     slots: {
@@ -455,7 +459,7 @@ function mountPanel(
       if (typeof cleanup === 'function') pluginCleanups.push(cleanup as () => void)
       return () => undefined
     },
-    connection: { rpc: { call: () => Promise.resolve({ ok: true, value: { tasks: [] } }) } },
+    connection: { rpc: { call: (path: string, endpoint: string, payload: unknown) => { rpcCalls.push({ path, endpoint, payload }); return Promise.resolve({ ok: true, value: { tasks: [] } }) } } },
     remote: { session: { openWorkspacePath: () => Promise.resolve({ ok: true }) } },
     layout: { selectPanel: () => undefined },
   }
@@ -529,6 +533,7 @@ function mountPanel(
   }
 
   return {
+    rpcCalls,
     rig,
     render(sessionState) {
       last = renderPanel(sessionState)
@@ -2144,6 +2149,41 @@ test('管理器：上次用了 file，但这次文件已不在原位 → 默认�
       recordOnly?.props?.autoFocus,
       true,
       '默认焦点必须落回「只删记录」（不能因为记住 file 就没了焦点）',
+    )
+  } finally {
+    panel.dispose()
+  }
+})
+
+
+test('管理器：manage 真实发出的载荷必须带 session（否则轨道一的记录删不掉）', async () => {
+  installFakePage()
+  const { request } = serve([managedTask()])
+  const panel = mountPanel(request)
+  try {
+    // pill 是唯一读 useSessions 的组件：先渲染它一次，让它把会话写进共享 store
+    panel.render({ byId: { s1: { id: 'sess-1', cwd: 'D:\\Deepseekharness', retainedBy: { mainView: 1 } } } })
+    await settle()
+
+    // 走管理器页面删除（不替换 manage，这样能观测到真实发出的载荷）
+    await renderManagerSettled(panel)
+    clickByData(await renderManagerSettled(panel), 'delete', '删除按钮')
+    const dialog = await renderManagerSettled(panel)
+    clickByData(dialog, 'confirm-record-only', '只删记录按钮')
+    await settle()
+
+    const manageCalls = panel.rpcCalls.filter((c) => c.endpoint === 'smartdl.manage')
+    assert.ok(manageCalls.length > 0, '必须发出过 smartdl.manage 请求')
+    const withOp = manageCalls.filter((c) => {
+      const p = c.payload as { op?: string }
+      return p.op === 'forget' || p.op === 'delete'
+    })
+    assert.ok(withOp.length > 0, '必须有一次 forget/delete')
+    const sess = (withOp[0].payload as { session?: { id?: string } }).session
+    assert.equal(
+      sess?.id,
+      'sess-1',
+      'manage 载荷必须携带 session —— 轨道一路径是 <cwd>/.dsh-progress/<session.id>/，没有它宿主解析不出记录文件，结果就是「文件删得掉、记录删不掉」',
     )
   } finally {
     panel.dispose()

@@ -1277,3 +1277,68 @@ test('cleanup：没有会话且未设 DSH_PROGRESS_DIR -> 如实报出轨道一�
     rmSync(downloadDir, { recursive: true, force: true })
   }
 })
+
+/* ---------------- 会话隔离的轨道一：manage 必须靠 session 才能删到记录 ---------------- */
+
+/**
+ * 「文件删得掉、记录删不掉」的根因（用户实机反馈）：
+ * 轨道一的路径是 `<cwd>/.dsh-progress/<session.id>/`，**只有请求里带了 session
+ * 才解析得出来**。不带 session 时宿主只能扫轨道二，于是那些只在轨道一里的
+ * 任务记录永远删不掉 —— 文件被删了，行却还在。
+ */
+async function withSessionOnlyTrack1(
+  fn: (ctx: { session: { id: string; cwd: string }; taskId: string; jsonl: string; downloadDir: string }) => void | Promise<void>,
+): Promise<void> {
+  const root = tempDir()
+  const cwd = path.join(root, 'ws')
+  const sessionId = 'sess-seg1'
+  const track1 = path.join(cwd, '.dsh-progress', sessionId)
+  mkdirSync(track1, { recursive: true })
+  const downloadDir = path.join(root, 'tasks')
+  mkdirSync(downloadDir, { recursive: true })
+  const taskId = 'dl-track1only'
+  const jsonl = path.join(track1, `${taskId}.jsonl`)
+  const artifact = path.join(root, 'x.bin')
+  writeFileSync(artifact, '0123456789')
+  writeFileSync(
+    jsonl,
+    JSON.stringify({ v: 1, task: taskId, pct: 100, msg: 'done', state: 'done', outPath: artifact, size: 10 }) + '\n',
+  )
+  const savedDl = process.env.DSH_DOWNLOAD_PROGRESS_DIR
+  const savedTask = process.env.DSH_PROGRESS_DIR
+  delete process.env.DSH_PROGRESS_DIR // 关键：不留环境变量兜底，只能靠请求里的 session
+  process.env.DSH_DOWNLOAD_PROGRESS_DIR = downloadDir
+  try {
+    await fn({ session: { id: sessionId, cwd }, taskId, jsonl, downloadDir })
+  } finally {
+    if (savedDl === undefined) delete process.env.DSH_DOWNLOAD_PROGRESS_DIR
+    else process.env.DSH_DOWNLOAD_PROGRESS_DIR = savedDl
+    if (savedTask === undefined) delete process.env.DSH_PROGRESS_DIR
+    else process.env.DSH_PROGRESS_DIR = savedTask
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('manage forget：不带 session 删不掉会话隔离的轨道一记录（回归护栏）', async () => {
+  await withSessionOnlyTrack1(async ({ taskId, jsonl }) => {
+    const res = (await (
+      await manageHandler()(manageRequest({ op: 'forget', taskId }))
+    ).json()) as { result: { value: { recordRemoved: string[] } } }
+    assert.deepEqual(
+      res.result.value.recordRemoved,
+      [],
+      '不带 session 时宿主解析不出轨道一目录，记录必须如实报「没删到」（而不是假装成功）',
+    )
+    assert.ok(existsSync(jsonl), '记录文件必须还在')
+  })
+})
+
+test('manage forget：带 session 能删掉会话隔离的轨道一记录（修复点）', async () => {
+  await withSessionOnlyTrack1(async ({ session, taskId, jsonl }) => {
+    const res = (await (
+      await manageHandler()(manageRequest({ op: 'forget', taskId, session }))
+    ).json()) as { result: { value: { recordRemoved: string[] } } }
+    assert.deepEqual(res.result.value.recordRemoved, [jsonl], '带 session 必须删掉轨道一的记录文件')
+    assert.equal(existsSync(jsonl), false, '记录文件必须真的没了')
+  })
+})

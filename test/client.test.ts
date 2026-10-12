@@ -1721,7 +1721,7 @@ test('管理器：present → 同时提供「只删记录」与「同时删除�
     const tree = await renderManagerSettled(panel)
 
     const del = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'delete')[0]
-    assert.ok(del, '每行必须有「删除记录」按钮')
+    assert.ok(del, '每行必须有删除按钮')
     clickByData(tree, 'delete', '删除按钮')
     // 二次确认：完整绝对路径 + 大小 + 不可恢复声明都必须出现
     const dialog = await renderManagerSettled(panel)
@@ -2620,6 +2620,29 @@ test('管理器（视觉）：完成态必须是绿色，且与取消/中性色�
     const cancelled = (dots[1].props?.style as { background?: string }).background ?? ''
     assert.equal(done, '#16a34a', '完成态必须是绿色（固定语义色，不走宿主中性变量）')
     assert.notEqual(done, cancelled, '完成态不得与取消态同色')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：行内删除按钮叫「删除」（不是「删除记录」）', async () => {
+  const { request } = serve([managedTask()])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const btn = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'delete')[0]
+    assert.ok(btn, '必须有删除按钮')
+    const label = String((btn.props?.children as string[])?.[0] ?? '')
+    assert.equal(label, 'deleteRecord', '按钮文案取 deleteRecord 键')
+    assert.equal(btn.props?.['aria-label'], 'deleteRecord', '无障碍标签同步')
   } finally {
     panel.dispose()
   }

@@ -858,14 +858,16 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**343 例用例（341 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.74%** / 分支 **94.18%** / 函数 **96.99%**。
+当前基线：**541 例用例（539 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.40%** / 分支 **92.71%** / 函数 **97.11%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
-同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
+同一份代码会报出另一组数字：实测同一棵树 CRLF 时行覆盖 **99.36%**，转成 LF 后是 **99.40%**，未覆盖行号也会整体漂移（对照数据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
 2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 
-> 「未覆盖行」一列会把**块结束的 `}` 与多行表达式的续行**报成未覆盖 —— 已逐条核对
-> （`downloader.ts:134`、`headers.ts:119` 对应的语句都有用例并断言到具体值），
-> 属于 tsx 源码映射的行归属问题，不是缺少用例的语句。判断时以百分比为准。
+> 「未覆盖行」一列会把**块结束的 `}`、多行表达式 / 对象字面量的续行、以及类型声明与注释行**
+> 报成未覆盖。已逐条核对当前这 4 处（`downloader.ts:246-249`、`headers.ts:119`、
+> `index.ts:323-326`、`index.ts:409-413`）：全部属于上面三类，**没有「有逻辑但缺用例」的语句**，
+> 对应的行为都有用例断言到具体值（自管头的拒绝文案、工具 schema 的字段等）。
+> 属于 tsx 源码映射的行归属问题。判断时以百分比为准。
 
 ```bash
 # 安装依赖

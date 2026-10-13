@@ -860,18 +860,20 @@ default" has a positive assertion — see the contract table above).
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **343 cases (341 pass / 2 skip / 0 fail)**, **99.74%** line / **94.18%** branch / **96.99%** function coverage.
+Current baseline: **541 cases (539 pass / 2 skip / 0 fail)**, **99.40%** line / **92.71%** branch / **97.11%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
-offsets, so the same code on CRLF reports different numbers and different uncovered line
-numbers (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).
+offsets: measured on the same tree, CRLF reports **99.36%** line coverage while LF reports
+**99.40%**, and the uncovered line numbers shift as well (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).
 The 2 skipped cases are platform-limited (they only reproduce on Linux); the Ubuntu CI job runs them for real.
 See [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 
-> The "uncovered lines" column reports **closing braces and continuation lines of multi-line
-> expressions** as uncovered — each one has been checked by hand (`downloader.ts:134` and
-> `headers.ts:119` both belong to statements that have tests asserting concrete values), so
-> this is tsx source-map line attribution, not statements missing a test. Judge by the
-> percentages.
+> The "uncovered lines" column reports **closing braces, continuation lines of multi-line
+> expressions / object literals, and type-declaration or comment lines** as uncovered. All four
+> current entries have been checked by hand (`downloader.ts:246-249`, `headers.ts:119`,
+> `index.ts:323-326`, `index.ts:409-413`): every one falls into those categories — **no statement
+> with real logic is missing a test** — and the behaviour behind them is asserted to concrete
+> values (the self-managed-header rejection text, the tool schema fields). This is tsx source-map
+> line attribution. Judge by the percentages.
 
 ```bash
 # install dependencies

@@ -11,6 +11,30 @@
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-10-13
+
+**开发段的数字全部过期，已按实测更新。** README 声称「343 例用例（341 通过）/ 行覆盖 99.74% /
+分支 94.18% / 函数 96.99%」—— 那是 1.0 时代的数字，**用例数早已涨到 541**。
+
+**The Development section carried stale numbers; they are now measured.** The README claimed
+"343 cases (341 pass) / 99.74% line / 94.18% branch / 96.99% function" — numbers from the 1.0 era.
+The suite has since grown to **541 cases**.
+
+### 变更 / Changed
+
+- 开发段基线改为**实测值**：**541 例用例（539 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.40%** /
+  分支 **92.71%** / 函数 **97.11%**（`node --test --import tsx --experimental-test-coverage`，
+  LF 工作区实测）。
+- 「覆盖率必须在 LF 工作区测量」这条警告补上**实测对照**：同一棵树 CRLF 时行覆盖 **99.36%**，
+  转成 LF 后 **99.40%** —— 此前这条只是断言，现在有数字。
+- 「未覆盖行」注释里的行号已过期（原文写 `downloader.ts:134`），改为**当前真实的 4 处**
+  （`downloader.ts:246-249`、`headers.ts:119`、`index.ts:323-326`、`index.ts:409-413`），
+  并**重新逐条核对**：全部是块结束的 `}`、对象字面量续行、类型声明与注释行，
+  **没有「有逻辑但缺用例」的语句**。
+
+> 测量纪律：本机工作区曾因编辑工具写成 CRLF（`.gitattributes` 规定 `eol=lf`）。
+> 在 CRLF 树上测出的行覆盖是 99.36%，规范化成 LF 后是 99.40% —— **同一份代码、同一批用例**。
+
 ## [1.4.4] - 2026-10-13
 
 **README 结构重构，并修掉 npm 页面上的死链。** README 之前 857 行 / 38 个标题却**没有目录**，

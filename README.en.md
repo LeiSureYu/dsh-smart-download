@@ -7,11 +7,11 @@
 ![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/leisureyu/dsh-smart-download)
 
-[简体中文](./README.md) · **English**
+[简体中文](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.md) · **English**
 
 > **A downloader with aria2 built in, for DSH.** One command to install, nothing else to set up: large files download over multiple connections, it falls back automatically when a server won't cooperate, and an interrupted download can be resumed.
 
-![Live progress panel](docs/progress-pill.png)
+![Live progress panel](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
@@ -31,12 +31,56 @@ The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: us
 
 All four of **Windows x64 / arm64** and **Linux x64 / arm64** are fully supported (bundled aria2,
 multi-connection). macOS installs and works, but always downloads over single-threaded `curl` —
-see [COMPATIBILITY.md](./docs/COMPATIBILITY.md) for why, and for why no macOS build was hacked together.
+see [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) for why, and for why no macOS build was hacked together.
 
 `dsh-smart-dl` registers two tools with DSH:
 
 - **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Optional: `mirror` (a prefix, or `auto`), `sha256` content verification, `userAgent` / `referer` / `headers`, and resume. Pass `targets` instead of `url` to download a batch in one call (`maxBandwidth` caps the whole batch, `timeoutMs` bounds each entry).
 - **`download_status`** — query download progress. Returns a read-only snapshot of recent tasks (percentage, speed, ETA), useful for answering "how far along is that download?".
+
+## Table of contents
+
+- [Install](#install)
+  - [Installing from a Git repository URL](#installing-from-a-git-repository-url)
+- [Downloading from official documentation](#downloading-from-official-documentation)
+  - [`sha256` — paste the checksum the docs print](#sha256--paste-the-checksum-the-docs-print)
+  - [`userAgent` / `referer` / `headers` — when the docs' link is not a plain GET](#useragent--referer--headers--when-the-docs-link-is-not-a-plain-get)
+  - [`mirror: "auto"` — when the docs only give a raw GitHub URL](#mirror-auto--when-the-docs-only-give-a-raw-github-url)
+- [Mirror acceleration](#mirror-acceleration)
+  - [Rather not pick a prefix by hand: `mirror: "auto"`](#rather-not-pick-a-prefix-by-hand-mirror-auto)
+  - [Use your own mirrors: `DSH_SMARTDL_MIRRORS`](#use-your-own-mirrors-dsh_smartdl_mirrors)
+- [Resumable downloads](#resumable-downloads)
+- [Downloading several files: `targets` / `maxBandwidth` / `timeoutMs`](#downloading-several-files-targets--maxbandwidth--timeoutms)
+  - [Exactly one of `url` / `targets`, and the batch cap](#exactly-one-of-url--targets-and-the-batch-cap)
+  - [Per-entry results and "partial success"](#per-entry-results-and-partial-success)
+  - [In-batch concurrency: derived from "bounded total connections"](#in-batch-concurrency-derived-from-bounded-total-connections)
+  - [`maxBandwidth`: a cap shared by the whole batch](#maxbandwidth-a-cap-shared-by-the-whole-batch)
+  - [`timeoutMs`: per-entry timeout (route A is a synchronous call)](#timeoutms-per-entry-timeout-route-a-is-a-synchronous-call)
+- [Parameter reference](#parameter-reference)
+  - [`smart_download`](#smart_download)
+  - [`download_status`](#download_status)
+  - [Environment variables](#environment-variables)
+- [Querying progress: download_status](#querying-progress-download_status)
+- [Progress reporting](#progress-reporting)
+- [Progress panel in the UI (web / desktop)](#progress-panel-in-the-ui-web--desktop)
+- [Download manager (1.4.0+)](#download-manager-140)
+- [Supported platforms](#supported-platforms)
+- [Permissions](#permissions)
+- [Compatibility](#compatibility)
+  - [The DSH 0.2.0 pre-install compatibility check](#the-dsh-020-pre-install-compatibility-check)
+- [How it works](#how-it-works)
+  - [Why the protocol allow-list and filename sanitisation are mandatory (reproduced; do not remove)](#why-the-protocol-allow-list-and-filename-sanitisation-are-mandatory-reproduced-do-not-remove)
+- [Guarding against silent failures](#guarding-against-silent-failures)
+- [The concurrency thresholds are measured, not guessed](#the-concurrency-thresholds-are-measured-not-guessed)
+  - [Two traps that would have disabled concurrency entirely](#two-traps-that-would-have-disabled-concurrency-entirely)
+- [FAQ](#faq)
+- [Documentation](#documentation)
+  - [Relationship to the official documentation](#relationship-to-the-official-documentation)
+- [Development](#development)
+  - [Publishing](#publishing)
+- [Third-party components](#third-party-components)
+- [Disclaimer](#disclaimer)
+- [License](#license)
 
 ## Install
 
@@ -73,13 +117,13 @@ Requirements and caveats:
 
 > **The progress panel is available on profiles that have the web UI** (`web`, and the desktop app's `desktop` profile). On other profiles the plugin works exactly the same — there is simply no UI panel, and you can still query progress with the `download_status` tool.
 
-> **1.2.0 adds the three things you need to "download the right bytes from the official docs"**: `sha256` content verification, `userAgent` / `referer` / `headers`, and `mirror: "auto"`. It also fixes three probe/fallback defects (a HEAD failure no longer abandons the probe, the HEAD branch used to ignore `Content-Range` and could fail a perfectly good download, and an integrity failure no longer triggers a pointless curl re-download). See [CHANGELOG.md](./CHANGELOG.md) for the evidence behind each.
+> **1.2.0 adds the three things you need to "download the right bytes from the official docs"**: `sha256` content verification, `userAgent` / `referer` / `headers`, and `mirror: "auto"`. It also fixes three probe/fallback defects (a HEAD failure no longer abandons the probe, the HEAD branch used to ignore `Content-Range` and could fail a perfectly good download, and an integrity failure no longer triggers a pointless curl re-download). See [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) for the evidence behind each.
 >
-> **1.1.0 adapts the plugin to DSH 0.2.0.** From 0.2.0 on, DSH checks declared `peerDependencies` before installing: `0.4.0` and earlier declare a range that does not cover `0.2.0`, so an already-installed copy has its whole bundle skipped and the plugin never loads. If you are on `0.4.0` or older, upgrading is the fix; `0.4.1` and newer already cover 0.2.0 — see [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
+> **1.1.0 adapts the plugin to DSH 0.2.0.** From 0.2.0 on, DSH checks declared `peerDependencies` before installing: `0.4.0` and earlier declare a range that does not cover `0.2.0`, so an already-installed copy has its whole bundle skipped and the plugin never loads. If you are on `0.4.0` or older, upgrading is the fix; `0.4.1` and newer already cover 0.2.0 — see [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md).
 >
-> **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
+> **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 >
-> **Use `1.2.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](./CHANGELOG.md).
+> **Use `1.2.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 >
 > The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.2.0`.
 
@@ -199,94 +243,6 @@ network. Passing `mirror: "auto"` lets the plugin choose:
 > defends against that — the digest comes from the official docs, and a mirror cannot forge it.
 
 
-## How it works
-
-The decision flow, in text:
-
-```
-call smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
-        │   — or —   targets: [{ url, output?, sha256? }, …] (batch)
-        │
-        ▼
-[0] validate the arguments (all of it **before** any request is made)
-     · exactly one of url / targets (both, or neither, is rejected)
-     · url must be http(s) (file:// / ftp:// are refused outright)
-     · sha256 must normalise to 64 hex digits
-     · maxBandwidth must parse as a positive byte count (K/M/G, 1024-based)
-     · timeoutMs must be an integer in 1000..1800000
-     · headers must not override plugin-managed headers,
-       and values must not contain CR / LF / NUL
-        │
-        ▼
-[1] build the header set: headers + userAgent + referer become **one**
-    set, shared by the probe and the download (a disagreement between the
-    two makes the probe's conclusion wrong for the actual download)
-        │
-        ▼
-[2] resolve the mirror
-     · explicit prefix: mirror prefix + full original URL
-     · "auto": probe the original first, then each built-in candidate,
-       and only accept one whose length matches and whose ETag matches
-       whenever the origin sent one; if none is proven, fall back to the
-       original URL and say so in mirrorSkipped
-     · non-http(s) URLs skip the mirror; the output filename is still
-       derived from the original URL
-        │
-        ▼
-[3] Probe the URL (5s timeout)
-     · send a HEAD request first
-     · if HEAD throws (timeout / blocked), returns 405, or has no
-       Content-Length, retry with GET + "Range: bytes=0-0"
-     · only when both routes fail is it judged "no multi-threading"
-        │
-        ▼
-[4] decide() picks a tier by file size and aria2 availability:
-     · no Range support / probe failed / size unknown / <1MB -> curl
-     · 1MB ~ 8MB   -> aria2 with 4 connections
-     · ≥ 8MB       -> aria2 with 8 connections (conservative cap, not 16)
-        │
-   ┌────┴──────────────────────────┐
-   ▼ aria2 tier                     ▼ curl tier
-[5a] bundled aria2c found?          [5b] curl single-threaded
-   │ yes             │ no             (with progress bar)
-   ▼                 ▼
- aria2 4/8 conns   curl single-threaded (fallback)
- (per-second summary progress)
- (resume: -c)      (resume: -C - when the origin is proven unchanged)
-   │ on failure
-   ▼
-  degrade to curl single-threaded
-  Note: an integrity failure does **not** take this fallback — the bytes
-        on disk are wrong, and re-downloading the same URL through a
-        different downloader would not change that
-        │
-        ▼
-[6] integrity check (two independent layers)
-     · bytes on disk vs declared remote length (verifySize)
-     · caller-supplied SHA-256 vs the computed digest (verifySha256)
-        │ pass                │ fail
-        ▼                     ▼
-   clear .part.json       throw, keep marker
-   return success
-
-  return { success, path, method, size, fellback, reason?, verifySkipped?,
-           sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
-```
-
-Key points:
-
-- **A probe anomaly never fails the download, but "HEAD threw" no longer means "no multi-threading"**: when HEAD times out or is blocked, the probe retries with a Range GET (fixed in 1.2.0). Previously a single HEAD failure declared the file "unsupported and of unknown size", which also meant waiting out the whole probe timeout, permanently degrading the integrity check to "skipped", and forcing even huge files onto a single curl connection. Only when both routes fail does it fall back to curl, and the `reason` then carries both failure messages.
-- **Any other probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
-- The connection count is chosen dynamically by file size (thresholds 1MB / 8MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing". The thresholds are measured, not guessed — see "The concurrency thresholds are measured" below.
-- **The downloaded size is verified after every download.** An exit code of 0 from `curl` / `aria2` only means "the tool thinks it finished", not that the byte count is right. Short reads, over-reads, and mirrors returning a 200 error page all exit 0; only comparing bytes on disk catches them (see "Guarding against silent failures").
-- `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
-- **Only `http` / `https` are accepted.** A URL can come from any page the model happens to read, so it is untrusted input: other protocols (`file:`, `ftp:`, …) are rejected before any probe or download starts.
-- **The derived output filename is sanitised.** When `output` is omitted the filename is derived from the URL, and the result is always a **single path segment** — `/`, `\`, `..` in the URI-decoded value are discarded, so nothing can be written outside the working directory.
-
-### Why the protocol allow-list and filename sanitisation are mandatory (reproduced; do not remove)
-
-> Reproduced on `0.4.1`: `file:///C:/Windows/win.ini` was accepted by `curl` and **successfully copied a local file** to the output path; and `http://host/..%2F..%2F..%2Fescaped.txt` decoded to `../../../escaped.txt`, so with no `output` argument the file was written **outside the current working directory** (verified written). Both are fixed in `0.4.2` — the first by the protocol allow-list, the second by "split again after decoding, keep the last segment, then sanitise".
-
 ## Mirror acceleration
 
 When downloads from GitHub Releases and similar hosts are slow, pass a `mirror` prefix to `smart_download`; the plugin prepends it to the original URL:
@@ -303,7 +259,7 @@ Details:
 
 - It is a plain **prefix concatenation** with no path rewriting, so it works with most public mirrors of the "prefix + full original URL" shape.
 - A **missing trailing slash is added automatically**, and a bare domain is accepted (`ghfast.top` becomes `https://ghfast.top/`).
-- Non-`http(s)` URLs skip the mirror, and **the mirror prefix itself must pass the same allow-list** — a non-`http(s)` prefix (`file://`, `javascript://`, `data://`…) never takes effect and the original URL is used unchanged. The prefix decides the scheme of the concatenated string, so not checking it would open a `file://` back door (fixed in 1.0.0; reproduction in [SECURITY.md](./docs/SECURITY.md)).
+- Non-`http(s)` URLs skip the mirror, and **the mirror prefix itself must pass the same allow-list** — a non-`http(s)` prefix (`file://`, `javascript://`, `data://`…) never takes effect and the original URL is used unchanged. The prefix decides the scheme of the concatenated string, so not checking it would open a `file://` back door (fixed in 1.0.0; reproduction in [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md)).
 - The output filename is always derived from the **original** URL, so the mirror host never leaks into the filename.
 
 ### Rather not pick a prefix by hand: `mirror: "auto"`
@@ -419,6 +375,43 @@ What happens after a timeout (these are definitions, not implementation details)
 - A timeout does **not** fall back to curl — that would spend the same wait a second time.
 - Omitting it means no timeout; an invalid value (out of range, fractional, non-numeric) throws before any request is made.
 
+## Parameter reference
+
+### `smart_download`
+
+| Parameter | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `url` | string | one of two | The URL of a single file. **Exactly one** of `url` / `targets` — passing both, or neither, is rejected before any request is made. |
+| `targets` | array | one of two | Download a batch in one call, **at most 50 entries**. Each entry is `{ url (required), output?, sha256? }`; entries share `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` but each gets its own output path, verification and progress record. Entries run concurrently up to the plugin's concurrency limit; **one failing entry does not abort the batch** — results are reported per entry. |
+| `output` | string | no | Output file path. Derived from the URL when omitted (a single-segment filename, relative to the host process cwd). |
+| `mirror` | string | no | A mirror prefix (e.g. `https://gh-proxy.com/` or `ghfast.top`) used to accelerate GitHub release downloads; ignored for non-http(s) URLs. Pass the literal `"auto"` to let the plugin pick a built-in mirror **proven to serve the same file** (identical length, and identical ETag whenever the origin sends one); `"auto"` applies to GitHub hosts only and falls back to the original URL when no candidate can be confirmed. |
+| `sha256` | string | no | Expected SHA-256. Accepts bare hex, `sha256:<hex>`, `SHA256(<hex>)` and SRI `sha256-<base64>`; a mismatch fails the download. |
+| `userAgent` | string | no | User-Agent header. Used for **both** the probe and the download, so the two never disagree. |
+| `referer` | string | no | Referer header. Also shared by the probe and the download. |
+| `headers` | object | no | Extra request headers, e.g. `{"Authorization": "Bearer …"}`. Headers the plugin manages itself (`Range` / `Accept-Encoding` / `Host`, …) are rejected, as are values containing newlines or control characters. |
+| `maxBandwidth` | string | no | A bandwidth cap **shared by every task in this call**, e.g. `"2M"`, `"500K"` or a plain byte count like `"1500000"` (K/M/G are 1024-based). With a batch the cap is split across the entries running concurrently, so the whole batch stays under it. Becomes aria2's `--max-overall-download-limit` / curl's `--limit-rate`. |
+| `timeoutMs` | integer | no | **Per-entry** timeout in milliseconds, `1000`–`1800000` (30 minutes is the cap — this is a synchronous call). A timed-out entry is terminated and reported as failed; in a batch the other entries keep running and **entries that already succeeded are never re-labelled**. Omit it to wait indefinitely. |
+
+### `download_status`
+
+| Parameter | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `taskId` | string | no | Return just one task. |
+| `limit` | integer | no | Maximum number of tasks to return (default `10`). |
+
+### Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `DSH_SMARTDL_MIRRORS` | Overrides the built-in mirror candidate table (see [Mirror acceleration](#mirror-acceleration)). |
+| `DSH_PROGRESS_DIR` | Overrides the progress **track 1** directory (default `<cwd>/.dsh-progress/<session.id>/`). |
+| `DSH_DOWNLOAD_PROGRESS_DIR` | Overrides the progress **track 2** directory (default `<DSH_HOME>/downloads/tasks/`). |
+
+> There are also **test seams** such as `DSH_SMARTDL_REVEAL_CMD` / `DSH_SMARTDL_THROUGHPUT_DIR`
+> (see [Development](#development)): they let tests exercise the full path without side effects
+> (for example, without opening a file-manager window on the developer's desktop). You do not need
+> them in normal use.
+
 ## Querying progress: download_status
 
 `download_status` returns a read-only snapshot of this plugin's download tasks — use it to answer "how far along is that download?".
@@ -475,7 +468,7 @@ Since `0.6.0` writing is **asynchronous**: `report()` only enqueues a record and
 
 On profiles with the web UI (`web`, and the desktop app's `desktop`) the plugin mounts a **live progress panel** in the bottom-right corner of the interface. It appears automatically while a download is running and shows the **output file name, percentage, transfer speed and ETA**; a `failed` / `cancelled` entry also shows its failure reason in the row itself rather than only in a hover tooltip. When the download completes it briefly shows a "finished" receipt and then disappears. When idle it renders nothing at all. It reads up to **50** tasks (`MAX_STATUS_LIMIT`, aligned with what the server clamps to), and the list scrolls when a batch is longer than the panel.
 
-![progress panel](docs/progress-pill.png)
+![progress panel](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
 Implementation notes (useful for troubleshooting a panel that does not show up):
 
@@ -529,6 +522,157 @@ fine, but can only have their record deleted** — without a reliable path there
 
 > The 1.3.0 session-header entry has been removed; the overlay keeps only its reporting duty (live progress,
 > receipts, sound).
+
+## Supported platforms
+
+| Platform | Arch       | Supported            | Binary subpackage                    |
+| -------- | ---------- | -------------------- | ------------------------------------ |
+| Windows  | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-win32-x64`     |
+| Windows  | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-win32-arm64`   |
+| Linux    | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-linux-x64`     |
+| Linux    | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-linux-arm64`   |
+| macOS    | x64 / arm64 | ⚠️ Works, no speed-up | —                                    |
+
+The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching
+platforms; `getAria2Path()` then resolves to `null` and `decide()` falls back to `curl`. **"The plugin
+works" and "multi-connection works" are two different things** — an unsupported platform does not install
+a broken plugin, it installs a single-threaded downloader. Why macOS is not done, and what it would take,
+is in [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md).
+
+## Permissions
+
+This plugin does exactly three things: **start downloads**, **write progress files** and **read them back**. Itemised below.
+
+| Behaviour | Detail |
+| --- | --- |
+| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`) — **FTP / SFTP / BitTorrent are not supported**: opening the allow-list would leave only the fifth layer of defence (the caller's optional `sha256`) effective, i.e. no content check by default; BitTorrent is further out (DHT / listening ports / seeding would break the "contacts nothing beyond the original URL" promise below). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. **With `mirror: "auto"`, the candidate mirror addresses are probed too** (concurrent HEADs, 5s timeout each) — the necessary cost of auto mode, and it happens **only** when `auto` is passed explicitly; the candidate list can be restricted to mirrors you trust with `DSH_SMARTDL_MIRRORS`. |
+| Sending request headers | By default only the `accept-encoding: identity` the probe needs. When the caller passes `userAgent` / `referer` / `headers`, those headers appear on **both** the probe request and the download request (visible in the child process command line, so **do not** put long-lived credentials in `headers`). Plugin-managed headers (`Range` / `Accept-Encoding` / `Content-Length` / `Host` / connection-level) cannot be overridden, and a value containing CR / LF / NUL is rejected as injection. |
+| Reading the downloaded file | When `sha256` is supplied, the file just written is read **as a stream** (never buffered whole) to compute its SHA-256. No other file is read. |
+| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
+| Reading progress files | `download_status` (and `/api/smartdl.status`) only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
+| HTTP endpoints (web-UI profiles only) | The plugin registers two exact routes on the shared `/api` carrier: `POST /api/smartdl.status` (**read-only** snapshot, reading the same progress files as `download_status`) and `POST /api/smartdl.cleanup` (**deletes files**). Cleanup's deletion scope is strictly limited to the two progress-track directories, and only touches **regular files** whose names match this plugin's convention (`*.json` / `*.jsonl`) and whose mtime is older than the retention window (via `lstat`; directories and symlinks are never touched): the default window is 24 hours (lower bound 60 seconds, upper 365 days), 200 deletions per call by default (hard cap 500), oldest first. It does **not** delete download artifacts, does **not** recurse, and does **not** touch other directories; an invalid parameter (window or count out of range) is refused with `ok:false` plus actionable text rather than being clamped to a bound and then deleting. **Blast radius**: progress files are the only source of the "completed / failed" receipts, so deleting them hides those tasks from the panel and `download_status` (downloaded files are unaffected, but that history cannot be recovered from anywhere else). **Auth**: inherited from the carrier itself (browser session cookie + loopback / Origin checks) — there is no per-task or per-session authorisation, so anyone who can call the endpoint can clean up the progress history of all sessions on this machine. To clean track 1 (`<session.cwd>/.dsh-progress/<session.id>/`) the request payload must carry `session: { id, cwd }`; without it the response states `taskDirSkipped` explicitly ("track 1 did not participate") instead of pretending it cleaned everything. |
+| Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl`; when that variable is unset, `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (skipped entirely without a session context). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
+| Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, `SIGKILL` if still alive after 1s — that fallback is armed on **every** platform, since a POSIX process can ignore SIGTERM just as well). A cancellation is recorded as the `cancelled` state, distinct from a failure. |
+| Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly), plus `DSH_SMARTDL_MIRRORS` (overrides the auto-mirror candidate list; only affects `mirror: "auto"`). |
+
+What it **does not** need: it does not read your DSH session contents, does not touch credentials or keys, does not modify DSH configuration (the `cordis.patch.yml` is applied by DSH itself at install time), and ships no telemetry or network reporting.
+
+## Compatibility
+
+| Item | Requirement |
+| --- | --- |
+| Node.js | `>=22.0.0` (uses `AbortSignal.any` / `AbortSignal.timeout`) |
+| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` or `>=4.0.1-rc.1 <5.0.0-0` (peerDependency; optional) |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple — a new DSH prerelease branch means appending a clause) |
+| Package manager | npm or pnpm; must honour `os` / `cpu` filtering of `optionalDependencies` |
+
+### The DSH 0.2.0 pre-install compatibility check
+
+From 0.2.0 on, DSH checks an installed plugin's declared `peerDependencies` **before installation**: if they do not cover the running version, the install is refused. If the plugin is already installed, its **entire bundle is skipped** at startup and the log shows:
+
+```
+dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
+```
+
+The skip is all-or-nothing — neither `smart_download` nor `download_status` gets registered. **`0.4.0` and earlier are refused** (0.4.0 gave three `dsh-client-*` peers the range `>=0.1.7-rc.1 <0.2.0-0`); from `0.4.1` on the range covers `>=0.2.0-rc.1 <0.3.0-0` and loads fine on 0.2.0. **Upgrading to the latest `1.1.0` is the fix.**
+
+To let one specific old version through anyway, 0.2.0 offers a per-(package version, exact dsh version) exemption that requires accepting the risk explicitly:
+
+```bash
+dsh plugin --profile <profile> allow-version <package@version> --dsh-version <exact dsh version> --accept-risk
+```
+
+The exemption is recorded in that profile's `compatibility.json`; list it with `dsh plugin version-exemptions` and undo it with `revoke-version`. Exemptions are **exact-version** only: a different dsh version does not inherit them.
+
+macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage from a trustworthy source**. Note that macOS binaries *do* exist and *do* come with hashes — the blocker is "the source cannot be trusted": the per-source check results are in [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) and [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md) (checked 2026-10-12). On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
+
+## How it works
+
+The decision flow, in text:
+
+```
+call smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
+        │   — or —   targets: [{ url, output?, sha256? }, …] (batch)
+        │
+        ▼
+[0] validate the arguments (all of it **before** any request is made)
+     · exactly one of url / targets (both, or neither, is rejected)
+     · url must be http(s) (file:// / ftp:// are refused outright)
+     · sha256 must normalise to 64 hex digits
+     · maxBandwidth must parse as a positive byte count (K/M/G, 1024-based)
+     · timeoutMs must be an integer in 1000..1800000
+     · headers must not override plugin-managed headers,
+       and values must not contain CR / LF / NUL
+        │
+        ▼
+[1] build the header set: headers + userAgent + referer become **one**
+    set, shared by the probe and the download (a disagreement between the
+    two makes the probe's conclusion wrong for the actual download)
+        │
+        ▼
+[2] resolve the mirror
+     · explicit prefix: mirror prefix + full original URL
+     · "auto": probe the original first, then each built-in candidate,
+       and only accept one whose length matches and whose ETag matches
+       whenever the origin sent one; if none is proven, fall back to the
+       original URL and say so in mirrorSkipped
+     · non-http(s) URLs skip the mirror; the output filename is still
+       derived from the original URL
+        │
+        ▼
+[3] Probe the URL (5s timeout)
+     · send a HEAD request first
+     · if HEAD throws (timeout / blocked), returns 405, or has no
+       Content-Length, retry with GET + "Range: bytes=0-0"
+     · only when both routes fail is it judged "no multi-threading"
+        │
+        ▼
+[4] decide() picks a tier by file size and aria2 availability:
+     · no Range support / probe failed / size unknown / <1MB -> curl
+     · 1MB ~ 8MB   -> aria2 with 4 connections
+     · ≥ 8MB       -> aria2 with 8 connections (conservative cap, not 16)
+        │
+   ┌────┴──────────────────────────┐
+   ▼ aria2 tier                     ▼ curl tier
+[5a] bundled aria2c found?          [5b] curl single-threaded
+   │ yes             │ no             (with progress bar)
+   ▼                 ▼
+ aria2 4/8 conns   curl single-threaded (fallback)
+ (per-second summary progress)
+ (resume: -c)      (resume: -C - when the origin is proven unchanged)
+   │ on failure
+   ▼
+  degrade to curl single-threaded
+  Note: an integrity failure does **not** take this fallback — the bytes
+        on disk are wrong, and re-downloading the same URL through a
+        different downloader would not change that
+        │
+        ▼
+[6] integrity check (two independent layers)
+     · bytes on disk vs declared remote length (verifySize)
+     · caller-supplied SHA-256 vs the computed digest (verifySha256)
+        │ pass                │ fail
+        ▼                     ▼
+   clear .part.json       throw, keep marker
+   return success
+
+  return { success, path, method, size, fellback, reason?, verifySkipped?,
+           sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
+```
+
+Key points:
+
+- **A probe anomaly never fails the download, but "HEAD threw" no longer means "no multi-threading"**: when HEAD times out or is blocked, the probe retries with a Range GET (fixed in 1.2.0). Previously a single HEAD failure declared the file "unsupported and of unknown size", which also meant waiting out the whole probe timeout, permanently degrading the integrity check to "skipped", and forcing even huge files onto a single curl connection. Only when both routes fail does it fall back to curl, and the `reason` then carries both failure messages.
+- **Any other probe anomaly** (timeout, network error, unknown file size) is safely treated as "multi-threading unsupported", so the download falls back to curl instead of failing outright.
+- The connection count is chosen dynamically by file size (thresholds 1MB / 8MB). `reason` distinguishes cases such as "no Range support", "file too small", and "aria2 missing". The thresholds are measured, not guessed — see "The concurrency thresholds are measured" below.
+- **The downloaded size is verified after every download.** An exit code of 0 from `curl` / `aria2` only means "the tool thinks it finished", not that the byte count is right. Short reads, over-reads, and mirrors returning a 200 error page all exit 0; only comparing bytes on disk catches them (see "Guarding against silent failures").
+- `requestedUrl` is the **URL actually requested** (mirror prefix + original URL when a mirror is used); `mirrored` reports whether the mirror was applied.
+- **Only `http` / `https` are accepted.** A URL can come from any page the model happens to read, so it is untrusted input: other protocols (`file:`, `ftp:`, …) are rejected before any probe or download starts.
+- **The derived output filename is sanitised.** When `output` is omitted the filename is derived from the URL, and the result is always a **single path segment** — `/`, `\`, `..` in the URI-decoded value are discarded, so nothing can be written outside the working directory.
+
+### Why the protocol allow-list and filename sanitisation are mandatory (reproduced; do not remove)
+
+> Reproduced on `0.4.1`: `file:///C:/Windows/win.ini` was accepted by `curl` and **successfully copied a local file** to the output path; and `http://host/..%2F..%2F..%2Fescaped.txt` decoded to `../../../escaped.txt`, so with no `output` argument the file was written **outside the current working directory** (verified written). Both are fixed in `0.4.2` — the first by the protocol allow-list, the second by "split again after decoding, keep the last segment, then sanitise".
 
 ## Guarding against silent failures
 
@@ -635,69 +779,6 @@ The 8-connection cap stays: at 32/64MB, x=16 really is twice as fast again (23�
 - **aria2's `-x/-s` are silently defeated by `min-split-size`.** aria2 defaults to `--min-split-size=20M`; for files under 20MB it does **not split at all** — measured with an 8MB file, it issued a single GET without a Range header, making `-x 16 -s 16` a no-op with single-connection throughput. This plugin passes `-k 1M` and avoids it by luck. Deleting `-k 1M` silently degrades every tier above to a single connection with no error at all, so that line carries a warning comment in the source. Separately, `--min-split-size=512K` makes aria2 fail outright with exit code 28, so 1M is the value verified as safe.
 - **The probe must force `accept-encoding: identity`.** Node's `fetch` sends `gzip, deflate` by default, while curl and aria2 do not. A 5000-byte body is reported as 41 bytes under default probing; without the fix, the size verification added in 0.7.0 would produce **false positives on 100% of gzip-capable servers**, flagging correct downloads as corrupt.
 
-## Supported platforms
-
-| Platform | Arch       | Supported            | Binary subpackage                    |
-| -------- | ---------- | -------------------- | ------------------------------------ |
-| Windows  | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-win32-x64`     |
-| Windows  | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-win32-arm64`   |
-| Linux    | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-linux-x64`     |
-| Linux    | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-linux-arm64`   |
-| macOS    | x64 / arm64 | ⚠️ Works, no speed-up | —                                    |
-
-The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching
-platforms; `getAria2Path()` then resolves to `null` and `decide()` falls back to `curl`. **"The plugin
-works" and "multi-connection works" are two different things** — an unsupported platform does not install
-a broken plugin, it installs a single-threaded downloader. Why macOS is not done, and what it would take,
-is in [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
-
-## Permissions
-
-This plugin does exactly three things: **start downloads**, **write progress files** and **read them back**. Itemised below.
-
-| Behaviour | Detail |
-| --- | --- |
-| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`) — **FTP / SFTP / BitTorrent are not supported**: opening the allow-list would leave only the fifth layer of defence (the caller's optional `sha256`) effective, i.e. no content check by default; BitTorrent is further out (DHT / listening ports / seeding would break the "contacts nothing beyond the original URL" promise below). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. **With `mirror: "auto"`, the candidate mirror addresses are probed too** (concurrent HEADs, 5s timeout each) — the necessary cost of auto mode, and it happens **only** when `auto` is passed explicitly; the candidate list can be restricted to mirrors you trust with `DSH_SMARTDL_MIRRORS`. |
-| Sending request headers | By default only the `accept-encoding: identity` the probe needs. When the caller passes `userAgent` / `referer` / `headers`, those headers appear on **both** the probe request and the download request (visible in the child process command line, so **do not** put long-lived credentials in `headers`). Plugin-managed headers (`Range` / `Accept-Encoding` / `Content-Length` / `Host` / connection-level) cannot be overridden, and a value containing CR / LF / NUL is rejected as injection. |
-| Reading the downloaded file | When `sha256` is supplied, the file just written is read **as a stream** (never buffered whole) to compute its SHA-256. No other file is read. |
-| Writing the downloaded file | Writes to the path given by the `output` argument; when omitted the filename is derived from the URL and lands in the current working directory. The derived name is always a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so it cannot land outside the working directory. Parent directories are created as needed (`mkdir -p`). No existing file is ever deleted. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
-| Reading progress files | `download_status` (and `/api/smartdl.status`) only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
-| HTTP endpoints (web-UI profiles only) | The plugin registers two exact routes on the shared `/api` carrier: `POST /api/smartdl.status` (**read-only** snapshot, reading the same progress files as `download_status`) and `POST /api/smartdl.cleanup` (**deletes files**). Cleanup's deletion scope is strictly limited to the two progress-track directories, and only touches **regular files** whose names match this plugin's convention (`*.json` / `*.jsonl`) and whose mtime is older than the retention window (via `lstat`; directories and symlinks are never touched): the default window is 24 hours (lower bound 60 seconds, upper 365 days), 200 deletions per call by default (hard cap 500), oldest first. It does **not** delete download artifacts, does **not** recurse, and does **not** touch other directories; an invalid parameter (window or count out of range) is refused with `ok:false` plus actionable text rather than being clamped to a bound and then deleting. **Blast radius**: progress files are the only source of the "completed / failed" receipts, so deleting them hides those tasks from the panel and `download_status` (downloaded files are unaffected, but that history cannot be recovered from anywhere else). **Auth**: inherited from the carrier itself (browser session cookie + loopback / Origin checks) — there is no per-task or per-session authorisation, so anyone who can call the endpoint can clean up the progress history of all sessions on this machine. To clean track 1 (`<session.cwd>/.dsh-progress/<session.id>/`) the request payload must carry `session: { id, cwd }`; without it the response states `taskDirSkipped` explicitly ("track 1 did not participate") instead of pretending it cleaned everything. |
-| Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl`; when that variable is unset, `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (skipped entirely without a session context). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
-| Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, `SIGKILL` if still alive after 1s — that fallback is armed on **every** platform, since a POSIX process can ignore SIGTERM just as well). A cancellation is recorded as the `cancelled` state, distinct from a failure. |
-| Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly), plus `DSH_SMARTDL_MIRRORS` (overrides the auto-mirror candidate list; only affects `mirror: "auto"`). |
-
-What it **does not** need: it does not read your DSH session contents, does not touch credentials or keys, does not modify DSH configuration (the `cordis.patch.yml` is applied by DSH itself at install time), and ships no telemetry or network reporting.
-
-## Compatibility
-
-| Item | Requirement |
-| --- | --- |
-| Node.js | `>=22.0.0` (uses `AbortSignal.any` / `AbortSignal.timeout`) |
-| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` or `>=4.0.1-rc.1 <5.0.0-0` (peerDependency; optional) |
-| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0` (peerDependency; that package ships prereleases only, so the range declares them per-tuple — a new DSH prerelease branch means appending a clause) |
-| Package manager | npm or pnpm; must honour `os` / `cpu` filtering of `optionalDependencies` |
-
-### The DSH 0.2.0 pre-install compatibility check
-
-From 0.2.0 on, DSH checks an installed plugin's declared `peerDependencies` **before installation**: if they do not cover the running version, the install is refused. If the plugin is already installed, its **entire bundle is skipped** at startup and the log shows:
-
-```
-dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
-```
-
-The skip is all-or-nothing — neither `smart_download` nor `download_status` gets registered. **`0.4.0` and earlier are refused** (0.4.0 gave three `dsh-client-*` peers the range `>=0.1.7-rc.1 <0.2.0-0`); from `0.4.1` on the range covers `>=0.2.0-rc.1 <0.3.0-0` and loads fine on 0.2.0. **Upgrading to the latest `1.1.0` is the fix.**
-
-To let one specific old version through anyway, 0.2.0 offers a per-(package version, exact dsh version) exemption that requires accepting the risk explicitly:
-
-```bash
-dsh plugin --profile <profile> allow-version <package@version> --dsh-version <exact dsh version> --accept-risk
-```
-
-The exemption is recorded in that profile's `compatibility.json`; list it with `dsh plugin version-exemptions` and undo it with `revoke-version`. Exemptions are **exact-version** only: a different dsh version does not inherit them.
-
-macOS is absent from the platform table **not because of incompatibility but because there is no aria2 binary subpackage from a trustworthy source**. Note that macOS binaries *do* exist and *do* come with hashes — the blocker is "the source cannot be trusted": the per-source check results are in [COMPATIBILITY.md](./docs/COMPATIBILITY.md) and [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md) (checked 2026-10-12). On macOS the plugin still installs and works: `getAria2Path()` returns `null` and every download falls back to single-threaded `curl` (with the reason stated in the result's `reason` field).
-
 ## FAQ
 
 **Q: Windows Defender (or another antivirus) blocks the install or run?**
@@ -752,13 +833,13 @@ A: First make sure the install actually succeeded: installing from a repository 
 
 | Document | Contents |
 | --- | --- |
-| [README](./README.md) / [English](./README.en.md) | Install, usage, permissions |
-| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Internals: what one call goes through, module responsibilities, progress data flow |
-| [SECURITY.md](./docs/SECURITY.md) | Threat model and the five layers of defence, each with a runnable reproduction |
-| [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why macOS is shelved |
-| [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Symptom -> cause -> fix |
-| [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 code review: must-fix / suggestions / known trade-offs |
-| [CHANGELOG.md](./CHANGELOG.md) | Per-version change log |
+| [README](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.md) / [English](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.en.md) | Install, usage, permissions |
+| [ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md) | Internals: what one call goes through, module responsibilities, progress data flow |
+| [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md) | Threat model and the five layers of defence, each with a runnable reproduction |
+| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why macOS is shelved |
+| [TROUBLESHOOTING.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md) | Symptom -> cause -> fix |
+| [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md) | 1.0 code review: must-fix / suggestions / known trade-offs |
+| [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) | Per-version change log |
 
 ### Relationship to the official documentation
 
@@ -771,8 +852,8 @@ rules. When the official documentation moves, this plugin follows — `dsh.manif
 
 So **install and upgrade according to the official documentation**; this README only covers what
 is specific to this plugin. The two tools' parameters, return values and failure reasons are
-documented here and in [ARCHITECTURE.md](./docs/ARCHITECTURE.md), and where anything disagrees,
-[CHANGELOG.md](./CHANGELOG.md) plus the test suite are authoritative (every path that "returns a
+documented here and in [ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md), and where anything disagrees,
+[CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) plus the test suite are authoritative (every path that "returns a
 default" has a positive assertion — see the contract table above).
 
 ## Development
@@ -782,9 +863,9 @@ Requirements: Node.js **22+**, pnpm **9+**.
 Current baseline: **343 cases (341 pass / 2 skip / 0 fail)**, **99.74%** line / **94.18%** branch / **96.99%** function coverage.
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets, so the same code on CRLF reports different numbers and different uncovered line
-numbers (side-by-side data in [REVIEW-1.0.md](./docs/REVIEW-1.0.md)).
+numbers (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).
 The 2 skipped cases are platform-limited (they only reproduce on Linux); the Ubuntu CI job runs them for real.
-See [REVIEW-1.0.md](./docs/REVIEW-1.0.md).
+See [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 
 > The "uncovered lines" column reports **closing braces and continuation lines of multi-line
 > expressions** as uncovered — each one has been checked by hand (`downloader.ts:134` and
@@ -858,5 +939,6 @@ This is a **community-maintained third-party plugin** and an **unofficial projec
 
 ## License
 
-- Plugin code: [MIT](./LICENSE)
+- Plugin code: [MIT](https://github.com/LeiSureYu/dsh-smart-download/blob/main/LICENSE)
 - Bundled aria2 binaries: **GPL-2.0-or-later**
+

@@ -11,6 +11,35 @@
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-10-13
+
+**README 结构重构，并修掉 npm 页面上的死链。** README 之前 857 行 / 38 个标题却**没有目录**，
+参数散落在十几节散文里，支持平台 / 权限 / 兼容性被压到内部原理**之后**；更严重的是
+**所有相对链接**（`./docs/*.md`、`./CHANGELOG.md`、进度面板截图）**在 npmjs.com 上都是死的**
+—— npm 渲染 README 时不解析相对路径。
+
+**README restructured, and the dead links on the npm page are fixed.** The README had 857 lines
+and 38 headings but **no table of contents**; parameters were scattered across a dozen prose
+sections, and platforms / permissions / compatibility sat *after* the internals. Worse, **every
+relative link** (`./docs/*.md`, `./CHANGELOG.md`, the progress-panel screenshot) **was dead on
+npmjs.com** — npm does not resolve relative paths when it renders a README.
+
+### 变更 / Changed
+
+- 新增**目录**（41 条，含二级标题）。锚点逐条校验：**0 死链、0 重复锚点**。
+- 新增**「参数与选项速查」**：`smart_download` 的全部 10 个参数、`download_status` 的 2 个参数，
+  以及面向用户的环境变量，收成三张表。数据取自**工具 schema**（`src/index.ts`），不是转述散文 ——
+  例如 `timeoutMs` 的 `1000`–`1800000`、`targets` 的 50 条上限、`limit` 默认 `10`。
+  表里只列用户可调的变量；`DSH_SMARTDL_REVEAL_CMD` 之类是**测试接缝**（源码注释明写），
+  单独用一句话说明，不混进用户选项。
+- 按常规骨架重排：**支持平台 / 权限说明 / 兼容性**提到「工作原理」「设计上的静默失败防护」
+  「并发阈值是实测的」等内部原理**之前**。
+- README 里 48 处文件链接 + 2 处图片改为**绝对地址**（`github.com/.../blob/main/...` 与
+  `raw.githubusercontent.com/...`），现在在 npm 页面与 GitHub 上都能打开。
+- 中英两份同步做，章节顺序一一对应。
+
+> **内容一字未删**：把新增章节与链接目标排除后逐行比对，旧 644 行 / 新 644 行，**双向差异 0**。
+
 ## [1.4.3] - 2026-10-13
 
 **文档（安全）**：把 `COMPATIBILITY.md` 里「桌面版必须用桌面版自带 CLI 安装」的警告**写实** ——

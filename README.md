@@ -7,11 +7,11 @@
 ![platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-0078D4)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/leisureyu/dsh-smart-download)
 
-**简体中文** · [English](./README.en.md)
+**简体中文** · [English](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.en.md)
 
 > **给 DSH 装上一个内置 aria2 的下载器。** 一条命令装好，不用自己配环境：大文件自动多线程加速，服务器不支持就自动回退，中途断了还能续传。
 
-![实时进度面板](docs/progress-pill.png)
+![实时进度面板](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
@@ -30,12 +30,56 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **镜像自动挑** —— `mirror: "auto"` 时插件自己从内置候选表里选一个**被证实与原地址同源**的 GitHub 镜像，模型不用先「知道」gh-proxy 这类域名。
 
 支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**，这四组合是完整支持（随包 aria2 多线程）。
-macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说明](./docs/COMPATIBILITY.md)，那里写清了每个来源逐个核对后为何仍不成立（卡点是「来源不可信」，不是「没有二进制」），也写清了为什么没硬做。
+macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说明](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)，那里写清了每个来源逐个核对后为何仍不成立（卡点是「来源不可信」，不是「没有二进制」），也写清了为什么没硬做。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
 - **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c` 多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选：`mirror` 镜像加速（前缀或 `auto`）、`sha256` 内容核对、`userAgent` / `referer` / `headers` 请求头、断点续传；用 `targets` 代替 `url` 可一次下载一批（`maxBandwidth` 限整批带宽、`timeoutMs` 限每个条目的耗时）。
 - **`download_status`**：查询下载进度。只读地返回最近任务的状态快照（百分比、速度、ETA），可用来回答“刚才那个下载到百分之几了”。
+
+## 目录
+
+- [安装](#安装)
+  - [从 Git 仓库地址安装](#从-git-仓库地址安装)
+- [照着官方文档下载](#照着官方文档下载)
+  - [`sha256`：把文档里的摘要粘进来](#sha256把文档里的摘要粘进来)
+  - [`userAgent` / `referer` / `headers`：地址不是直接 GET 就能拿到时](#useragent--referer--headers地址不是直接-get-就能拿到时)
+  - [`mirror: "auto"`：文档只给原始 GitHub 地址时](#mirror-auto文档只给原始-github-地址时)
+- [镜像加速](#镜像加速)
+  - [不想手填前缀：`mirror: "auto"`](#不想手填前缀mirror-auto)
+  - [换成自己的镜像：`DSH_SMARTDL_MIRRORS`](#换成自己的镜像dsh_smartdl_mirrors)
+- [断点续传](#断点续传)
+- [一次下载多个文件：`targets` / `maxBandwidth` / `timeoutMs`](#一次下载多个文件targets--maxbandwidth--timeoutms)
+  - [二选一与上限](#二选一与上限)
+  - [逐条结果与「部分成功」](#逐条结果与部分成功)
+  - [批内并发：按「总连接数有界」反推](#批内并发按总连接数有界反推)
+  - [`maxBandwidth`：整批共享的带宽上限](#maxbandwidth整批共享的带宽上限)
+  - [`timeoutMs`：单条目超时（路线 A 是同步调用）](#timeoutms单条目超时路线-a-是同步调用)
+- [参数与选项速查](#参数与选项速查)
+  - [`smart_download`](#smart_download)
+  - [`download_status`](#download_status)
+  - [环境变量](#环境变量)
+- [查询下载进度：download_status](#查询下载进度download_status)
+- [进度上报](#进度上报)
+- [界面进度面板（web / desktop）](#界面进度面板web--desktop)
+- [下载管理器（1.4.0 起）](#下载管理器140-起)
+- [支持平台](#支持平台)
+- [权限说明](#权限说明)
+- [兼容性](#兼容性)
+  - [DSH 0.2.0 的安装前置检查](#dsh-020-的安装前置检查)
+- [工作原理](#工作原理)
+  - [为什么必须做协议白名单与文件名净化（实测结论，勿移除）](#为什么必须做协议白名单与文件名净化实测结论勿移除)
+- [设计上的静默失败防护](#设计上的静默失败防护)
+- [并发阈值是实测的，不是猜的](#并发阈值是实测的不是猜的)
+  - [两个差点让并发全部失效的坑](#两个差点让并发全部失效的坑)
+- [常见问题](#常见问题)
+- [文档](#文档)
+  - [与官方文档的关系](#与官方文档的关系)
+- [开发](#开发)
+  - [发布](#发布)
+- [第三方组件声明](#第三方组件声明)
+- [声明](#声明)
+- [License](#license)
 
 ## 安装
 
@@ -75,13 +119,13 @@ dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
 > **1.2.0 加了「照着官方文档把文件下对」的三件工具**：`sha256` 内容核对、
 > `userAgent` / `referer` / `headers` 请求头、`mirror: "auto"` 自动挑镜像；并修掉三处
 > 探测与回退缺陷（HEAD 失败不再直接放弃探测、HEAD 分支漏读 `Content-Range` 会把
-> 正确下载判成损坏、完整性校验失败不再白跑一遍 curl）。逐条依据见 [CHANGELOG.md](./CHANGELOG.md)。
+> 正确下载判成损坏、完整性校验失败不再白跑一遍 curl）。逐条依据见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
 >
-> **1.1.0 为 DSH 0.2.0 适配。** 0.2.0 起安装前会核对 `peerDependencies`：`0.4.0` 及更早版本声明的范围不含 `0.2.0`，装上后整个 bundle 会被跳过，插件完全不加载。如果你装的是 `0.4.0` 或更早，升级即可；`0.4.1` 起已覆盖 0.2.0。详见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
+> **1.1.0 为 DSH 0.2.0 适配。** 0.2.0 起安装前会核对 `peerDependencies`：`0.4.0` 及更早版本声明的范围不含 `0.2.0`，装上后整个 bundle 会被跳过，插件完全不加载。如果你装的是 `0.4.0` 或更早，升级即可；`0.4.1` 起已覆盖 0.2.0。详见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)。
 >
-> **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+> **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 >
-> **版本要求：请使用 `1.2.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+> **版本要求：请使用 `1.2.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
 >
 > 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.2.0` 即可。
 
@@ -195,96 +239,6 @@ smart_download(
 > 校验也拦不住。要防投毒只有 `sha256`：摘要来自官方文档，镜像伪造不了。
 
 
-## 工作原理
-
-下载决策流程（文字版）：
-
-```
-调用 smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
-        │
-        ▼
-[0] 参数前置校验（都在**下载开始前**，不合法直接拒绝）
-     · url 必须是 http(s)（file:// / ftp:// 一律拒绝）
-     · sha256 必须能归一化成 64 位十六进制
-     · headers 不能覆盖插件自管的头，值不能含 CR / LF / NUL
-        │
-        ▼
-[1] 组装请求头：headers + userAgent + referer 合成**一份**，
-    探测与下载共用（两边不一致会让探测结论与真实下载错位）
-        │
-        ▼
-[2] 镜像解析
-     · 显式前缀：镜像前缀 + 完整原始 URL
-     · "auto"：先探测原始地址，再逐个探测内置候选，
-       只采用「长度一致，且原始有 ETag 时 ETag 也一致」的候选；
-       一个都没证实就退回原始地址并写明 mirrorSkipped
-     · 非 http(s) URL 不走镜像；输出文件名始终按原始 URL 推导
-        │
-        ▼
-[3] 探测 URL（超时 5s）
-     · 先发送 HEAD 请求
-     · HEAD 抛异常（超时 / 被墙）、返回 405、或缺少 Content-Length，
-       都改用 GET + "Range: bytes=0-0" 兜底再判一次
-     · 两条路都失败才判「不支持多线程」
-        │
-        ▼
-[4] decide() 按文件大小与 aria2 可用性分档：
-     · 不支持 Range / 探测失败 / 无法获取大小 / <1MB  -> curl
-     · 1MB ~ 8MB   -> aria2 4 连接
-     · ≥ 8MB        -> aria2 8 连接（保守上限，不开 16）
-        │
-   ┌────┴──────────────────────────┐
-   ▼ aria2 档                       ▼ curl 档
-[5a] 能定位到随包 aria2c？         [5b] curl 单线程（含进度条）
-   │ 是              │ 否
-   ▼                 ▼
-  aria2 4/8 连接     curl 单线程（回退）
-  （每秒摘要进度）
-  （能证实同源时 -c）  （能证实同源时 -C -）
-    │ 失败
-    ▼
-  降级为 curl 单线程（回退）
-  注：完整性校验失败**不**走这条回退 —— 产物内容不对，
-      换下载器重下同一地址不会改变结果
-        │
-        ▼
-[6] 完整性校验（两层，各自独立）
-     · 落盘字节数 vs 远端声明长度（verifySize）
-     · 调用方给的 SHA-256 vs 实际算出的摘要（verifySha256）
-        │ 通过                │ 失败
-        ▼                     ▼
-   清除 .part.json       抛错，保留旁车
-   返回 success
-
-  返回结果 { success, path, method, size, fellback, reason?, verifySkipped?,
-            sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
-```
-
-要点：
-
-- **探测异常不会让下载失败，但「HEAD 抛异常」不再等于「不支持多线程」**：HEAD 超时 / 被墙时会
-  改用 Range GET 兜底再判一次（1.2.0 修正）。此前 HEAD 一失败就宣告「不支持且大小未知」，
-  连带白等一整个探测超时、完整性校验永久退化成「跳过」、大文件也永远单线程。
-  两条路都失败才回退 curl，`reason` 会同时写明两条失败原因。
-- 并发数随文件大小动态选择（阈值 1MB / 8MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
-  阈值是 0.7.0 实测定下的，不是拍脑袋（见下方「并发阈值是实测的，不是猜的」）。
-- **下载完成后会校验落盘字节数**：`curl` / `aria2` 的退出码 0 只代表“它自己认为完成了”，不代表字节数对。
-  少发、多发、镜像返回 200 的错误页等场景都不会有非零退出码，只有校验能拦下（详见「设计上的静默失败防护」）。
-- **传了 `sha256` 就再核对内容**：长度校验挡不住「等长但内容不同」，哈希能，而且它不依赖远端信息，
-  在长度校验被迫跳过时依然给出确定结论。
-- 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像，
-  `mirror` 是实际用的前缀，`mirrorSkipped` 说明「请求了自动镜像但没用上」的原因。
-- **只允许 `http` / `https`**：URL 来自模型读到的任意页面，属于不可信输入。其他协议（`file:`、`ftp:` 等）在下载开始前直接被拒绝，不会进入探测或下载流程。
-- **不支持 FTP / SFTP / BitTorrent**：协议白名单只放行 `http` / `https`。放开之后五层防护里只剩第五层（调用方给的 `sha256`）有效，而它是**可选参数** —— 也就是说默认情况下 FTP 下载没有任何内容校验；BitTorrent 更进不来（DHT / 监听端口 / 做种会打破「除原始 URL 外不访问其他地址」这条权限承诺）。逐条依据（2026-10-12 核对）见 [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md) §B。
-- **输出文件名会被净化**：未传 `output` 时按 URL 推导文件名，推导结果只取**单个路径段**——URI 解码后的 `/`、`\`、`..` 等一律丢弃，因此不会写到工作目录之外。
-
-### 为什么必须做协议白名单与文件名净化（实测结论，勿移除）
-
-> `0.4.1` 实测：`file:///C:/Windows/win.ini` 会被 `curl` 接受并**成功复制本地文件**到目标路径；
-> `http://host/..%2F..%2F..%2Fescaped.txt` 会解码出 `../../../escaped.txt`，未指定 `output` 时
-> 文件被写到**当前工作目录之外**（实测确认写入成功）。两者都在 `0.4.2` 修复：前者由协议白名单
-> 拦截，后者由「解码后再切分、只取最后一段 + 净化」拦截。
-
 ## 镜像加速
 
 下载 GitHub Release 等境外资源较慢时，可给 `smart_download` 传入 `mirror` 前缀，插件会把原始 URL 拼到该前缀后面再下载：
@@ -301,7 +255,7 @@ smart_download(
 
 - 只做**前缀拼接**，不做路径改写，因此适配绝大多数「前缀 + 完整原始 URL」形式的公开镜像；
 - 前缀**缺尾斜杠会自动补上**，也可直接写裸域名（`ghfast.top` 会补成 `https://ghfast.top/`）；
-- 非 `http(s)` 的 URL 不使用镜像；**镜像前缀本身也必须过白名单** —— 非 `http(s)` 的前缀（`file://`、`javascript://`、`data://` 等）一律不生效、原样走原始 URL。字符串拼接后整串的 scheme 由前缀决定，不判前缀就等于给 `file://` 开了后门（1.0.0 修正，实测见 [SECURITY.md](./docs/SECURITY.md)）；
+- 非 `http(s)` 的 URL 不使用镜像；**镜像前缀本身也必须过白名单** —— 非 `http(s)` 的前缀（`file://`、`javascript://`、`data://` 等）一律不生效、原样走原始 URL。字符串拼接后整串的 scheme 由前缀决定，不判前缀就等于给 `file://` 开了后门（1.0.0 修正，实测见 [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md)）；
 - 输出文件名始终按**原始 URL** 推导，不会把镜像域名带进文件名。
 
 ### 不想手填前缀：`mirror: "auto"`
@@ -412,6 +366,41 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 - 超时**不**回退到 curl —— 回退等于把同一份等待再花一遍。
 - 缺省（不传）表示不设超时；非法值（越界、小数、非数字）在发起任何请求之前抛错。
 
+## 参数与选项速查
+
+### `smart_download`
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `url` | string | 二选一 | 单个文件的地址。与 `targets` **二选一** —— 都给或都不给都会在发请求前被拒。 |
+| `targets` | array | 二选一 | 一次下载一批，**最多 50 条**。每条是 `{ url（必填）, output?, sha256? }`；条目之间共享 `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth`，各自有自己的输出路径、校验与进度记录。条目并发受插件并发上限约束；**一条失败不中止整批**，结果逐条给出。 |
+| `output` | string | 否 | 输出路径。不传时由 URL 推导（单段文件名，相对进程 cwd）。 |
+| `mirror` | string | 否 | 镜像前缀（如 `https://gh-proxy.com/` 或 `ghfast.top`），用于加速 GitHub Release 下载；非 http(s) 地址忽略。传字面量 `"auto"` 让插件从内置候选表里挑一个**被证实与原地址同源**的镜像（长度一致，且源站给了 ETag 时 ETag 也一致）；`"auto"` 只对 GitHub 生效，挑不出候选就回退原地址。 |
+| `sha256` | string | 否 | 期望的 SHA-256。接受裸 hex、`sha256:<hex>`、`SHA256(<hex>)`、SRI `sha256-<base64>` 四种写法；不匹配即判失败。 |
+| `userAgent` | string | 否 | User-Agent 头。**探测与下载共用**，不会两边不一致。 |
+| `referer` | string | 否 | Referer 头。同样探测与下载共用。 |
+| `headers` | object | 否 | 额外请求头，如 `{"Authorization": "Bearer …"}`。插件自管的头（`Range` / `Accept-Encoding` / `Host` 等）会被拒绝；值里含换行或控制字符也会被拒绝。 |
+| `maxBandwidth` | string | 否 | 整次调用**所有任务共享**的带宽上限，如 `"2M"` / `"500K"` / 纯字节数 `"1500000"`（K/M/G 按 1024 计）。批量时上限在并发条目间分摊，整批不超。落地为 aria2 的 `--max-overall-download-limit` / curl 的 `--limit-rate`。 |
+| `timeoutMs` | integer | 否 | **单个条目**的超时毫秒数，`1000`–`1800000`（30 分钟封顶 —— 这是同步调用）。超时条目被终止并报失败；批量时其余条目继续跑，**已成功的条目不会被改写**。不传则一直等。 |
+
+### `download_status`
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `taskId` | string | 否 | 只查某一个任务。 |
+| `limit` | integer | 否 | 最多返回多少条任务（默认 `10`）。 |
+
+### 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `DSH_SMARTDL_MIRRORS` | 覆盖内置的镜像候选表（见[镜像加速](#镜像加速)）。 |
+| `DSH_PROGRESS_DIR` | 覆盖进度**轨道一**的目录（默认 `<cwd>/.dsh-progress/<session.id>/`）。 |
+| `DSH_DOWNLOAD_PROGRESS_DIR` | 覆盖进度**轨道二**的目录（默认 `<DSH_HOME>/downloads/tasks/`）。 |
+
+> 另有 `DSH_SMARTDL_REVEAL_CMD` / `DSH_SMARTDL_THROUGHPUT_DIR` 等**测试接缝**（见[开发](#开发)），
+> 用于让测试走完整路径又不产生副作用（例如不在开发者桌面上弹资源管理器）。日常使用不需要它们。
+
 ## 查询下载进度：download_status
 
 `download_status` 只读地返回本插件下载任务的状态快照，可用来回答“刚才那个下载到百分之几了”。
@@ -468,7 +457,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 在带 Web 界面的 profile（`web`，以及桌面版的 `desktop`）下，插件会在界面右下角挂载一个**实时进度面板**：只要有下载在进行就自动出现，显示**输出文件名、百分比、传输速度与剩余时间**；下载完成后短暂显示「已完成」回执，然后自动消失。空闲时不占位、不显示。
 
-![进度面板](docs/progress-pill.png)
+![进度面板](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
 实现要点（如遇面板不显示，可据此排查）：
 
@@ -514,6 +503,158 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 > 1.3.0 的会话头部入口已移除；浮层只保留「进行中进度 + 完成回执 + 提示音」的播报职责。
 
+## 支持平台
+
+| 平台      | 架构    | 是否支持              | 二进制子包                          |
+| ------- | ----- | ----------------- | ------------------------------ |
+| Windows | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-win32-x64`   |
+| Windows | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-win32-arm64` |
+| Linux   | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-linux-x64`   |
+| Linux   | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-linux-arm64` |
+| macOS   | x64 / arm64 | ⚠️ 能用但不加速 | —                              |
+
+二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装，
+`getAria2Path()` 解析不到时返回 `null`、由 `decide()` 回退 `curl`。**「插件可用」与「多线程可用」
+是两件事** —— 不支持的平台不会装出一个坏掉的插件，只会装出一个单线程下载器。
+macOS 为什么没做、需要补什么，见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)。
+
+## 权限说明
+
+本插件只做两件事：**发起下载**与**写进度文件**。逐项说明如下。
+
+| 行为 | 说明 |
+| --- | --- |
+| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）—— **不支持 FTP / SFTP / BitTorrent**：放开白名单后五层防护里只剩第五层（可选的 `sha256`）有效，即默认无内容校验；BT 的 DHT / 监听端口 / 做种还会打破下方「除原始 URL 外不访问其他地址」这条承诺。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。**`mirror: "auto"` 时，候选镜像地址也会被探测**（并发 HEAD，每个同样 5s 超时）—— 这是自动模式的必要代价，且**必须显式传 `auto` 才会发生**；候选表可用 `DSH_SMARTDL_MIRRORS` 限定为你信任的镜像。 |
+| 发送请求头 | 默认只发探测必需的 `accept-encoding: identity`。调用方传了 `userAgent` / `referer` / `headers` 时，这些头会**同时**出现在探测请求与下载请求上（子进程命令行里可见，因此**不要**把长期凭证写进 `headers`）。插件自身管理的头（`Range` / `Accept-Encoding` / `Content-Length` / `Host` / 连接级头）拒绝覆盖；头值含 CR / LF / NUL 判为注入并拒绝。 |
+| 读取下载文件 | `sha256` 校验时以**流式**方式读取刚落盘的那个文件（不整份进内存），用于计算 SHA-256。不读其他文件。 |
+| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未传 `output` 之外的路径不改动。aria2 一律带 `--allow-overwrite=true`（**必须**）：aria2 默认遇到同名文件既不截断也不覆盖，而是另存为 `f.1.bin`，而插件返回的 `path` 仍指向旧文件 —— 前一个版本的静默路径错位就是这么来的。 |
+| 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
+| 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
+| HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册两条精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）与 `POST /api/smartdl.cleanup`（**会删文件**）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。**影响面**：进度文件是「已完成 / 失败」回执的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用该端点的人就能清理本机所有会话的历史进度。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
+| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
+| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）。 |
+
+**不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
+
+## 兼容性
+
+| 项目 | 要求 |
+| --- | --- |
+| Node.js | `>=22.0.0`（用到 `AbortSignal.any` / `AbortSignal.timeout`） |
+| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` 或 `>=4.0.1-rc.1 <5.0.0-0`（peerDependency；可选） |
+| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明，DSH 每开一个新预发布分支都要同步追加） |
+| npm 包管理器 | npm / pnpm 均可；需支持 `optionalDependencies` 的 `os` / `cpu` 过滤 |
+
+### DSH 0.2.0 的安装前置检查
+
+0.2.0 起，DSH 在**安装前**就会核对插件声明的 `peerDependencies` 是否覆盖当前运行版本，不覆盖会直接拒绝安装；已经装上的也会在启动时**整个 bundle 被跳过**，日志里出现：
+
+```
+dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
+```
+
+跳过是整层跳过——`smart_download` / `download_status` 两个工具都不会注册。**`0.4.0` 及更早的版本会被拒**（0.4.0 给三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0`）；`0.4.1` 起已把范围补成 `>=0.2.0-rc.1 <0.3.0-0`，在 0.2.0 上正常加载。**升级到最新的 `1.1.0` 即可**。
+
+如果只是想临时放行某个旧版本，0.2.0 提供了按「包@版本 + 精确 dsh 版本」的豁免，需要显式接受风险：
+
+```bash
+dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 dsh 版本> --accept-risk
+```
+
+豁免记录在该 profile 的 `compatibility.json` 里，可以用 `dsh plugin version-exemptions` 查看、`revoke-version` 撤销。豁免的粒度是**精确版本**：换了 dsh 版本就不再生效。
+
+macOS 未列入支持平台：**不是兼容性问题，而是没有可信来源的 aria2 二进制子包**（注意：macOS 二进制存在且带哈希，卡点是「来源不可信」—— 逐个来源的核对结果见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) 与 [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md)，核对时间 2026-10-12）。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
+
+## 工作原理
+
+下载决策流程（文字版）：
+
+```
+调用 smart_download(url, output?, mirror?, sha256?, userAgent?, referer?, headers?)
+        │
+        ▼
+[0] 参数前置校验（都在**下载开始前**，不合法直接拒绝）
+     · url 必须是 http(s)（file:// / ftp:// 一律拒绝）
+     · sha256 必须能归一化成 64 位十六进制
+     · headers 不能覆盖插件自管的头，值不能含 CR / LF / NUL
+        │
+        ▼
+[1] 组装请求头：headers + userAgent + referer 合成**一份**，
+    探测与下载共用（两边不一致会让探测结论与真实下载错位）
+        │
+        ▼
+[2] 镜像解析
+     · 显式前缀：镜像前缀 + 完整原始 URL
+     · "auto"：先探测原始地址，再逐个探测内置候选，
+       只采用「长度一致，且原始有 ETag 时 ETag 也一致」的候选；
+       一个都没证实就退回原始地址并写明 mirrorSkipped
+     · 非 http(s) URL 不走镜像；输出文件名始终按原始 URL 推导
+        │
+        ▼
+[3] 探测 URL（超时 5s）
+     · 先发送 HEAD 请求
+     · HEAD 抛异常（超时 / 被墙）、返回 405、或缺少 Content-Length，
+       都改用 GET + "Range: bytes=0-0" 兜底再判一次
+     · 两条路都失败才判「不支持多线程」
+        │
+        ▼
+[4] decide() 按文件大小与 aria2 可用性分档：
+     · 不支持 Range / 探测失败 / 无法获取大小 / <1MB  -> curl
+     · 1MB ~ 8MB   -> aria2 4 连接
+     · ≥ 8MB        -> aria2 8 连接（保守上限，不开 16）
+        │
+   ┌────┴──────────────────────────┐
+   ▼ aria2 档                       ▼ curl 档
+[5a] 能定位到随包 aria2c？         [5b] curl 单线程（含进度条）
+   │ 是              │ 否
+   ▼                 ▼
+  aria2 4/8 连接     curl 单线程（回退）
+  （每秒摘要进度）
+  （能证实同源时 -c）  （能证实同源时 -C -）
+    │ 失败
+    ▼
+  降级为 curl 单线程（回退）
+  注：完整性校验失败**不**走这条回退 —— 产物内容不对，
+      换下载器重下同一地址不会改变结果
+        │
+        ▼
+[6] 完整性校验（两层，各自独立）
+     · 落盘字节数 vs 远端声明长度（verifySize）
+     · 调用方给的 SHA-256 vs 实际算出的摘要（verifySha256）
+        │ 通过                │ 失败
+        ▼                     ▼
+   清除 .part.json       抛错，保留旁车
+   返回 success
+
+  返回结果 { success, path, method, size, fellback, reason?, verifySkipped?,
+            sha256?, requestedUrl, mirrored, mirror?, mirrorSkipped? }
+```
+
+要点：
+
+- **探测异常不会让下载失败，但「HEAD 抛异常」不再等于「不支持多线程」**：HEAD 超时 / 被墙时会
+  改用 Range GET 兜底再判一次（1.2.0 修正）。此前 HEAD 一失败就宣告「不支持且大小未知」，
+  连带白等一整个探测超时、完整性校验永久退化成「跳过」、大文件也永远单线程。
+  两条路都失败才回退 curl，`reason` 会同时写明两条失败原因。
+- 并发数随文件大小动态选择（阈值 1MB / 8MB），`reason` 会区分“不支持 Range”“文件太小”“aria2 缺失”等情况。
+  阈值是 0.7.0 实测定下的，不是拍脑袋（见下方「并发阈值是实测的，不是猜的」）。
+- **下载完成后会校验落盘字节数**：`curl` / `aria2` 的退出码 0 只代表“它自己认为完成了”，不代表字节数对。
+  少发、多发、镜像返回 200 的错误页等场景都不会有非零退出码，只有校验能拦下（详见「设计上的静默失败防护」）。
+- **传了 `sha256` 就再核对内容**：长度校验挡不住「等长但内容不同」，哈希能，而且它不依赖远端信息，
+  在长度校验被迫跳过时依然给出确定结论。
+- 返回的 `requestedUrl` 是**实际请求的地址**（启用镜像时为「镜像前缀 + 原始 URL」），`mirrored` 标明本次是否走了镜像，
+  `mirror` 是实际用的前缀，`mirrorSkipped` 说明「请求了自动镜像但没用上」的原因。
+- **只允许 `http` / `https`**：URL 来自模型读到的任意页面，属于不可信输入。其他协议（`file:`、`ftp:` 等）在下载开始前直接被拒绝，不会进入探测或下载流程。
+- **不支持 FTP / SFTP / BitTorrent**：协议白名单只放行 `http` / `https`。放开之后五层防护里只剩第五层（调用方给的 `sha256`）有效，而它是**可选参数** —— 也就是说默认情况下 FTP 下载没有任何内容校验；BitTorrent 更进不来（DHT / 监听端口 / 做种会打破「除原始 URL 外不访问其他地址」这条权限承诺）。逐条依据（2026-10-12 核对）见 [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md) §B。
+- **输出文件名会被净化**：未传 `output` 时按 URL 推导文件名，推导结果只取**单个路径段**——URI 解码后的 `/`、`\`、`..` 等一律丢弃，因此不会写到工作目录之外。
+
+### 为什么必须做协议白名单与文件名净化（实测结论，勿移除）
+
+> `0.4.1` 实测：`file:///C:/Windows/win.ini` 会被 `curl` 接受并**成功复制本地文件**到目标路径；
+> `http://host/..%2F..%2F..%2Fescaped.txt` 会解码出 `../../../escaped.txt`，未指定 `output` 时
+> 文件被写到**当前工作目录之外**（实测确认写入成功）。两者都在 `0.4.2` 修复：前者由协议白名单
+> 拦截，后者由「解码后再切分、只取最后一段 + 净化」拦截。
+
 ## 设计上的静默失败防护
 
 开发过程中实测发现了三个**同类型的静默失败**：
@@ -555,7 +696,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 另有两个「不抛错但明显不对」的问题一并修掉：`awaitFlush` 的超时计时器没有 `unref`，
 CLI 下每次下载结束都要多卡约 2 秒才退出；以及 aria2 失败回退 curl 时，进度文案写的是 aria2 的错误、
-抛出的却是 curl 的错误，排查时对不上。逐条复现步骤与改法见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+抛出的却是 curl 的错误，排查时对不上。逐条复现步骤与改法见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 
 **契约**：本插件所有“返回默认值”的路径——
 
@@ -644,68 +785,6 @@ aliyun 镜像对 aria2 的 UA 直接返回 403。）
   而 curl / aria2 默认不带。5000 字节的 body 在默认探测下会报 41 字节；若不修，
   0.7.0 新增的大小校验会对**任何支持 gzip 的服务器** 100% 误报，把正确的下载判成损坏。
 
-## 支持平台
-
-| 平台      | 架构    | 是否支持              | 二进制子包                          |
-| ------- | ----- | ----------------- | ------------------------------ |
-| Windows | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-win32-x64`   |
-| Windows | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-win32-arm64` |
-| Linux   | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-linux-x64`   |
-| Linux   | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-linux-arm64` |
-| macOS   | x64 / arm64 | ⚠️ 能用但不加速 | —                              |
-
-二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装，
-`getAria2Path()` 解析不到时返回 `null`、由 `decide()` 回退 `curl`。**「插件可用」与「多线程可用」
-是两件事** —— 不支持的平台不会装出一个坏掉的插件，只会装出一个单线程下载器。
-macOS 为什么没做、需要补什么，见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
-
-## 权限说明
-
-本插件只做两件事：**发起下载**与**写进度文件**。逐项说明如下。
-
-| 行为 | 说明 |
-| --- | --- |
-| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）—— **不支持 FTP / SFTP / BitTorrent**：放开白名单后五层防护里只剩第五层（可选的 `sha256`）有效，即默认无内容校验；BT 的 DHT / 监听端口 / 做种还会打破下方「除原始 URL 外不访问其他地址」这条承诺。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。**`mirror: "auto"` 时，候选镜像地址也会被探测**（并发 HEAD，每个同样 5s 超时）—— 这是自动模式的必要代价，且**必须显式传 `auto` 才会发生**；候选表可用 `DSH_SMARTDL_MIRRORS` 限定为你信任的镜像。 |
-| 发送请求头 | 默认只发探测必需的 `accept-encoding: identity`。调用方传了 `userAgent` / `referer` / `headers` 时，这些头会**同时**出现在探测请求与下载请求上（子进程命令行里可见，因此**不要**把长期凭证写进 `headers`）。插件自身管理的头（`Range` / `Accept-Encoding` / `Content-Length` / `Host` / 连接级头）拒绝覆盖；头值含 CR / LF / NUL 判为注入并拒绝。 |
-| 读取下载文件 | `sha256` 校验时以**流式**方式读取刚落盘的那个文件（不整份进内存），用于计算 SHA-256。不读其他文件。 |
-| 写入下载文件 | 写入 `output` 参数指定的路径；未指定时由 URL 推导文件名，落在当前工作目录。推导结果**必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此不会写到工作目录之外。父目录不存在时会自动创建（`mkdir -p`）。不会删除任何已有文件。启用断点续传后，同名文件会被**续写**而非重头覆盖；未传 `output` 之外的路径不改动。aria2 一律带 `--allow-overwrite=true`（**必须**）：aria2 默认遇到同名文件既不截断也不覆盖，而是另存为 `f.1.bin`，而插件返回的 `path` 仍指向旧文件 —— 前一个版本的静默路径错位就是这么来的。 |
-| 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
-| 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
-| HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册两条精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）与 `POST /api/smartdl.cleanup`（**会删文件**）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。**影响面**：进度文件是「已完成 / 失败」回执的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用该端点的人就能清理本机所有会话的历史进度。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
-| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
-| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）。 |
-
-**不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
-
-## 兼容性
-
-| 项目 | 要求 |
-| --- | --- |
-| Node.js | `>=22.0.0`（用到 `AbortSignal.any` / `AbortSignal.timeout`） |
-| `@deepseek-ai/cordis` | `>=4.0.0 <4.0.1-0` 或 `>=4.0.1-rc.1 <5.0.0-0`（peerDependency；可选） |
-| `@deepseek-ai/dsh-tools` | `>=0.1.7-rc.1 <0.1.8-0` / `>=0.1.8-rc.1 <0.2.0-0` / `>=0.2.0-rc.1 <0.3.0-0`（peerDependency；该包只发布预发布版，因此按元组显式声明，DSH 每开一个新预发布分支都要同步追加） |
-| npm 包管理器 | npm / pnpm 均可；需支持 `optionalDependencies` 的 `os` / `cpu` 过滤 |
-
-### DSH 0.2.0 的安装前置检查
-
-0.2.0 起，DSH 在**安装前**就会核对插件声明的 `peerDependencies` 是否覆盖当前运行版本，不覆盖会直接拒绝安装；已经装上的也会在启动时**整个 bundle 被跳过**，日志里出现：
-
-```
-dsh: skipping profile bundle "@leisureyu/dsh-smart-dl": Error: Plugin ... is incompatible with dsh 0.2.0-rc.2
-```
-
-跳过是整层跳过——`smart_download` / `download_status` 两个工具都不会注册。**`0.4.0` 及更早的版本会被拒**（0.4.0 给三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0`）；`0.4.1` 起已把范围补成 `>=0.2.0-rc.1 <0.3.0-0`，在 0.2.0 上正常加载。**升级到最新的 `1.1.0` 即可**。
-
-如果只是想临时放行某个旧版本，0.2.0 提供了按「包@版本 + 精确 dsh 版本」的豁免，需要显式接受风险：
-
-```bash
-dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 dsh 版本> --accept-risk
-```
-
-豁免记录在该 profile 的 `compatibility.json` 里，可以用 `dsh plugin version-exemptions` 查看、`revoke-version` 撤销。豁免的粒度是**精确版本**：换了 dsh 版本就不再生效。
-
-macOS 未列入支持平台：**不是兼容性问题，而是没有可信来源的 aria2 二进制子包**（注意：macOS 二进制存在且带哈希，卡点是「来源不可信」—— 逐个来源的核对结果见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md) 与 [PLAN-P2-PLATFORM.md](./docs/PLAN-P2-PLATFORM.md)，核对时间 2026-10-12）。在 macOS 上插件仍可安装并正常工作，但 `getAria2Path()` 返回 `null`，所有下载都会走 `curl` 单线程回退（返回结果的 `reason` 会写明原因）。
-
 ## 常见问题
 
 **Q：安装或运行时被 Windows Defender（或其他杀毒软件）拦截？**
@@ -754,13 +833,13 @@ A：先确认真的装成功了：从仓库地址安装要求该 git 主机可�
 
 | 文档 | 内容 |
 | --- | --- |
-| [README](./README.md) / [English](./README.en.md) | 安装、用法、权限说明 |
-| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 内部结构：一次调用经过哪些步骤、模块职责、进度数据流 |
-| [SECURITY.md](./docs/SECURITY.md) | 威胁模型与五层防护，每层对应的实测复现 |
-| [COMPATIBILITY.md](./docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 为什么搁置 |
-| [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | 症状 → 原因 → 处理 |
-| [REVIEW-1.0.md](./docs/REVIEW-1.0.md) | 1.0 代码审查：必修 / 建议 / 已知折衷 |
-| [CHANGELOG.md](./CHANGELOG.md) | 逐版本变更记录 |
+| [README](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.md) / [English](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.en.md) | 安装、用法、权限说明 |
+| [ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md) | 内部结构：一次调用经过哪些步骤、模块职责、进度数据流 |
+| [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md) | 威胁模型与五层防护，每层对应的实测复现 |
+| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 为什么搁置 |
+| [TROUBLESHOOTING.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md) | 症状 → 原因 → 处理 |
+| [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md) | 1.0 代码审查：必修 / 建议 / 已知折衷 |
+| [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) | 逐版本变更记录 |
 
 ### 与官方文档的关系
 
@@ -772,8 +851,8 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 因此**安装与升级请以官方文档为准**，本 README 只补充本插件特有的部分。
 两个工具的参数、返回值与失败原因则完全记录在本 README 与
-[ARCHITECTURE.md](./docs/ARCHITECTURE.md) 里，遇到不一致时以本仓库的
-[CHANGELOG.md](./CHANGELOG.md) 与测试用例为准（每个「返回默认值」的路径都有正向断言，见上方契约表）。
+[ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md) 里，遇到不一致时以本仓库的
+[CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) 与测试用例为准（每个「返回默认值」的路径都有正向断言，见上方契约表）。
 
 ## 开发
 
@@ -781,8 +860,8 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 当前基线：**343 例用例（341 通过 / 2 跳过 / 0 失败）**，行覆盖 **99.74%** / 分支 **94.18%** / 函数 **96.99%**。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
-同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)）。
-2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](./docs/REVIEW-1.0.md)。
+同一份代码会报出另一组数字与另一组未覆盖行号（对照数据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
+2 个跳过用例是平台限制（只在 Linux 复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 
 > 「未覆盖行」一列会把**块结束的 `}` 与多行表达式的续行**报成未覆盖 —— 已逐条核对
 > （`downloader.ts:134`、`headers.ts:119` 对应的语句都有用例并断言到具体值），
@@ -853,5 +932,6 @@ aria2 官方仅提供 **Windows x64** 与源码包，因此另外三个平台使
 
 ## License
 
-- 本插件代码：[MIT](./LICENSE)
+- 本插件代码：[MIT](https://github.com/LeiSureYu/dsh-smart-download/blob/main/LICENSE)
 - 随包分发的 aria2 二进制：**GPL-2.0-or-later**
+

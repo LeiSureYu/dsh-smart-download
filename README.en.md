@@ -41,6 +41,8 @@ see [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main
 ## Table of contents
 
 - [Install](#install)
+  - [From the DSH UI (recommended)](#from-the-dsh-ui-recommended)
+  - [Command line](#command-line)
   - [Installing from a Git repository URL](#installing-from-a-git-repository-url)
 - [Downloading from official documentation](#downloading-from-official-documentation)
   - [`sha256` — paste the checksum the docs print](#sha256--paste-the-checksum-the-docs-print)
@@ -84,13 +86,28 @@ see [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main
 
 ## Install
 
+### From the DSH UI (recommended)
+
+1. Open DSH and pick **Plugins** in the **sidebar**;
+2. Click **Add plugin** and paste the package name:
+
+   ```
+   @leisureyu/dsh-smart-dl
+   ```
+
+3. Click **Install**, then **restart DSH** once.
+
+> The sidebar **Plugins** page installs and manages third-party plugins; **Settings → Built-in plugins** is a read-only list.
+
+### Command line
+
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
 
 No further configuration is needed: the aria2 binaries are installed together with the plugin via npm `optionalDependencies`.
 
-**Supported profiles**: `web` and `desktop` (the desktop app from 0.2.0 on). The install command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
+**Supported profiles**: `web` and `desktop` (the desktop app from 0.2.0 on). The command is shaped `dsh plugin --profile <profile> add <package>`; substitute `<profile>` with the profile you actually use.
 
 **On the desktop app, install with the app's bundled CLI**, not with a separately installed `dsh` (the desktop profile is managed exclusively by the Electron application):
 
@@ -98,11 +115,9 @@ No further configuration is needed: the aria2 binaries are installed together wi
 & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @leisureyu/dsh-smart-dl
 ```
 
-You can also add it from the **Plugins** page in the desktop sidebar.
-
 ### Installing from a Git repository URL
 
-Besides the npm package name, the repository URL works too:
+Besides the npm package name, the repository URL works too (or pnpm's `github:` shorthand, which is equivalent):
 
 ```bash
 dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download

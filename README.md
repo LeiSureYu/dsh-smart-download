@@ -40,6 +40,8 @@ macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说
 ## 目录
 
 - [安装](#安装)
+  - [在 DSH 界面里装（推荐）](#在-dsh-界面里装推荐)
+  - [命令行](#命令行)
   - [从 Git 仓库地址安装](#从-git-仓库地址安装)
 - [照着官方文档下载](#照着官方文档下载)
   - [`sha256`：把文档里的摘要粘进来](#sha256把文档里的摘要粘进来)
@@ -83,13 +85,28 @@ macOS 能装能用，但永远走 `curl` 单线程 —— 原因见[兼容性说
 
 ## 安装
 
+### 在 DSH 界面里装（推荐）
+
+1. 打开 DSH，在**侧边栏**选择「**插件**」；
+2. 点「**添加插件**」，粘贴包名：
+
+   ```
+   @leisureyu/dsh-smart-dl
+   ```
+
+3. 点「安装」，装完**重启 DSH** 一次。
+
+> 侧边栏的「插件」页负责安装与管理第三方插件；**设置 → 内置插件**只是内置插件的只读列表。
+
+### 命令行
+
 ```bash
 dsh plugin --profile web add @leisureyu/dsh-smart-dl
 ```
 
 安装后无需任何额外配置：aria2 二进制通过 npm 的 `optionalDependencies` 机制随插件一起安装。
 
-**支持的 profile**：`web` 与 `desktop`（0.2.0 起的桌面版）。安装命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
+**支持的 profile**：`web` 与 `desktop`（0.2.0 起的桌面版）。命令形如 `dsh plugin --profile <profile> add <包名>`，请把 `<profile>` 换成你实际使用的 profile 名称。
 
 **桌面版请用桌面版自带的 CLI 安装**，不要用系统里另外装的 `dsh`（桌面版的 profile 由 Electron 应用独占管理）：
 
@@ -97,14 +114,16 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @leisureyu/dsh-smart-dl
 ```
 
-也可以在桌面版侧边栏的 Plugins 页面里添加。
-
 ### 从 Git 仓库地址安装
 
 除了 npm 包名，也可以直接填仓库地址：
 
 ```bash
+# 完整地址
 dsh plugin --profile web add https://github.com/LeiSureYu/dsh-smart-download
+
+# 或 pnpm 的 GitHub 简写（等价）
+dsh plugin --profile web add github:LeiSureYu/dsh-smart-download
 ```
 
 要求与注意事项：

@@ -11,6 +11,32 @@
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-10-13
+
+**安装段改成与生态一致：图形界面优先。** 此前 README 把命令行
+`dsh plugin --profile web add @leisureyu/dsh-smart-dl` 放在最前面当主路径，
+而 DSH 现在的标准装法是**在界面里装**：侧边栏 →「插件」→「添加插件」→ 粘贴包名 → 安装 → 重启。
+命令行降为「命令行」小节，并补上 pnpm 的 `github:` 简写形式。
+
+**The install section now follows the ecosystem convention: the UI flow comes first.** The README
+used to lead with `dsh plugin --profile web add @leisureyu/dsh-smart-dl`; the standard way today is
+to install **from the UI** — sidebar → **Plugins** → **Add plugin** → paste the package name →
+Install → restart. The command line moved to its own section, and pnpm's `github:` shorthand is now
+documented alongside the full URL.
+
+### 变更 / Changed
+
+- 安装段拆成三节：**在 DSH 界面里装（推荐）** / **命令行** / **从 Git 仓库地址安装**。
+- GUI 路径按本机实测写：**侧边栏 →「插件」→「添加插件」**。
+  依据是 `dsh-plugin-manager` 自己的 README ——「使用 Web 侧栏的**插件**入口管理 profile 已安装的
+  组合包……**设置 → 内置插件**则展示内置插件列表及运行状态」，以及客户端包里的
+  `addPlugin: "添加插件"` 文案。**设置页那份是只读的**，不是安装入口。
+- 「从 Git 仓库地址安装」补上 pnpm 的 `github:LeiSureYu/dsh-smart-download` 简写（与完整地址等价）。
+- 目录按新标题重新生成（43 条；锚点逐条校验：0 死链、0 重复）。
+
+> 起因：用户拿 `dsh-plugin-notify-sounds` 的 README 对照，指出我们把命令行当主路径、
+> 与生态里「界面优先」的写法不一致。核对后确认属实。
+
 ## [1.4.5] - 2026-10-13
 
 **开发段的数字全部过期，已按实测更新。** README 声称「343 例用例（341 通过）/ 行覆盖 99.74% /

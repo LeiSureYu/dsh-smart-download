@@ -293,6 +293,56 @@ Windows 上打包 Linux 二进制会把它记成 `0644`，装完直接调用就�
 「少点几次」完全不对称。要删本地文件，请逐行走该行的确认框 —— 那里会显示完整路径、
 大小与不可恢复声明。
 
+## 在 desktop profile 里手跑 pnpm / npm install 后，DSH 启动即崩溃
+
+**症状**：DSH 启动就崩，对话框标题「DeepSeek Harness is unavailable」，诊断报告里是：
+
+```
+DesktopHostFatalError: dsh: startup failed: 1 required plugin did not activate
+
+Plugins waiting for services (32):
+  agent-loop (required)      sessions, tools
+  ...（几十个插件都在等 sessions / tools）
+```
+
+**重启没用，换新会话也没用**。如果宿主勉强起来了，会发现**所有工具调用都没有结果**
+（调用被记录，但执行层不存在）—— 因为 `tools` 服务本身就没人提供。
+
+**根因**：profile 的 `package.json` **不声明** DSH 的核心包
+（`@deepseek-ai/dsh-session`、`dsh-tools`、`dsh-llm` 等 9 个）。它们是 DSH 自己放进
+`node_modules` 的，在 pnpm 眼里属于「多余的包」。于是**任何一次在 profile 目录里手跑的
+`pnpm install` 都会把它们 prune 掉**（输出形如 `Packages: +11 -16`，那 `-16` 就是它们）。
+核心包一没，`sessions` 与 `tools` 两个服务就无人提供 → 所有依赖它们的插件无法激活 →
+启动失败。
+
+**为什么不能手跑**：DSH 自己的安装流程有四重保护，手跑会**全部绕过** ——
+profile manifest 写锁、失败时恢复 `package.json` / `pnpm-lock.yaml` 快照、
+pnpm 11 的构建审批（「允许这些脚本并重试」）、以及桌面版「包管理操作由 Desktop shell 负责」。
+
+**怎么修**：优先用官方逃生口 —— 崩溃框的第三个按钮
+「**Disable third-party plugins, back up profile patch, and restart**」，
+再用桌面版自带 CLI（`<安装目录>\resources\runtime\cli\bin\dsh.cmd`）或侧边栏
+**Plugins** 页面把插件装回去。
+
+手工恢复（仅在你知道自己在做什么时）：把这 9 条按 `link:` 补回
+`<profile>/package.json` 的 `dependencies`，指向
+`<安装目录>\resources\app\dsh\node_modules\@deepseek-ai\<包名>`：
+
+```json
+"@deepseek-ai/dsh-brand":           "link:…/node_modules/@deepseek-ai/dsh-brand",
+"@deepseek-ai/dsh-compaction":      "link:…/dsh-compaction",
+"@deepseek-ai/dsh-llm":             "link:…/dsh-llm",
+"@deepseek-ai/dsh-session":         "link:…/dsh-session",
+"@deepseek-ai/dsh-timeout":         "link:…/dsh-timeout",
+"@deepseek-ai/dsh-tools":           "link:…/dsh-tools",
+"@deepseek-ai/dsh-typert-protocol": "link:…/dsh-typert-protocol",
+"@deepseek-ai/dsh-util-crypto":     "link:…/dsh-util-crypto",
+"@deepseek-ai/dsh-util-values":     "link:…/dsh-util-values"
+```
+
+补上之后 pnpm 就不再视它们为多余，这个坑即被**结构性消除**（DSH `0.2.0-rc.2` 实测，
+崩溃日志见 `%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*-host.log`）。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) —— 一次调用经过哪些模块

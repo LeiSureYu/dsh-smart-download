@@ -11,6 +11,33 @@
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-10-13
+
+**文档（安全）**：把 `COMPATIBILITY.md` 里「桌面版必须用桌面版自带 CLI 安装」的警告**写实** ——
+原来只说「外部 CLI 会被拒绝」，听起来像「顶多装不上」，实际后果是**把 DSH 弄崩**：profile 的
+`package.json` 不声明 9 个 `@deepseek-ai/dsh-*` 核心包，它们在 pnpm 眼里是「多余的包」，
+一次手跑 `pnpm install` 就会把它们 prune 掉，导致 `sessions` / `tools` 服务无人提供、
+几十个插件无法激活、DSH 启动即崩溃（且所有工具调用都不会返回结果）。
+`TROUBLESHOOTING.md` 新增完整条目：症状、根因、官方逃生口与手工恢复步骤。
+
+**Docs (safety)**: made the "install on desktop only through the bundled CLI" warning in
+`COMPATIBILITY.md` state the **real** consequence — it used to say "external CLI is rejected",
+which reads like "it just won't install". In fact it **bricks DSH**: the profile's `package.json`
+does not declare nine `@deepseek-ai/dsh-*` core packages, so pnpm treats them as extraneous and a
+single hand-run `pnpm install` prunes them; the `sessions` / `tools` services then have no provider,
+dozens of plugins cannot activate, and DSH fails at startup (with every tool call returning nothing).
+`TROUBLESHOOTING.md` gained the full entry: symptoms, root cause, the official escape hatch, and
+manual recovery.
+
+### 变更 / Changed
+
+- `COMPATIBILITY.md`：桌面版安装警告补上真实后果（DSH 崩溃 + 工具全部无响应）与指向排查手册的链接。
+- `TROUBLESHOOTING.md`：新增「在 desktop profile 里手跑 pnpm / npm install 后，DSH 启动即崩溃」，
+  含崩溃日志原文、四重保护为何被绕过、以及恢复用的 9 条 `link:` 声明。
+
+> 本条是**实测事故的复盘**（DSH `0.2.0-rc.2`，崩溃日志
+> `%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-2026-10-12T23-54-30-829Z-host.log`），不是推测。
+
 ## [1.4.2] - 2026-10-13
 
 **文档**：把三份面向用户的文档补齐到 1.4.x 的实际状态。`ARCHITECTURE.md` 的模块表此前**严重失真** ——

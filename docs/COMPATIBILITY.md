@@ -202,6 +202,13 @@ allowBuilds:
 > **桌面版（`desktop` profile）必须用桌面版自带的 CLI 安装**（`<安装目录>/resources/runtime/cli/bin/dsh.cmd`），
 > 或侧边栏的 Plugins 页面：这个 profile 由 Electron 应用独占管理，外部 CLI 会被拒绝。
 > 本插件在 `desktop` 上的工具注册与 `web` 完全一致（`platform: 'web'` 沿用，客户端清单不需要改）。
+>
+> ⚠️ **不要在这个 profile 的目录里手跑 `pnpm install` / `npm install`。** 不只是「会被拒绝」——
+> profile 的 `package.json` **不声明** DSH 的核心包（`@deepseek-ai/dsh-session`、`dsh-tools`、
+> `dsh-llm` 等 9 个），它们在 pnpm 眼里是「多余的包」，一次手跑 install 就会把它们 prune 掉。
+> 后果是 **DSH 启动即崩溃**（`N required plugin did not activate`，几十个插件在等
+> `sessions` / `tools`），且**所有工具调用都不会返回结果**。完整症状与恢复步骤见
+> [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#在-desktop-profile-里手跑-pnpm--npm-install-后dsH-启动即崩溃)。
 
 ### 客户端插件的服务依赖（1.4.0 起）
 

@@ -56,6 +56,13 @@ export declare function taskRecordFiles(taskId: string, session?: ProgressSessio
  */
 export declare function removeTaskRecords(taskId: string, session?: ProgressSession): string[];
 export declare class ProgressReporter {
+    /**
+     * 写盘调用集中在这个对象上。
+     *
+     * 生产代码从不替换它；单测替换成可记录并发数的实现，才能确定性地证明
+     * 「不同批次的覆盖写严格串行」，而不是靠大文件碰运气。
+     */
+    private readonly io;
     private readonly taskId;
     private label;
     /**
@@ -134,6 +141,8 @@ export declare class ProgressReporter {
     private scheduleFlush;
     /** 真正落盘（异步，不阻塞事件循环），保持记录顺序 */
     private writeNow;
+    /** 由本批最后一条进度记录生成轨道二的任务快照。 */
+    private toTaskFile;
     /**
      * 等待所有已排队的写入落盘。
      *

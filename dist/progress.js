@@ -201,6 +201,16 @@ function inferStateFromMessage(msg) {
     return 'running';
 }
 export class ProgressReporter {
+    /**
+     * 写盘调用集中在这个对象上。
+     *
+     * 生产代码从不替换它；单测替换成可记录并发数的实现，才能确定性地证明
+     * 「不同批次的覆盖写严格串行」，而不是靠大文件碰运气。
+     */
+    io = {
+        appendFile: fsp.appendFile,
+        writeFile: fsp.writeFile,
+    };
     taskId;
     label;
     /**
@@ -364,55 +374,65 @@ export class ProgressReporter {
     }
     /** 真正落盘（异步，不阻塞事件循环），保持记录顺序 */
     writeNow(batch) {
-        const jobs = [];
-        // 轨道一：JSONL append
-        if (this.taskProgressFile) {
-            // 一次拼接后单次 append：多条记录仍按原顺序写在同一文件里
-            const chunk = batch.map((rec) => JSON.stringify(rec) + '\n').join('');
-            const file = this.taskProgressFile;
-            jobs.push(fsp.appendFile(file, chunk, 'utf-8').catch(() => { }));
-        }
-        // 轨道二：JSON 覆盖写
-        if (this.downloadProgressFile) {
-            // 轨道二是整体覆盖写，只有最后一条有意义
-            const rec = batch[batch.length - 1];
-            const effectiveState = rec.state ?? 'running';
-            const status = effectiveState === 'done'
-                ? 'completed'
-                : effectiveState === 'failed'
-                    ? 'failed'
-                    : effectiveState === 'cancelled'
-                        ? 'cancelled'
-                        : 'running';
-            const task = {
-                id: this.taskId,
-                name: this.label ?? this.taskId,
-                status,
-                progress: rec.pct / 100,
-                updatedAt: Date.now(),
-            };
-            if (rec.spd)
-                task.speed = rec.spd;
-            if (rec.eta)
-                task.eta = rec.eta;
-            // 与轨道一同理：缺省不写，老读取端拿到的 JSON 与 1.2.0 逐字节相同
-            if (this.batch)
-                task.batch = this.batch;
-            // 输出路径 / 尺寸 / mtime 同样从本批最后一条记录透传，两条轨道保持一致：
-            // 任一轨道单独存活时（会话缺失、或只写了轨道二）都还能定位到产物。
-            if (rec.outPath)
-                task.outPath = rec.outPath;
-            if (rec.size !== undefined)
-                task.size = rec.size;
-            if (rec.fileMtimeMs !== undefined)
-                task.fileMtimeMs = rec.fileMtimeMs;
-            const file = this.downloadProgressFile;
-            jobs.push(fsp.writeFile(file, JSON.stringify(task, null, 2), 'utf-8').catch(() => { }));
-        }
-        const done = Promise.all(jobs).then(() => undefined, () => undefined);
-        // 串行化：后一次写入必须发生在前一次之后，避免 append 顺序错乱
-        this.pendingWrite = this.pendingWrite.then(() => done);
+        // 先把本批要写的内容全部算好，再排进串行链。
+        // 关键：appendFile / writeFile 的调用本身就会立刻发起 I/O；若在
+        // 这里直接调用、只用 pendingWrite 串「等待」而不串「发起」，两批写入仍会
+        // 并发打开同一个文件。轨道二的覆盖写在 Linux 上会因此出现「新 JSON + 旧
+        // JSON 的尾巴」这种半截内容（CI 实测：Unexpected non-whitespace character
+        // after JSON）。所以写入动作必须整体放进 .then() 里，一次只跑一批。
+        const chunk = this.taskProgressFile === null
+            ? null
+            : batch.map((rec) => JSON.stringify(rec) + '\n').join('');
+        const task = this.downloadProgressFile === null ? null : this.toTaskFile(batch[batch.length - 1]);
+        const taskProgressFile = this.taskProgressFile;
+        const downloadProgressFile = this.downloadProgressFile;
+        this.pendingWrite = this.pendingWrite.then(async () => {
+            const jobs = [];
+            // 轨道一：JSONL append（一次拼接后单次 append，多条记录仍按原顺序）
+            if (taskProgressFile !== null && chunk !== null) {
+                jobs.push(this.io.appendFile(taskProgressFile, chunk, 'utf-8').catch(() => { }));
+            }
+            // 轨道二：JSON 覆盖写（只有最后一条有意义）
+            if (downloadProgressFile !== null && task !== null) {
+                jobs.push(this.io.writeFile(downloadProgressFile, JSON.stringify(task, null, 2), 'utf-8').catch(() => { }));
+            }
+            await Promise.all(jobs);
+        });
         return this.pendingWrite;
+    }
+    /** 由本批最后一条进度记录生成轨道二的任务快照。 */
+    toTaskFile(rec) {
+        const effectiveState = rec.state ?? 'running';
+        const status = effectiveState === 'done'
+            ? 'completed'
+            : effectiveState === 'failed'
+                ? 'failed'
+                : effectiveState === 'cancelled'
+                    ? 'cancelled'
+                    : 'running';
+        const task = {
+            id: this.taskId,
+            name: this.label ?? this.taskId,
+            status,
+            progress: rec.pct / 100,
+            updatedAt: Date.now(),
+        };
+        if (rec.spd)
+            task.speed = rec.spd;
+        if (rec.eta)
+            task.eta = rec.eta;
+        // 与轨道一同理：缺省不写，老读取端拿到的 JSON 与 1.2.0 逐字节相同
+        if (this.batch)
+            task.batch = this.batch;
+        // 输出路径 / 尺寸 / mtime 同样从本批最后一条记录透传，两条轨道保持一致：
+        // 任一轨道单独存活时（会话缺失、或只写了轨道二）都还能定位到产物。
+        if (rec.outPath)
+            task.outPath = rec.outPath;
+        if (rec.size !== undefined)
+            task.size = rec.size;
+        if (rec.fileMtimeMs !== undefined)
+            task.fileMtimeMs = rec.fileMtimeMs;
+        return task;
     }
     /**
      * 等待所有已排队的写入落盘。

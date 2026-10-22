@@ -1025,7 +1025,7 @@ default" has a positive assertion — see the contract table above).
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **599 cases (596 pass / 3 skip / 0 fail)**, **99.23%** line / **91.83%** branch / **97.33%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
+Current baseline: **600 cases (597 pass / 3 skip / 0 fail)**, **99.23%** line / **91.87%** branch / **97.70%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets: measured on the same tree, CRLF reports **99.36%** line coverage while LF reports
 **99.40%**, and the uncovered line numbers shift as well (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).

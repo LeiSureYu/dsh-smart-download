@@ -51,12 +51,20 @@ for aria2 / curl and restricts curl redirects to HTTP(S).
 - 进度上报新增 `setTarget()`，在探测拿到真实文件名后修正面板中的文件名与
   `outPath`，避免进度记录指向一个从未落盘的临时名。
 
+### 修复 / Fixed
+
+- 进度文件的覆盖写改为真正串行：此前只串行化了「等待」而没有串行化「发起」，
+  两批刷新可能同时以截断模式打开同一个 `<taskId>.json`，在 Linux 上留下
+  「新 JSON + 旧 JSON 尾巴」的半截文件，读取端会报
+  `Unexpected non-whitespace character after JSON`。现在一次只允许一批写入启动。
+
 ### 测试 / Tests
 
 - 新增 `test/disk.test.ts`，并补充 checksum、`ifExists`、`Content-Disposition`、
   `PATH` aria2、重试参数与 output schema 的用例。
-- 基线：**599 例（596 通过 / 3 跳过 / 0 失败）**；行覆盖 **99.23%** / 分支
-  **91.83%** / 函数 **97.33%**。
+- 新增进度覆盖写串行化的回归用例（注入可计数的写盘实现，断言同时活跃写入数为 1）。
+- 基线：**600 例（597 通过 / 3 跳过 / 0 失败）**；行覆盖 **99.23%** / 分支
+  **91.87%** / 函数 **97.70%**。
 
 ## [1.4.6] - 2026-10-13
 

@@ -102,6 +102,66 @@ test('pct 变化时正常追加', async () => {
   assert.deepEqual(lines.map((l) => l.pct), [10, 20, 30])
 })
 
+/**
+ * 回归：不同批次的覆盖写必须严格串行（1.5.0 CI 修复）。
+ *
+ * 旧实现先调用 `fsp.writeFile()` 再把它挂到 `pendingWrite` 上，只串了「等待」
+ * 没串「发起」。Linux CI 上两批写入会同时以 O_TRUNC 打开同一个 JSON，留下
+ * 「新内容 + 旧内容尾巴」，读取端报 `Unexpected non-whitespace character
+ * after JSON`。
+ *
+ * 这里把 writeFile 包一层：每次写入延迟 25ms 再落盘，并记录同时活跃的写入数。
+ * 旧实现会看到 2，修复后必须是 1；同时最终文件仍须可解析且是后一次的状态。
+ */
+test('并发刷新时轨道二覆盖写严格串行，最终 JSON 完整', async () => {
+  const r = new ProgressReporter('task-serial-write')
+  const io = (
+    r as unknown as {
+      io?: {
+        writeFile: (
+          file: string,
+          data: string,
+          encoding: BufferEncoding,
+        ) => Promise<void>
+      }
+    }
+  ).io
+  assert.ok(io, '写盘调用必须集中可注入；旧实现直接调 fsp，无法证明串行')
+  const originalWriteFile = io.writeFile.bind(io)
+  let active = 0
+  let maxActive = 0
+  let writes = 0
+
+  io.writeFile = async (file: string, data: string, encoding: BufferEncoding): Promise<void> => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    writes += 1
+    try {
+      // 给另一批写入足够的窗口：若没有串行化，它一定会在这里并发进来。
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      await originalWriteFile(file, data, encoding)
+    } finally {
+      active -= 1
+    }
+  }
+
+  r.report(10, '下载中', '1MB/s')
+  // 让第一批真正进入 writeFile，再触发第二批，避免同 tick 合并掩盖问题。
+  await new Promise((resolve) => setImmediate(resolve))
+  r.done()
+  await r.awaitFlush()
+
+  assert.equal(writes, 2, '两次刷新应各写一次轨道二')
+  assert.equal(maxActive, 1, `覆盖写必须串行，实际同时活跃 ${maxActive} 个`)
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-serial-write.json'), 'utf-8')) as {
+    status: string
+    progress: number
+  }
+  assert.equal(task.status, 'completed', '最终文件必须是后一次写入的完整内容')
+  assert.equal(task.progress, 1)
+})
+
 test('终态穿透去重：pct 相同但 state 变为 done 时仍落盘', async () => {
   const r = new ProgressReporter('task-4')
   r.report(100, '下载中') // 进度已到 100，但尚未宣告完成

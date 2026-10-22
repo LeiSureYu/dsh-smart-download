@@ -1012,7 +1012,7 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**599 例用例（596 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.23%** / 分支 **91.83%** / 函数 **97.33%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
+当前基线：**600 例用例（597 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.23%** / 分支 **91.87%** / 函数 **97.70%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字，未覆盖行号也会整体漂移（1.4.x 的对照数据是 CRLF **99.36%** / LF **99.40%**，见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
 3 个跳过用例是平台限制（只在 Linux / 特定文件系统复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。

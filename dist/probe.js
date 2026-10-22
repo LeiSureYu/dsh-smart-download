@@ -77,7 +77,7 @@ function notSupported(reason) {
     return { supportsMultiThread: false, reason };
 }
 /** 将判定结果映射为 ProbeResult */
-function toProbeResult(decision, contentType, acceptRanges, etag, lastModified, contentEncoding) {
+function toProbeResult(decision, contentType, acceptRanges, etag, lastModified, contentEncoding, contentDisposition) {
     return {
         supportsMultiThread: decision.supported,
         contentLength: decision.size,
@@ -87,6 +87,7 @@ function toProbeResult(decision, contentType, acceptRanges, etag, lastModified, 
         etag,
         lastModified,
         contentEncoding,
+        contentDisposition,
     };
 }
 /**
@@ -134,6 +135,7 @@ export async function probeUrl(url, externalSignal, options = {}) {
     const headEtag = head?.headers.get('etag') ?? undefined;
     const headLastModified = head?.headers.get('last-modified') ?? undefined;
     const headContentEncoding = head ? readContentEncoding(head) : undefined;
+    const headContentDisposition = head?.headers.get('content-disposition') ?? undefined;
     // 不消费响应体，主动取消以释放连接。
     // HEAD 通常没有 body（Node 的 undici 会给出 null），但现实里有服务器/代理
     // 在 HEAD 上返回 body —— 不取消就会一直占着这条连接。与下面 Range GET
@@ -165,6 +167,9 @@ export async function probeUrl(url, externalSignal, options = {}) {
         const etag = get.headers.get('etag') ?? headEtag;
         const lastModified = get.headers.get('last-modified') ?? headLastModified;
         const contentEncoding = readContentEncoding(get) ?? headContentEncoding;
+        // 与 ETag 同理：Range GET 才是真正会被下载的那次请求，它的
+        // Content-Disposition 优先；缺失时回落到 HEAD。
+        const contentDisposition = get.headers.get('content-disposition') ?? headContentDisposition;
         // 不消费响应体，主动取消以释放连接
         get.body?.cancel().catch(() => { });
         const decision = evaluateRangeSupport({
@@ -174,7 +179,7 @@ export async function probeUrl(url, externalSignal, options = {}) {
             contentRange,
             threshold,
         });
-        return toProbeResult(decision, contentType ?? undefined, acceptRanges ?? undefined, etag, lastModified, contentEncoding);
+        return toProbeResult(decision, contentType ?? undefined, acceptRanges ?? undefined, etag, lastModified, contentEncoding, contentDisposition);
     }
     // 3. HEAD 信息足够，直接判定
     //
@@ -195,5 +200,5 @@ export async function probeUrl(url, externalSignal, options = {}) {
         contentRange: head.headers.get('content-range'),
         threshold,
     });
-    return toProbeResult(decision, headContentType, headAcceptRanges ?? undefined, headEtag, headLastModified, headContentEncoding);
+    return toProbeResult(decision, headContentType, headAcceptRanges ?? undefined, headEtag, headLastModified, headContentEncoding, headContentDisposition);
 }

@@ -13,6 +13,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import * as path from 'node:path'
+import { existsSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { probeUrl } from './probe.js'
 import {
   downloadWithAria2,
@@ -28,18 +30,37 @@ import { resolveAutoMirror } from './auto-mirror.js'
 import type { MirrorProbeOutcome } from './auto-mirror.js'
 import { buildRequestHeaders } from './headers.js'
 import {
+  CHECKSUM_LABELS,
   HASH_VERIFIED_MESSAGE,
+  checksumVerifiedMessage,
   describeHashFailure,
+  hashFile,
+  normalizeChecksum,
   normalizeSha256,
   sha256File,
+  verifyChecksum,
   verifySha256,
 } from './hash.js'
-import { checkDownloadUrl, deriveFilenameFromUrl } from './url.js'
+import type { ChecksumSpec } from './hash.js'
+import {
+  checkDownloadUrl,
+  deriveFilenameFromUrl,
+  FALLBACK_FILENAME,
+  filenameFromContentDisposition,
+  sanitizeFilename,
+  withConflictSuffix,
+} from './url.js'
+import { checkDiskSpace, describeInsufficientSpace } from './disk.js'
 import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js'
 import { recordThroughput } from './throughput-cache.js'
-import { describeMismatch, describeSkip, verifySize } from './verify.js'
+import {
+  describeMismatch,
+  describeSkip,
+  normalizeContentEncoding,
+  verifySize,
+} from './verify.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import type {
   BatchDownloadResult,
@@ -47,6 +68,7 @@ import type {
   DownloadMethod,
   DownloadStatusArgs,
   DownloadTarget,
+  IfExistsPolicy,
   RequestHeaders,
   SmartDownloadArgs,
   SmartDownloadResult,
@@ -132,8 +154,27 @@ function makeBatchId(): string {
  * 正是 1.0.0 修过的坑，批量不能把它带回来）。
  */
 const BATCH_LABEL_OK = '[ok]'
+const BATCH_LABEL_SKIPPED = '[skipped]'
 const BATCH_LABEL_FAILED = '[failed]'
 const BATCH_LABEL_CANCELLED = '[cancelled]'
+
+/**
+ * 摘要校验通过时的模型可见标记。
+ *
+ * `sha256` 是 1.2.0 的旧字段，保持原来的 `(SHA-256 verified)` 逐字不变；
+ * 通用 `checksum` 则按实际算法输出，避免把 MD5 说成 SHA-256。
+ */
+function verifiedNote(item: {
+  sha256?: string
+  checksum?: string
+  checksumAlgorithm?: string
+}): string {
+  if (item.sha256) return ' (SHA-256 verified)'
+  if (!item.checksum) return ''
+  const algorithm = item.checksumAlgorithm as keyof typeof CHECKSUM_LABELS | undefined
+  const label = algorithm ? CHECKSUM_LABELS[algorithm] : 'checksum'
+  return ` (${label} verified)`
+}
 
 /**
  * 批量结果的模型可见文案：先给一行汇总，再逐条列出。
@@ -147,7 +188,8 @@ function renderBatch(value: BatchDownloadResult): string {
     if (item.success) {
       const via = item.method ? ` via ${item.method}` : ''
       const path = item.path ? ` -> ${item.path}` : ''
-      return `${BATCH_LABEL_OK} ${item.url}${via}${path}`
+      const label = item.skipped === true ? BATCH_LABEL_SKIPPED : BATCH_LABEL_OK
+      return `${label} ${item.url}${via}${path}${verifiedNote(item)}`
     }
     const label = item.cancelled === true ? BATCH_LABEL_CANCELLED : BATCH_LABEL_FAILED
     return `${label} ${item.url}${item.error ? `: ${item.error}` : ''}`
@@ -200,6 +242,17 @@ export function apply(ctx: Context): void {
                 type: 'string',
                 description: "Optional expected SHA-256 for this entry's bytes",
               },
+              checksum: {
+                type: 'string',
+                description:
+                  "Optional expected checksum for this entry's bytes: md5/sha1/sha256/sha512, e.g. \"sha512:<hex>\" or a bare hex digest (the algorithm is inferred from its length). Mutually exclusive with sha256.",
+              },
+              ifExists: {
+                type: 'string',
+                enum: ['overwrite', 'skip', 'rename'],
+                description:
+                  'What to do when this entry\'s output file already exists. Defaults to the call-level ifExists (or "overwrite").',
+              },
             },
           },
         },
@@ -226,6 +279,17 @@ export function apply(ctx: Context): void {
           type: 'string',
           description:
             'Optional expected SHA-256 of the file, e.g. the checksum printed in the project\'s official documentation. Accepts bare hex, "sha256:<hex>", "SHA256(<hex>)" and SRI "sha256-<base64>". The downloaded bytes are hashed and compared; a mismatch fails the download. A byte-length check alone cannot detect a payload that is the right size but the wrong content.',
+        },
+        checksum: {
+          type: 'string',
+          description:
+            'Optional expected checksum of the file, for projects that publish MD5 / SHA-1 / SHA-512 instead of SHA-256. Accepts "md5:<hex>", "sha1:<hex>", "sha256:<hex>", "sha512:<hex>", or a bare hex digest whose algorithm is inferred from its length (32=md5, 40=sha1, 64=sha256, 128=sha512). Mutually exclusive with sha256. A mismatch fails the download and reports both digests.',
+        },
+        ifExists: {
+          type: 'string',
+          enum: ['overwrite', 'skip', 'rename'],
+          description:
+            'What to do when the output file already exists: "overwrite" (default, replaces it), "skip" (download nothing, return skipped: true; an existing file is still checksum-verified when a checksum was given), or "rename" (save as "name (1).ext" without touching the existing file). Resume is disabled for rename, since continuing into a different filename is never correct.',
         },
         userAgent: {
           type: 'string',
@@ -263,6 +327,10 @@ export function apply(ctx: Context): void {
                 reason: { type: 'string' },
                 verifySkipped: { type: 'string' },
                 sha256: { type: 'string' },
+                checksum: { type: 'string' },
+                checksumAlgorithm: { type: 'string' },
+                skipped: { type: 'boolean' },
+                diskCheckSkipped: { type: 'string' },
                 requestedUrl: { type: 'string' },
                 mirrored: { type: 'boolean' },
                 mirror: { type: 'string' },
@@ -295,6 +363,10 @@ export function apply(ctx: Context): void {
                       reason: { type: 'string' },
                       verifySkipped: { type: 'string' },
                       sha256: { type: 'string' },
+                      checksum: { type: 'string' },
+                      checksumAlgorithm: { type: 'string' },
+                      skipped: { type: 'boolean' },
+                      diskCheckSkipped: { type: 'string' },
                       requestedUrl: { type: 'string' },
                       mirrored: { type: 'boolean' },
                       mirror: { type: 'string' },
@@ -313,13 +385,19 @@ export function apply(ctx: Context): void {
             text:
               'results' in value
                 ? renderBatch(value)
-                : `Download ${value.success ? 'succeeded' : 'failed'} via ${value.method}${
-                    value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''
-                  }${value.mirrored ? ' (via mirror)' : ''}${
-                    value.verifySkipped ? ` (${value.verifySkipped})` : ''
-                  }${value.sha256 ? ' (SHA-256 verified)' : ''}${
-                    value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''
-                  }`,
+                : value.skipped === true
+                  ? `Download skipped (already exists): ${value.path}${verifiedNote(value)}${
+                      value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''
+                    }`
+                  : `Download ${value.success ? 'succeeded' : 'failed'}${
+                      value.method ? ` via ${value.method}` : ''
+                    }${
+                      value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''
+                    }${value.mirrored ? ' (via mirror)' : ''}${
+                      value.verifySkipped ? ` (${value.verifySkipped})` : ''
+                    }${verifiedNote(value)}${
+                      value.diskCheckSkipped ? ` (${value.diskCheckSkipped})` : ''
+                    }${value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''}`,
           },
         ],
       },
@@ -517,6 +595,8 @@ interface DownloadItem {
   url: string
   output?: string
   sha256?: string
+  checksum?: string
+  ifExists?: IfExistsPolicy
 }
 
 /**
@@ -538,6 +618,12 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
 
   // 0b. 期望摘要：不合法就地拒绝。等到下载完才发现「没法校验」，
   // 等于白下几百 MB 之后才告诉调用方参数写错了。
+  if (item.sha256 !== undefined && item.checksum !== undefined) {
+    throw new Error(
+      '拒绝下载：sha256 与 checksum 只能二选一 —— 前者专用于 SHA-256，后者可指定任意受支持算法；' +
+        '两个都给会让「该信哪个摘要」有两种答案',
+    )
+  }
   let expectedSha256: string | undefined
   if (item.sha256 !== undefined) {
     const normalized = normalizeSha256(item.sha256)
@@ -549,8 +635,28 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
     }
     expectedSha256 = normalized
   }
+  let expectedChecksum: ChecksumSpec | undefined
+  if (item.checksum !== undefined) {
+    const normalized = normalizeChecksum(item.checksum)
+    if (!normalized) {
+      throw new Error(
+        `拒绝下载：checksum 不是合法的摘要（${JSON.stringify(item.checksum)}）` +
+          '；接受裸十六进制（32=md5、40=sha1、64=sha256、128=sha512）、' +
+          'md5:/sha1:/sha256:/sha512: 前缀，或 sha256-/sha512- 的 SRI 写法',
+      )
+    }
+    expectedChecksum = normalized
+  }
 
-  // 0c. 请求头：UA / Referer / 自定义合成一份，探测与下载共用同一份。
+  // 0c. 同名文件策略：三个值之外一律拒绝，避免把拼错的值静默当成 overwrite。
+  const ifExists: IfExistsPolicy = item.ifExists ?? 'overwrite'
+  if (ifExists !== 'overwrite' && ifExists !== 'skip' && ifExists !== 'rename') {
+    throw new Error(
+      `拒绝下载：ifExists 必须是 overwrite / skip / rename 之一（收到 ${JSON.stringify(item.ifExists)}）`,
+    )
+  }
+
+  // 0d. 请求头：UA / Referer / 自定义合成一份，探测与下载共用同一份。
   // 两边不一致会让探测结论与真实下载错位（见 src/headers.ts 文件头）。
   const headerResult = buildRequestHeaders({
     userAgent: ctx.userAgent,
@@ -570,7 +676,9 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   let mirrorPrefix: string | undefined
   let mirrorSkipped: string | undefined
 
-  // 输出文件名始终按原始 URL 推导，避免把镜像域名带进文件名
+  // 输出文件名始终按原始 URL 推导，避免把镜像域名带进文件名。
+  // 探测前只能按 URL 猜一个临时名；真实文件名可能只在 Content-Disposition 里，
+  // 因此探测完成后会重新确定最终路径（见下方 2c）。
   //
   // 1.4.0：这里就把路径**解析成绝对路径**，后续所有消费点（aria2 的 `-o`、
   // 建目录、续传指纹、校验、以及记录进进度文件的 outPath）共用同一个字符串。
@@ -578,11 +686,17 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   // 相对路径的含义取决于 Host 进程的 cwd —— 完成时再 resolve 一次，一旦 cwd
   // 变了就会指向另一个文件，而下载管理器会拿这个路径去删除。解析一次、复用，
   // 是这个风险唯一的收口点。`resolve` 对已经是绝对路径的输入是幂等的。
-  const outputPath = path.resolve(item.output ?? deriveFilenameFromUrl(item.url))
+  const provisionalPath = path.resolve(item.output ?? deriveFilenameFromUrl(item.url))
   const taskId = makeTaskId()
   // 会话上下文（轨道一的落点）由**调用**构造一次并放在 ctx 里：每一批的条目
   // 共用同一份，条目之间不会出现「同一批写了两个会话目录」的分叉。
-  const reporter = new ProgressReporter(taskId, outputPath, ctx.session, ctx.batchId, outputPath)
+  const reporter = new ProgressReporter(
+    taskId,
+    provisionalPath,
+    ctx.session,
+    ctx.batchId,
+    provisionalPath,
+  )
 
   // 单条目的超时信号：与整批信号合并（AbortSignal.any），因此超时只终止这一条，
   // 同批其它条目照常跑。为什么不用 Promise.race：子进程必须**真的**被结束
@@ -674,6 +788,44 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   const sizeField =
     probe.contentLength === undefined ? {} : { size: probe.contentLength }
 
+  // 2c. 最终落盘路径：探测之后才可能知道真实文件名（Content-Disposition）。
+  //
+  // 显式 output 永远优先；否则先看服务器给的文件名，再回落到 URL 推导。
+  // Content-Disposition 完全由服务器控制，必须先净化成单个路径段 ——
+  // 否则 `filename="../../x"` 会把文件写到输出目录之外。
+  let outputPath = provisionalPath
+  if (item.output !== undefined) {
+    outputPath = path.resolve(item.output)
+  } else {
+    const urlName = deriveFilenameFromUrl(item.url)
+    const headerName = filenameFromContentDisposition(probe.contentDisposition)
+    const safeHeaderName = headerName === undefined ? undefined : sanitizeFilename(headerName)
+    const chosen =
+      safeHeaderName && safeHeaderName !== FALLBACK_FILENAME
+        ? safeHeaderName
+        : urlName !== FALLBACK_FILENAME
+          ? urlName
+          : (safeHeaderName ?? urlName)
+    outputPath = path.resolve(chosen)
+  }
+
+  // rename：从 1 开始找第一个不存在的候选名，绝不覆盖已有文件。
+  // 同时禁用续传：半包属于另一个文件名，接着写只会拼出错误内容。
+  if (ifExists === 'rename') {
+    const dir = path.dirname(outputPath)
+    const name = path.basename(outputPath)
+    let index = 1
+    while (existsSync(outputPath)) {
+      outputPath = path.join(dir, withConflictSuffix(name, index))
+      index += 1
+    }
+  }
+
+  // 探测期间 reporter 用的是临时名；这里修正为最终名与最终绝对路径，
+  // 否则面板 / download_status 会显示一个从未落盘的文件名。
+  // label 与 1.4.x 一样保留完整路径（进度面板与既有测试都按它核对产物归属）。
+  reporter.setTarget(outputPath, outputPath)
+
   // 完整性校验：下载工具退出码 0 只代表「它认为完成了」，不代表字节数对
   // （服务器提前断开、镜像返回 200 的错误页、磁盘写满…都不会有非零退出码）。
   // 校验失败一律抛错，并且**不**清除旁车指纹 —— 保留它，下次才有得比。
@@ -687,9 +839,13 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   // 返回 `verifySkipped` 是「没有做字节数校验」的说明文案（没有跳过时为
   // 空串）：0.9.0 之前跳过与通过共用 `{ kind: 'ok' }`，调用方无从区分，
   // 于是「压根没测」的下载和「测过且一致」的下载长得一模一样。
-  const assertIntegrity = async (): Promise<{
+  const assertIntegrity = async (
+    completionPrefix = '下载完成',
+  ): Promise<{
     verifySkipped: string
     sha256?: string
+    checksum?: string
+    checksumAlgorithm?: string
   }> => {
     const outcome = verifySize(
       localFileSize(outputPath),
@@ -718,13 +874,31 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
       }
       // 内容已逐字节核对：终态写明「已校验」，并且**不**再报「未做字节数
       // 校验」—— 长度那层即便跳过，内容也已经验过了，再报只会误导。
-      reporter.done(`下载完成（${HASH_VERIFIED_MESSAGE}）`)
+      reporter.done(`${completionPrefix}（${HASH_VERIFIED_MESSAGE}）`)
       await reporter.awaitFlush()
       return { verifySkipped: '', sha256: hashOutcome.digest }
     }
 
+    if (expectedChecksum !== undefined) {
+      const actual = await hashFile(outputPath, expectedChecksum.algorithm)
+      const hashOutcome = verifyChecksum(expectedChecksum, actual)
+      if (hashOutcome.kind !== 'ok') {
+        const message = describeHashFailure(hashOutcome)
+        reporter.fail(message)
+        await reporter.awaitFlush()
+        throw new IntegrityError(message)
+      }
+      reporter.done(`${completionPrefix}（${checksumVerifiedMessage(expectedChecksum)}）`)
+      await reporter.awaitFlush()
+      return {
+        verifySkipped: '',
+        checksum: hashOutcome.digest,
+        checksumAlgorithm: expectedChecksum.algorithm,
+      }
+    }
+
     if (note) {
-      reporter.done(`下载完成（${note}）`)
+      reporter.done(`${completionPrefix}（${note}）`)
       await reporter.awaitFlush()
     }
     return { verifySkipped: note }
@@ -736,7 +910,12 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
     method: DownloadMethod,
     fellback: boolean,
     reason: string,
-    integrity: { verifySkipped: string; sha256?: string },
+    integrity: {
+      verifySkipped: string
+      sha256?: string
+      checksum?: string
+      checksumAlgorithm?: string
+    },
   ): SmartDownloadResult => ({
     requestedUrl,
     mirrored,
@@ -750,14 +929,70 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
     reason,
     ...(integrity.verifySkipped ? { verifySkipped: integrity.verifySkipped } : {}),
     ...(integrity.sha256 ? { sha256: integrity.sha256 } : {}),
+    ...(integrity.checksum ? { checksum: integrity.checksum } : {}),
+    ...(integrity.checksumAlgorithm
+      ? { checksumAlgorithm: integrity.checksumAlgorithm }
+      : {}),
+    ...(diskCheckSkipped ? { diskCheckSkipped } : {}),
   })
+
+  // 3. ifExists=skip：目标已存在时不再发下载请求。
+  //
+  // 有摘要时仍然校验已有文件 —— 「跳过下载」不等于「放弃验证」。校验失败
+  // 必须抛错并保留原文件，不能把一个坏文件报成 skipped 成功。
+  if (ifExists === 'skip' && existsSync(outputPath)) {
+    const integrity =
+      expectedSha256 !== undefined || expectedChecksum !== undefined
+        ? await assertIntegrity('文件已存在（已跳过下载）')
+        : { verifySkipped: '' }
+    if (expectedSha256 === undefined && expectedChecksum === undefined) {
+      reporter.done('下载跳过（文件已存在）')
+      await reporter.awaitFlush()
+    }
+    return {
+      requestedUrl,
+      mirrored,
+      ...(mirrorPrefix ? { mirror: mirrorPrefix } : {}),
+      ...(mirrorSkipped ? { mirrorSkipped } : {}),
+      success: true,
+      path: outputPath,
+      ...sizeField,
+      fellback: false,
+      skipped: true,
+      ...(integrity.verifySkipped ? { verifySkipped: integrity.verifySkipped } : {}),
+      ...(integrity.sha256 ? { sha256: integrity.sha256 } : {}),
+      ...(integrity.checksum ? { checksum: integrity.checksum } : {}),
+      ...(integrity.checksumAlgorithm
+        ? { checksumAlgorithm: integrity.checksumAlgorithm }
+        : {}),
+    }
+  }
+
+  // 4. 磁盘空间预检：大小已知且响应未被压缩时才有意义（压缩后长度与落盘
+  // 字节数不可比）。statfs 不可用只记录原因，不阻断下载。
+  let diskCheckSkipped: string | undefined
+  if (probe.contentLength !== undefined && normalizeContentEncoding(probe.contentEncoding) === undefined) {
+    await mkdir(path.dirname(outputPath), { recursive: true })
+    const disk = await checkDiskSpace(path.dirname(outputPath), probe.contentLength)
+    if (disk.checked && !disk.ok) {
+      const message = describeInsufficientSpace(disk.free, disk.required)
+      reporter.fail(message)
+      await reporter.awaitFlush()
+      throw new Error(message)
+    }
+    if (!disk.checked) diskCheckSkipped = disk.reason
+  }
 
   // 是否启用断点续传（0.6.0 起前置一层安全校验）。
   // 仅凭「服务器支持 Range」就续传是不够的：curl -C - 与 aria2 -c 都只看
   // 本地文件长度，实测在「远端变小」「等长但内容变了」两种场景下都是退出码
   // 0 而文件是错的。planResume() 会比对远端长度与 ETag / Last-Modified，
   // 无法证实同源时删掉本地半包全量重下（详见 src/resume.ts）。
-  const resumePlan = planResume(outputPath, probe, probe.supportsMultiThread)
+  const resumePlan = planResume(
+    outputPath,
+    probe,
+    probe.supportsMultiThread && ifExists !== 'rename',
+  )
   const resume = resumePlan.resume
   if (resumePlan.discarded) {
     reporter.report(0, resumePlan.reason)
@@ -938,8 +1173,20 @@ function resolveTargets(
   if (!hasTargets) {
     return {
       kind: 'single',
-      item: { url: args.url as string, output: args.output, sha256: args.sha256 },
+      item: {
+        url: args.url as string,
+        output: args.output,
+        sha256: args.sha256,
+        checksum: args.checksum,
+        ifExists: args.ifExists,
+      },
     }
+  }
+  if (args.checksum !== undefined) {
+    throw new Error(
+      '拒绝下载：checksum 是单条目参数，不能与 targets 一起给；' +
+        '请把摘要写进对应条目（targets[i].checksum），避免「这一批共用哪个摘要」的歧义',
+    )
   }
   const targets = args.targets as DownloadTarget[]
   if (targets.length === 0) {
@@ -951,7 +1198,13 @@ function resolveTargets(
         '（进度读取端一次最多读这么多，再多就会「下过了但查不到」）。请拆成多批调用',
     )
   }
-  return { kind: 'batch', targets }
+  return {
+    kind: 'batch',
+    targets: targets.map((target) => ({
+      ...target,
+      ifExists: target.ifExists ?? args.ifExists,
+    })),
+  }
 }
 
 /**
@@ -1087,15 +1340,21 @@ function targetOutputPath(target: DownloadItem): string {
 function toItemResult(target: DownloadItem, value: SmartDownloadResult): BatchItemResult {
   return {
     url: target.url,
-    output: targetOutputPath(target),
+    // 最终路径可能来自 Content-Disposition / rename，不能再用入参重新推导，
+    // 否则批量结果的 output 会指向一个从未落盘的文件。
+    output: value.path,
     success: true,
-    method: value.method,
+    ...(value.method ? { method: value.method } : {}),
     path: value.path,
     ...(value.size !== undefined ? { size: value.size } : {}),
     ...(value.fellback ? { fellback: value.fellback } : {}),
     ...(value.reason ? { reason: value.reason } : {}),
     ...(value.verifySkipped ? { verifySkipped: value.verifySkipped } : {}),
     ...(value.sha256 ? { sha256: value.sha256 } : {}),
+    ...(value.checksum ? { checksum: value.checksum } : {}),
+    ...(value.checksumAlgorithm ? { checksumAlgorithm: value.checksumAlgorithm } : {}),
+    ...(value.skipped ? { skipped: value.skipped } : {}),
+    ...(value.diskCheckSkipped ? { diskCheckSkipped: value.diskCheckSkipped } : {}),
     ...(value.requestedUrl ? { requestedUrl: value.requestedUrl } : {}),
     ...(value.mirrored ? { mirrored: value.mirrored } : {}),
     ...(value.mirror ? { mirror: value.mirror } : {}),

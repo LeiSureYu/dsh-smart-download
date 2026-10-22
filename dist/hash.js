@@ -19,10 +19,72 @@
  */
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-/** 本插件支持的摘要算法（固定 SHA-256，不接受调用方指定算法） */
+/** 默认摘要算法：sha256 简写与 SRI 走这一种 */
 export const HASH_ALGORITHM = 'sha256';
-/** SHA-256 摘要的十六进制长度 */
-const HEX_LENGTH = 64;
+/** 算法 → 十六进制摘要长度 */
+export const CHECKSUM_HEX_LENGTHS = Object.freeze({
+    md5: 32,
+    sha1: 40,
+    sha256: 64,
+    sha512: 128,
+});
+/** 算法 → 人类可读标签（用于文案，避免在用户面前出现 `sha1` 这种裸名） */
+export const CHECKSUM_LABELS = Object.freeze({
+    md5: 'MD5',
+    sha1: 'SHA-1',
+    sha256: 'SHA-256',
+    sha512: 'SHA-512',
+});
+/** 按十六进制长度识别裸摘要的算法 */
+function algorithmForHexLength(length) {
+    for (const [algorithm, expected] of Object.entries(CHECKSUM_HEX_LENGTHS)) {
+        if (expected === length)
+            return algorithm;
+    }
+    return null;
+}
+/**
+ * 把各种写法的摘要归一化成 `{ algorithm, digest }`。
+ *
+ * 支持：
+ *   - 裸十六进制：按长度识别 MD5(32) / SHA-1(40) / SHA-256(64) / SHA-512(128)；
+ *   - 带算法前缀：`sha512:<hex>` / `md5=<hex>` / `SHA1(<hex>)`；
+ *   - SRI：`sha256-<base64>` / `sha512-<base64>`。
+ *
+ * 裸摘要按长度识别是**唯一**不歧义的规则：四种长度互不相同。带前缀时仍然校验
+ * 长度与算法匹配，例如 `md5:<64位>` 会被拒绝，而不是悄悄按 SHA-256 算。
+ */
+export function normalizeChecksum(input) {
+    if (typeof input !== 'string')
+        return null;
+    const raw = input.trim();
+    if (!raw)
+        return null;
+    // SRI：<algorithm>-<base64>
+    const sri = /^(sha256|sha512)-([A-Za-z0-9+/]+={0,2})$/i.exec(raw);
+    if (sri) {
+        const algorithm = sri[1].toLowerCase();
+        const decoded = Buffer.from(sri[2], 'base64');
+        if (decoded.length !== CHECKSUM_HEX_LENGTHS[algorithm] / 2)
+            return null;
+        return { algorithm, digest: decoded.toString('hex') };
+    }
+    // 带算法前缀：sha512:xxx / md5=xxx / SHA1(xxx)
+    const prefixed = /^(md5|sha1|sha256|sha512)\s*[:=(]\s*(.*?)\s*\)?$/i.exec(raw);
+    if (prefixed) {
+        const algorithm = prefixed[1].toLowerCase();
+        const digest = prefixed[2];
+        if (digest.length !== CHECKSUM_HEX_LENGTHS[algorithm])
+            return null;
+        return /^[0-9a-f]+$/i.test(digest)
+            ? { algorithm, digest: digest.toLowerCase() }
+            : null;
+    }
+    if (!/^[0-9a-f]+$/i.test(raw))
+        return null;
+    const algorithm = algorithmForHexLength(raw.length);
+    return algorithm ? { algorithm, digest: raw.toLowerCase() } : null;
+}
 /**
  * 把官方文档里各种写法的 SHA-256 归一化成 64 位小写十六进制。
  *
@@ -35,27 +97,8 @@ const HEX_LENGTH = 64;
  * @returns 归一化后的 64 位小写十六进制；无法识别时返回 null
  */
 export function normalizeSha256(input) {
-    if (typeof input !== 'string')
-        return null;
-    const raw = input.trim();
-    if (!raw)
-        return null;
-    // SRI：sha256-<base64>，base64 解出来必须正好 32 字节
-    const sri = /^sha256-([A-Za-z0-9+/]+={0,2})$/i.exec(raw);
-    if (sri) {
-        const decoded = Buffer.from(sri[1], 'base64');
-        if (decoded.length !== 32)
-            return null;
-        return decoded.toString('hex');
-    }
-    // 带算法前缀：sha256:xxx / sha256=xxx / SHA256(xxx)
-    const stripped = raw
-        .replace(/^sha256\s*[:=(]\s*/i, '')
-        .replace(/\)\s*$/, '')
-        .trim();
-    return new RegExp(`^[0-9a-f]{${HEX_LENGTH}}$`, 'i').test(stripped)
-        ? stripped.toLowerCase()
-        : null;
+    const spec = normalizeChecksum(input);
+    return spec?.algorithm === 'sha256' ? spec.digest : null;
 }
 /**
  * 流式计算文件 SHA-256。
@@ -67,8 +110,21 @@ export function normalizeSha256(input) {
  * @returns 小写十六进制摘要；文件不存在 / 读不了时返回 null
  */
 export function sha256File(path) {
+    return hashFile(path, HASH_ALGORITHM);
+}
+/**
+ * 流式计算任意受支持算法的文件摘要。
+ *
+ * 与 `sha256File` 同一套实现：只把 `createHash` 的算法名参数化，避免两套流式
+ * 读取逻辑各自演化（其中一套漏了 error 处理就是「校验静默跳过」）。
+ *
+ * @param path 待校验文件路径
+ * @param algorithm 摘要算法，默认 sha256
+ * @returns 小写十六进制摘要；文件不存在 / 读不了时返回 null
+ */
+export function hashFile(path, algorithm = HASH_ALGORITHM) {
     return new Promise((resolve) => {
-        const hash = createHash(HASH_ALGORITHM);
+        const hash = createHash(algorithm);
         let settled = false;
         const finish = (value) => {
             if (settled)
@@ -89,11 +145,17 @@ export function sha256File(path) {
  * @param actual 实际算出的摘要；null 表示文件读不到
  */
 export function verifySha256(expected, actual) {
+    return verifyChecksum({ algorithm: 'sha256', digest: expected }, actual);
+}
+/**
+ * 纯函数：比较期望摘要与实际摘要（任意受支持算法）。
+ */
+export function verifyChecksum(expected, actual) {
     if (actual === null)
-        return { kind: 'unreadable' };
-    return actual === expected
+        return { kind: 'unreadable', algorithm: expected.algorithm };
+    return actual === expected.digest
         ? { kind: 'ok', digest: actual }
-        : { kind: 'mismatch', expected, actual };
+        : { kind: 'mismatch', expected: expected.digest, actual, algorithm: expected.algorithm };
 }
 /**
  * 文件读不到时的固定文案。
@@ -104,8 +166,17 @@ export function verifySha256(expected, actual) {
  * 为什么带「下一步」：这条路径意味着「下载器说成功了，但产物读不出来」，
  * 用户能做的只有「重跑一次」和「去看路径」两件事，必须写明。
  */
-export const HASH_UNREADABLE_MESSAGE = '下载完整性校验失败：无法读取落盘文件以计算 SHA-256\n' +
-    '下一步：确认输出路径与磁盘可读，然后重跑一次（产物与旁车指纹均已保留）';
+export function checksumUnreadableMessage(algorithm = HASH_ALGORITHM) {
+    return (`下载完整性校验失败：无法读取落盘文件以计算 ${CHECKSUM_LABELS[algorithm]}\n` +
+        '下一步：确认输出路径与磁盘可读，然后重跑一次（产物与旁车指纹均已保留）');
+}
+/**
+ * SHA-256 路径的固定文案。
+ *
+ * 保留这个常量而不是让所有调用点改用函数：`sha256` 是 1.2.0 起的公开入参，
+ * 它的错误文案已经被测试逐字锁定。函数版本只用于通用 `checksum` 的其它算法。
+ */
+export const HASH_UNREADABLE_MESSAGE = checksumUnreadableMessage(HASH_ALGORITHM);
 /**
  * 摘要不匹配时「下一步做什么」的固定文案。
  *
@@ -122,7 +193,8 @@ export const HASH_MISMATCH_NEXT_STEP = '下一步：产物、半包与旁车指�
  * 只有一个摘要，可逐行对比，也便于把整行复制去比对。
  */
 export function describeHashMismatch(outcome) {
-    return (`下载完整性校验失败：SHA-256 不匹配\n` +
+    const label = outcome.algorithm ? CHECKSUM_LABELS[outcome.algorithm] : 'SHA-256';
+    return (`下载完整性校验失败：${label} 不匹配\n` +
         `期望摘要：${outcome.expected}\n` +
         `实际摘要：${outcome.actual}\n` +
         HASH_MISMATCH_NEXT_STEP);
@@ -138,7 +210,15 @@ export function describeHashMismatch(outcome) {
  * 没有自己的分支。
  */
 export function describeHashFailure(outcome) {
-    return outcome.kind === 'unreadable' ? HASH_UNREADABLE_MESSAGE : describeHashMismatch(outcome);
+    return outcome.kind === 'unreadable'
+        ? outcome.algorithm
+            ? checksumUnreadableMessage(outcome.algorithm)
+            : HASH_UNREADABLE_MESSAGE
+        : describeHashMismatch(outcome);
 }
 /** 哈希校验通过时写进进度终态与工具返回的固定文案 */
 export const HASH_VERIFIED_MESSAGE = 'SHA-256 已校验';
+/** 任意算法校验通过时的固定文案 */
+export function checksumVerifiedMessage(spec) {
+    return `${CHECKSUM_LABELS[spec.algorithm]} 已校验`;
+}

@@ -174,6 +174,62 @@ test('label 写入两条轨道，供 UI 展示文件名', async () => {
   assert.equal(task.name, 'ubuntu-24.04.iso')
 })
 
+test('setTarget：探测后修正展示名与落盘路径，report 落到新路径', async () => {
+  const provisional = path.join(tmpRoot, 'provisional-name.bin')
+  const finalPath = path.join(tmpRoot, 'real-name.zip')
+  writeFileSync(finalPath, 'abc')
+
+  const r = new ProgressReporter('task-retarget', provisional, undefined, undefined, provisional)
+  r.report(0, '探测中…')
+  r.setTarget(finalPath, finalPath)
+  r.report(100, '下载完成', undefined, undefined, 'done')
+  await r.awaitFlush()
+
+  const lines = readJsonl(path.join(taskDir, 'task-retarget.jsonl'))
+  const last = lines[lines.length - 1]!
+  assert.equal(last.name, finalPath, '修正后 label 必须是最终路径')
+  assert.equal(last.outPath, finalPath, '修正后 outPath 必须是最终绝对路径')
+  assert.equal(last.size, 3, '终态记录应 stat 最终路径')
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-retarget.json'), 'utf-8'))
+  assert.equal(task.name, finalPath)
+  assert.equal(task.outPath, finalPath)
+  assert.equal(task.size, 3)
+})
+
+test('setTarget：清空去重键，内容相同也要写入修正后的第一条记录', async () => {
+  const provisional = path.join(tmpRoot, 'before.bin')
+  const finalPath = path.join(tmpRoot, 'after.bin')
+  const r = new ProgressReporter('task-retarget-dedup', provisional, undefined, undefined, provisional)
+  r.report(0, '探测中…')
+  await r.awaitFlush()
+
+  r.setTarget(finalPath, finalPath)
+  // 与上一条 pct / 文案 / 速度 / ETA 完全相同：没有清空 lastKey 就会被吞掉
+  r.report(0, '探测中…')
+  await r.awaitFlush()
+
+  const lines = readJsonl(path.join(taskDir, 'task-retarget-dedup.jsonl'))
+  assert.equal(lines.length, 2, '修正目标后的第一条记录必须落盘')
+  assert.equal(lines[0]!.name, provisional)
+  assert.equal(lines[1]!.name, finalPath)
+  assert.equal(lines[1]!.outPath, finalPath)
+})
+
+test('setTarget：只接受绝对 outPath（相对路径不记录）', async () => {
+  const r = new ProgressReporter('task-retarget-relative', 'label')
+  r.setTarget('relative-label', 'relative/path.bin')
+  r.report(10, '下载中')
+  await r.awaitFlush()
+
+  const lines = readJsonl(path.join(taskDir, 'task-retarget-relative.jsonl'))
+  assert.equal(lines[0]!.name, 'relative-label')
+  assert.equal('outPath' in lines[0]!, false, '相对路径不得写入 outPath')
+
+  const task = JSON.parse(readFileSync(path.join(dlDir, 'task-retarget-relative.json'), 'utf-8'))
+  assert.equal('outPath' in task, false)
+})
+
 test('未提供 label 时，JSON 轨道的 name 回退为任务 ID', async () => {
   const r = new ProgressReporter('task-10')
   r.report(7, '下载中')

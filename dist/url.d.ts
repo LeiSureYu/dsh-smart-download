@@ -49,11 +49,45 @@ export declare function checkDownloadUrl(rawUrl: string): {
  */
 export declare function sanitizeFilename(name: string): string;
 /**
+ * 为同名冲突生成 `name (1).ext` 形式的候选名。
+ *
+ * 保留扩展名（下载下来的安装包/压缩包失去扩展名会直接影响使用），并在加上
+ * 后缀后仍不超过 `MAX_FILENAME_LENGTH`。纯函数，便于单测。
+ *
+ * @param name 已净化的文件名
+ * @param index 冲突序号，从 1 开始
+ */
+export declare function withConflictSuffix(name: string, index: number): string;
+/**
  * 从 URL 推导本地文件名：
  * 取 pathname 最后一段，做 URI 解码后**再按分隔符切一次**（解码可能把
  * `%2F` 还原成 `/`，从而凭空造出目录层级），最后交给 `sanitizeFilename` 净化。
  * 无法推导时回退为 `download`。
  *
+ * 1.5.0 起优先看 `?filename=` / `?file=` 查询参数：大量下载站（尤其是 PHP 的
+ * `download.php?id=1&filename=foo.zip`）把真实文件名放在查询串里，pathname
+ * 只有一个 `download.php`。查询参数同样是**不可信输入**，必须走同一个
+ * `sanitizeFilename`（路径穿越、保留设备名、长度上限一个都不能少）。
+ *
  * @param rawUrl 原始下载地址
  */
 export declare function deriveFilenameFromUrl(rawUrl: string): string;
+/**
+ * 从 `Content-Disposition` 响应头里解析文件名。
+ *
+ * 支持三种现实写法（按优先级）：
+ *   1. RFC 5987 / 6266 的 `filename*=UTF-8''%E4%B8%AD%E6%96%87.zip`（带字符集）；
+ *   2. 老式 `filename="中文.zip"`（很多服务器直接塞 UTF-8 字节）；
+ *   3. 无引号的 `filename=foo.zip`。
+ *
+ * 为什么值得单独一层：GitHub release 的下载地址形如
+ * `…/releases/download/v1.0/`（末段为空）或 `…/download`（无扩展名），
+ * 只看 pathname 会得到 `download` 这种既难认又容易互相覆盖的名字，而服务器
+ * 其实在 `Content-Disposition` 里给了真名。
+ *
+ * ⚠️ 返回值**未净化**：调用方必须交给 `sanitizeFilename`。这个头完全由服务器
+ * 控制，历史上出现过 `filename="../../etc/passwd"` 这类载荷。
+ *
+ * @param header 响应头原始值；缺失 / 解析不出时返回 undefined
+ */
+export declare function filenameFromContentDisposition(header: string | null | undefined): string | undefined;

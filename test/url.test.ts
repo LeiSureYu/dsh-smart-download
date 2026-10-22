@@ -14,8 +14,10 @@ import {
   SUPPORTED_PROTOCOLS,
   checkDownloadUrl,
   deriveFilenameFromUrl,
+  filenameFromContentDisposition,
   isSupportedProtocol,
   sanitizeFilename,
+  withConflictSuffix,
 } from '../src/url.js'
 
 /* ------------------------------ 协议白名单 ------------------------------ */
@@ -173,4 +175,106 @@ test('deriveFilenameFromUrl: 非法百分号编码回落到原始片段，而不
   assert.equal(deriveFilenameFromUrl('https://example.com/a%zz.bin'), 'a%zz.bin')
   // 单个游离的 % 同理
   assert.equal(deriveFilenameFromUrl('https://example.com/100%.bin'), '100%.bin')
+})
+
+/* ------------------- 1.5.0：查询参数与 Content-Disposition ------------------- */
+
+test('deriveFilenameFromUrl: 优先使用 ?filename=（pathname 只是 download.php）', () => {
+  assert.equal(
+    deriveFilenameFromUrl('https://example.com/download.php?id=7&filename=report-2026.zip'),
+    'report-2026.zip',
+  )
+  // ?file= 是另一个常见写法
+  assert.equal(
+    deriveFilenameFromUrl('https://example.com/get?file=data.csv'),
+    'data.csv',
+  )
+})
+
+test('deriveFilenameFromUrl: 查询参数里的文件名同样走净化（穿越 / 保留名）', () => {
+  const traversal = deriveFilenameFromUrl(
+    'https://example.com/d.php?filename=..%2F..%2F..%2Fetc%2Fpasswd',
+  )
+  assert.equal(traversal.includes('/'), false)
+  assert.equal(traversal.includes('\\'), false)
+  assert.equal(traversal, 'passwd')
+
+  assert.equal(deriveFilenameFromUrl('https://example.com/d.php?filename=CON'), '_CON')
+})
+
+test('deriveFilenameFromUrl: 空的 ?filename= 回落到 pathname，而不是变成 download', () => {
+  assert.equal(
+    deriveFilenameFromUrl('https://example.com/files/a.zip?filename='),
+    'a.zip',
+  )
+})
+
+test('filenameFromContentDisposition: RFC 5987 的 filename*=UTF-8\'\' 优先', () => {
+  const header = `attachment; filename="fallback.zip"; filename*=UTF-8''%E4%B8%AD%E6%96%87%20v2.zip`
+  assert.equal(filenameFromContentDisposition(header), '中文 v2.zip')
+})
+
+test('filenameFromContentDisposition: 无字符集前缀的 filename*= 也能解', () => {
+  assert.equal(
+    filenameFromContentDisposition(`attachment; filename*=UTF-8''a%20b.tar.gz`),
+    'a b.tar.gz',
+  )
+})
+
+test('filenameFromContentDisposition: 普通 filename=（带引号 / 不带引号）', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="model.bin"'),
+    'model.bin',
+  )
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename=model.bin'),
+    'model.bin',
+  )
+})
+
+test('filenameFromContentDisposition: 只取最后一段（服务器给绝对路径也不放行）', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="../../etc/passwd"'),
+    'passwd',
+  )
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="C:\\\\Windows\\\\win.ini"'),
+    'win.ini',
+  )
+})
+
+test('filenameFromContentDisposition: 缺失 / 无 filename / 空值 -> undefined', () => {
+  assert.equal(filenameFromContentDisposition(null), undefined)
+  assert.equal(filenameFromContentDisposition(''), undefined)
+  assert.equal(filenameFromContentDisposition('inline'), undefined)
+  assert.equal(filenameFromContentDisposition('attachment; filename=""'), undefined)
+})
+
+/* --------------------------- 1.5.0：同名冲突改名 --------------------------- */
+
+test('withConflictSuffix: 保留扩展名，生成 "name (1).ext"', () => {
+  assert.equal(withConflictSuffix('a.zip', 1), 'a (1).zip')
+  assert.equal(withConflictSuffix('archive.tar.gz', 2), 'archive.tar (2).gz')
+})
+
+test('withConflictSuffix: 无扩展名时后缀加在末尾', () => {
+  assert.equal(withConflictSuffix('download', 1), 'download (1)')
+})
+
+test('withConflictSuffix: 序号递增产生不同名字（1 / 2 / 10 都能区分）', () => {
+  const names = [1, 2, 10].map((n) => withConflictSuffix('a.zip', n))
+  assert.deepEqual(names, ['a (1).zip', 'a (2).zip', 'a (10).zip'])
+  assert.equal(new Set(names).size, 3)
+})
+
+test('withConflictSuffix: 长文件名截断后仍不超过上限且保留扩展名', () => {
+  const out = withConflictSuffix(`${'a'.repeat(400)}.zip`, 12)
+  assert.ok(out.length <= MAX_FILENAME_LENGTH, `长度应 <= ${MAX_FILENAME_LENGTH}，实际 ${out.length}`)
+  assert.ok(out.endsWith(' (12).zip'), `后缀与扩展名都必须保留，实际 ${out}`)
+})
+
+test('withConflictSuffix: 非法序号原样返回（不生成 "name (NaN).ext"）', () => {
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(withConflictSuffix('a.zip', bad), 'a.zip', `index=${bad} 应原样返回`)
+  }
 })

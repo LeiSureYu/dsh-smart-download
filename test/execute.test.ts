@@ -1084,7 +1084,13 @@ type Item = BatchItemResult
 
 /** 跑一次批量下载；exec 可注入自定义 signal（取消用例用）。 */
 async function runBatch(
-  targets: Array<{ url: string; output?: string; sha256?: string }>,
+  targets: Array<{
+    url: string
+    output?: string
+    sha256?: string
+    checksum?: string
+    ifExists?: 'overwrite' | 'skip' | 'rename'
+  }>,
   extra: Record<string, unknown> = {},
   exec?: Record<string, unknown>,
 ): Promise<BatchDownloadResult> {
@@ -1415,6 +1421,343 @@ test('批量：中途取消时，没有任何条目被改判成失败（已完�
     const fast = result.results.find((r) => r.url.includes('fast')) as Item
     if (fast.success) {
       assert.equal(existsSync(path.join(tmpRoot, 'mid-fast.bin')), true, '成功条目的文件必须还在')
+    }
+  })
+})
+
+/* ============== 1.5.0：通用摘要 / 同名策略 / 文件名 / 磁盘预检 ============== */
+
+const CHECKSUM_BODY = Buffer.from('dsh-smart-download checksum fixture\n', 'utf-8')
+
+function digestOf(algorithm: 'md5' | 'sha1' | 'sha256' | 'sha512'): string {
+  return createHash(algorithm).update(CHECKSUM_BODY).digest('hex')
+}
+
+test('checksum：MD5 / SHA-1 / SHA-512 成功时返回实际摘要与算法，且不返回 sha256', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const cases = [
+      { algorithm: 'md5', expected: digestOf('md5') },
+      { algorithm: 'sha1', expected: `sha1:${digestOf('sha1')}` },
+      { algorithm: 'sha512', expected: digestOf('sha512').toUpperCase() },
+    ] as const
+
+    for (const { algorithm, expected } of cases) {
+      const out = path.join(tmpRoot, `checksum-${algorithm}.bin`)
+      const result = await run({
+        url: `${base}/checksum-${algorithm}.bin`,
+        output: out,
+        checksum: expected,
+      })
+
+      assert.equal(result.success, true)
+      assert.equal(result.checksumAlgorithm, algorithm)
+      assert.equal(result.checksum, digestOf(algorithm))
+      assert.equal(Object.hasOwn(result, 'sha256'), false, '通用 checksum 不得冒充 sha256')
+      assert.equal(readFileSync(out).equals(CHECKSUM_BODY), true)
+      assert.equal(snapshotJsonValue(result) === undefined, false, '结果必须是 lossless JSON')
+      assert.deepEqual(validateSchema(tool.output.schema, snapshotJsonValue(result)), [])
+    }
+  })
+})
+
+test('checksum 不匹配：抛错、保留产物与旁车指纹，不报告成功', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'checksum-mismatch.bin')
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/checksum-mismatch.bin`,
+          output: out,
+          checksum: `md5:${'0'.repeat(32)}`,
+        }),
+      /完整性校验失败.*MD5 不匹配/s,
+    )
+
+    assert.equal(existsSync(out), true, '产物必须保留，供用户核对')
+    assert.equal(existsSync(`${out}.part.json`), true, '旁车指纹必须保留')
+    assert.equal(readFileSync(out).equals(CHECKSUM_BODY), true)
+  })
+})
+
+test('sha256 与 checksum 同时给：请求前拒绝（一个请求都不发）', async () => {
+  let hits = 0
+  await withServer((_req, res) => {
+    hits += 1
+    res.writeHead(200, { 'content-length': '1' })
+    res.end('x')
+  }, async (base) => {
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/both.bin`,
+          output: path.join(tmpRoot, 'both.bin'),
+          sha256: digestOf('sha256'),
+          checksum: digestOf('md5'),
+        }),
+      /sha256 与 checksum 只能二选一/,
+    )
+    assert.equal(hits, 0, '参数互斥必须在探测前拒绝')
+  })
+})
+
+test('ifExists=skip：已有文件时不发下载 GET，返回 skipped 且不带 method', async () => {
+  let getHits = 0
+  await withServer((req, res) => {
+    if (req.method === 'GET') getHits += 1
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'skip-existing.bin')
+    writeFileSync(out, 'already here')
+
+    const result = await run({
+      url: `${base}/skip-existing.bin`,
+      output: out,
+      ifExists: 'skip',
+    })
+
+    assert.equal(result.success, true)
+    assert.equal(result.skipped, true)
+    assert.equal(Object.hasOwn(result, 'method'), false, 'skip 不得带 method')
+    assert.equal(readFileSync(out, 'utf-8'), 'already here', '已有文件不得被改动')
+    assert.equal(getHits, 0, 'skip 不得发出下载 GET')
+    assert.equal(snapshotJsonValue(result) === undefined, false)
+    assert.deepEqual(validateSchema(tool.output.schema, snapshotJsonValue(result)), [])
+  })
+})
+
+test('ifExists=skip + 摘要：匹配则成功，不匹配则抛错并保留原文件', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const good = path.join(tmpRoot, 'skip-checksum-good.bin')
+    writeFileSync(good, CHECKSUM_BODY)
+    const ok = await run({
+      url: `${base}/skip-checksum-good.bin`,
+      output: good,
+      ifExists: 'skip',
+      checksum: `md5:${digestOf('md5')}`,
+    })
+    assert.equal(ok.skipped, true)
+    assert.equal(ok.checksum, digestOf('md5'))
+    assert.equal(ok.checksumAlgorithm, 'md5')
+    assert.equal(Object.hasOwn(ok, 'method'), false)
+
+    const bad = path.join(tmpRoot, 'skip-checksum-bad.bin')
+    const wrong = Buffer.from(CHECKSUM_BODY)
+    wrong[0] = wrong[0]! ^ 0xff
+    writeFileSync(bad, wrong)
+    await assert.rejects(
+      () =>
+        run({
+          url: `${base}/skip-checksum-bad.bin`,
+          output: bad,
+          ifExists: 'skip',
+          checksum: `md5:${digestOf('md5')}`,
+        }),
+      /完整性校验失败.*MD5 不匹配/s,
+    )
+    assert.equal(readFileSync(bad).equals(wrong), true, '校验失败时原文件必须原样保留')
+  })
+})
+
+test('ifExists=rename：绝不覆盖已有文件，依次得到 name (1) / name (2)', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'rename-me.zip')
+    writeFileSync(out, 'original')
+
+    const first = await run({
+      url: `${base}/rename-me.zip`,
+      output: out,
+      ifExists: 'rename',
+    })
+    assert.equal(first.path, path.join(tmpRoot, 'rename-me (1).zip'))
+    assert.equal(readFileSync(out, 'utf-8'), 'original', '原文件不得被覆盖')
+    assert.equal(readFileSync(first.path).equals(CHECKSUM_BODY), true)
+
+    const second = await run({
+      url: `${base}/rename-me.zip`,
+      output: out,
+      ifExists: 'rename',
+    })
+    assert.equal(second.path, path.join(tmpRoot, 'rename-me (2).zip'))
+    assert.equal(readFileSync(out, 'utf-8'), 'original')
+    assert.equal(readFileSync(second.path).equals(CHECKSUM_BODY), true)
+  })
+})
+
+test('ifExists=overwrite：默认覆盖已有文件', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'overwrite.bin')
+    writeFileSync(out, 'stale')
+    const result = await run({ url: `${base}/overwrite.bin`, output: out })
+    assert.equal(result.path, out)
+    assert.equal(readFileSync(out).equals(CHECKSUM_BODY), true)
+  })
+})
+
+test('Content-Disposition：未传 output 时采用真实文件名，路径穿越被压成单段名', async () => {
+  await withServer((req, res) => {
+    const header =
+      req.url?.includes('evil')
+        ? 'attachment; filename="../../evil.zip"'
+        : 'attachment; filename="real-name.zip"'
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+      'content-disposition': header,
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const cwdBefore = process.cwd()
+    const workDir = mkdtempSync(path.join(tmpRoot, 'cd-name-'))
+    process.chdir(workDir)
+    try {
+      const named = await run({ url: `${base}/download` })
+      assert.equal(path.basename(named.path), 'real-name.zip')
+      assert.equal(path.dirname(named.path), workDir)
+      assert.equal(existsSync(path.join(workDir, 'real-name.zip')), true)
+
+      const evil = await run({ url: `${base}/evil` })
+      assert.equal(path.basename(evil.path), 'evil.zip')
+      assert.equal(path.dirname(evil.path), workDir, '不得写到当前目录之外')
+      assert.equal(existsSync(path.join(workDir, 'evil.zip')), true)
+    } finally {
+      process.chdir(cwdBefore)
+    }
+  })
+})
+
+test('磁盘空间预检：远端声明的大小超出可用空间时，下载前拒绝', async () => {
+  let getHits = 0
+  await withServer((req, res) => {
+    if (req.method === 'GET') getHits += 1
+    res.writeHead(200, {
+      'content-length': String(1e15),
+      'accept-ranges': 'bytes',
+    })
+    res.end()
+  }, async (base) => {
+    const out = path.join(tmpRoot, 'too-big.bin')
+    await assert.rejects(
+      () => run({ url: `${base}/too-big.bin`, output: out }),
+      /磁盘可用空间不足/,
+    )
+    assert.equal(getHits, 0, '预检失败不得继续下载')
+    assert.equal(existsSync(out), false)
+  })
+})
+
+test('批量：逐条 checksum / ifExists 各自生效，skip 计成功且失败条目可辨认', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const skipOut = path.join(tmpRoot, 'batch-skip.bin')
+    writeFileSync(skipOut, CHECKSUM_BODY)
+    const failOut = path.join(tmpRoot, 'batch-fail.bin')
+
+    const result = await runBatch([
+      {
+        url: `${base}/batch-md5.bin`,
+        output: path.join(tmpRoot, 'batch-md5.bin'),
+        checksum: `md5:${digestOf('md5')}`,
+      },
+      {
+        url: `${base}/batch-skip.bin`,
+        output: skipOut,
+        ifExists: 'skip',
+        checksum: `md5:${digestOf('md5')}`,
+      },
+      {
+        url: `${base}/batch-fail.bin`,
+        output: failOut,
+        checksum: `sha1:${'0'.repeat(40)}`,
+      },
+    ])
+
+    assert.equal(result.succeeded, 2, 'skip 是成功，不是失败')
+    assert.equal(result.failed, 1)
+    assert.equal(result.cancelled, 0)
+
+    const [md5, skipped, failed] = result.results
+    assert.equal(md5!.success, true)
+    assert.equal(md5!.checksumAlgorithm, 'md5')
+    assert.equal(md5!.checksum, digestOf('md5'))
+    assert.equal(Object.hasOwn(md5!, 'sha256'), false)
+
+    assert.equal(skipped!.success, true)
+    assert.equal(skipped!.skipped, true)
+    assert.equal(Object.hasOwn(skipped!, 'method'), false, 'skip 条目不得带 method')
+    assert.equal(skipped!.output, skipOut, '批量 output 必须是真实落盘路径')
+
+    assert.equal(failed!.success, false)
+    assert.match(failed!.error ?? '', /完整性校验失败.*SHA-1 不匹配/s)
+    assert.equal(existsSync(failOut), true, '失败条目的产物保留，供核对')
+
+    assert.equal(snapshotJsonValue(result) === undefined, false)
+    assert.deepEqual(
+      validateSchema(tool.output.schema, snapshotJsonValue(result)),
+      [],
+      '新增字段必须能通过批量 output schema',
+    )
+  })
+})
+
+test('批量：未传 output 时逐条 output 指向 Content-Disposition 的真实文件名', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, {
+      'content-length': String(CHECKSUM_BODY.length),
+      'accept-ranges': 'bytes',
+      'content-disposition': 'attachment; filename="batch-real-name.zip"',
+    })
+    res.end(CHECKSUM_BODY)
+  }, async (base) => {
+    const cwdBefore = process.cwd()
+    const workDir = mkdtempSync(path.join(tmpRoot, 'batch-cd-'))
+    process.chdir(workDir)
+    try {
+      const result = await runBatch([{ url: `${base}/download` }])
+      assert.equal(result.succeeded, 1)
+      assert.equal(result.results[0]!.output, path.join(workDir, 'batch-real-name.zip'))
+      assert.equal(result.results[0]!.path, result.results[0]!.output)
+      assert.equal(existsSync(result.results[0]!.output), true)
+    } finally {
+      process.chdir(cwdBefore)
     }
   })
 })

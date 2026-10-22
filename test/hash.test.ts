@@ -7,16 +7,23 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  CHECKSUM_LABELS,
   HASH_UNREADABLE_MESSAGE,
   HASH_VERIFIED_MESSAGE,
+  checksumUnreadableMessage,
+  checksumVerifiedMessage,
   describeHashFailure,
   describeHashMismatch,
+  hashFile,
+  normalizeChecksum,
   normalizeSha256,
   sha256File,
+  verifyChecksum,
   verifySha256,
 } from '../src/hash.js'
 
@@ -24,6 +31,12 @@ import {
 const ABC_HEX = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
 /** 同一摘要的 SRI（base64）写法 */
 const ABC_B64 = Buffer.from(ABC_HEX, 'hex').toString('base64')
+/** 已知向量：md5("abc") / sha1("abc") / sha512("abc") */
+const ABC_MD5 = '900150983cd24fb0d6963f7d28e17f72'
+const ABC_SHA1 = 'a9993e364706816aba3e25717850c26c9cd0d89d'
+const ABC_SHA512 =
+  'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a' +
+  '2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'
 
 /* ------------------------------ 归一化 ------------------------------ */
 
@@ -180,4 +193,132 @@ test('固定文案是常量，不是就地拼串（改动会被用例拦下）',
     `不可读文案的原因句必须固定，实际：${HASH_UNREADABLE_MESSAGE}`,
   )
   assert.equal(HASH_VERIFIED_MESSAGE, 'SHA-256 已校验')
+})
+
+/* ---------------------- 1.5.0：通用摘要（md5 / sha1 / sha512） ---------------------- */
+
+test('normalizeChecksum: 裸十六进制按长度识别四种算法', () => {
+  assert.deepEqual(normalizeChecksum(ABC_MD5), { algorithm: 'md5', digest: ABC_MD5 })
+  assert.deepEqual(normalizeChecksum(ABC_SHA1), { algorithm: 'sha1', digest: ABC_SHA1 })
+  assert.deepEqual(normalizeChecksum(ABC_HEX), { algorithm: 'sha256', digest: ABC_HEX })
+  assert.deepEqual(normalizeChecksum(ABC_SHA512), { algorithm: 'sha512', digest: ABC_SHA512 })
+  // 大写输入必须归一成小写，长度不受影响
+  assert.deepEqual(normalizeChecksum(ABC_SHA1.toUpperCase()), {
+    algorithm: 'sha1',
+    digest: ABC_SHA1,
+  })
+  assert.deepEqual(normalizeChecksum(`  ${ABC_MD5}  `), { algorithm: 'md5', digest: ABC_MD5 })
+})
+
+test('normalizeChecksum: 带算法前缀的三种写法（冒号 / 等号 / 括号）', () => {
+  assert.deepEqual(normalizeChecksum(`md5:${ABC_MD5}`), { algorithm: 'md5', digest: ABC_MD5 })
+  assert.deepEqual(normalizeChecksum(`sha1=${ABC_SHA1}`), {
+    algorithm: 'sha1',
+    digest: ABC_SHA1,
+  })
+  assert.deepEqual(normalizeChecksum(`SHA512(${ABC_SHA512})`), {
+    algorithm: 'sha512',
+    digest: ABC_SHA512,
+  })
+  // 前缀大小写不敏感，冒号后允许空白
+  assert.deepEqual(normalizeChecksum(`SHA256: ${ABC_HEX}`), {
+    algorithm: 'sha256',
+    digest: ABC_HEX,
+  })
+})
+
+test('normalizeChecksum: SRI 的 sha256- / sha512- 会解码成十六进制', () => {
+  assert.deepEqual(normalizeChecksum(`sha256-${ABC_B64}`), {
+    algorithm: 'sha256',
+    digest: ABC_HEX,
+  })
+  const sha512B64 = Buffer.from(ABC_SHA512, 'hex').toString('base64')
+  assert.deepEqual(normalizeChecksum(`sha512-${sha512B64}`), {
+    algorithm: 'sha512',
+    digest: ABC_SHA512,
+  })
+  // base64 解出的字节数必须与算法匹配：20 字节不是 sha256
+  assert.equal(
+    normalizeChecksum(`sha256-${Buffer.from('a'.repeat(20)).toString('base64')}`),
+    null,
+  )
+})
+
+test('normalizeChecksum: 算法与长度不匹配 -> null（不按长度悄悄改算法）', () => {
+  assert.equal(normalizeChecksum(`md5:${ABC_HEX}`), null)
+  assert.equal(normalizeChecksum(`sha1:${ABC_HEX}`), null)
+  assert.equal(normalizeChecksum(`sha512:${ABC_HEX}`), null)
+  assert.equal(normalizeChecksum(`sha256:${ABC_MD5}`), null)
+})
+
+test('normalizeChecksum: 非十六进制 / 空串 / 非法长度 -> null', () => {
+  assert.equal(normalizeChecksum(''), null)
+  assert.equal(normalizeChecksum('   '), null)
+  assert.equal(normalizeChecksum('z'.repeat(32)), null)
+  assert.equal(normalizeChecksum('a'.repeat(31)), null)
+  assert.equal(normalizeChecksum('a'.repeat(33)), null)
+  assert.equal(normalizeChecksum('not-a-hash'), null)
+})
+
+test('hashFile: 四种算法对 "abc" 都算出标准向量', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hash-test-'))
+  try {
+    const file = join(dir, 'abc.txt')
+    writeFileSync(file, 'abc')
+    assert.equal(await hashFile(file, 'md5'), ABC_MD5)
+    assert.equal(await hashFile(file, 'sha1'), ABC_SHA1)
+    assert.equal(await hashFile(file, 'sha256'), ABC_HEX)
+    assert.equal(await hashFile(file, 'sha512'), ABC_SHA512)
+    // 与 Node crypto 现算结果一致（sha512 向量再核一次，防止手抄错误）
+    assert.equal(
+      await hashFile(file, 'sha512'),
+      createHash('sha512').update('abc').digest('hex'),
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('hashFile: 文件不存在 -> null（四种算法一致）', async () => {
+  const missing = join(tmpdir(), 'definitely-missing-dsh-smartdl-checksum.bin')
+  for (const algorithm of ['md5', 'sha1', 'sha256', 'sha512'] as const) {
+    assert.equal(await hashFile(missing, algorithm), null)
+  }
+})
+
+test('verifyChecksum: 匹配 -> ok；不匹配 -> mismatch 且带算法', () => {
+  const spec = { algorithm: 'md5' as const, digest: ABC_MD5 }
+  const ok = verifyChecksum(spec, ABC_MD5)
+  assert.equal(ok.kind, 'ok')
+  assert.equal(ok.kind === 'ok' ? ok.digest : '', ABC_MD5)
+
+  const mismatch = verifyChecksum(spec, 'f'.repeat(32))
+  assert.equal(mismatch.kind, 'mismatch')
+  assert.equal(mismatch.kind === 'mismatch' ? mismatch.algorithm : '', 'md5')
+  assert.equal(mismatch.kind === 'mismatch' ? mismatch.expected : '', ABC_MD5)
+  assert.equal(mismatch.kind === 'mismatch' ? mismatch.actual : '', 'f'.repeat(32))
+})
+
+test('verifyChecksum: 文件读不到 -> unreadable，并带上是哪种算法', () => {
+  const outcome = verifyChecksum({ algorithm: 'sha512', digest: ABC_SHA512 }, null)
+  assert.equal(outcome.kind, 'unreadable')
+  assert.equal(outcome.kind === 'unreadable' ? outcome.algorithm : '', 'sha512')
+})
+
+test('checksumUnreadableMessage: 文案说出实际算法（MD5 不写成 SHA-256）', () => {
+  const message = checksumUnreadableMessage('md5')
+  assert.match(message, /MD5/)
+  assert.doesNotMatch(message, /SHA-256/)
+  assert.match(message, /下一步/)
+})
+
+test('checksumVerifiedMessage: 四种算法各自给出人类可读标签', () => {
+  assert.equal(checksumVerifiedMessage({ algorithm: 'md5', digest: ABC_MD5 }), 'MD5 已校验')
+  assert.equal(checksumVerifiedMessage({ algorithm: 'sha1', digest: ABC_SHA1 }), 'SHA-1 已校验')
+  assert.equal(checksumVerifiedMessage({ algorithm: 'sha256', digest: ABC_HEX }), 'SHA-256 已校验')
+  assert.equal(
+    checksumVerifiedMessage({ algorithm: 'sha512', digest: ABC_SHA512 }),
+    'SHA-512 已校验',
+  )
+  assert.deepEqual(Object.values(CHECKSUM_LABELS).sort(), ['MD5', 'SHA-1', 'SHA-256', 'SHA-512'])
 })

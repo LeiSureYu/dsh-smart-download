@@ -238,7 +238,7 @@ function inferStateFromMessage(msg: string): ProgressState {
 
 export class ProgressReporter {
   private readonly taskId: string
-  private readonly label: string | undefined
+  private label: string | undefined
   /**
    * 批次 ID：同一次调用（单条目或批量）里所有条目共用。
    * 只做分组标签，任何执行/并发决策都不看它。
@@ -251,7 +251,7 @@ export class ProgressReporter {
    * 只会让管理端点拿到一个必然被拒绝的值 —— 那不如不记，让 `inspect` 如实报
    * `unknown`（UI 据此只允许「删除记录」）。
    */
-  private readonly outPath: string | undefined
+  private outPath: string | undefined
   private taskProgressFile: string | null = null
   private downloadProgressFile: string | null = null
   private lastPct = -1
@@ -315,6 +315,26 @@ export class ProgressReporter {
     if (dlDir) {
       this.downloadProgressFile = path.join(dlDir, `${taskId}.json`)
     }
+  }
+
+  /**
+   * 探测后修正展示名与落盘路径（1.5.0）。
+   *
+   * 为什么需要：真实文件名可能只出现在 `Content-Disposition` 里，而探测之前
+   * 只能按 URL 猜一个临时名。若不修正，面板与 `download_status` 会一直显示
+   * 那个临时名，`outPath` 还会指向一个从未存在的文件（下载管理器的「显示/
+   * 删除」随之指错）。
+   *
+   * 清空 `lastKey` 是刻意的：修正后的第一条记录必须落盘，否则内容与上一条
+   * 完全相同时会被去重逻辑吞掉，面板永远看不到新名字。
+   */
+  setTarget(label: string | undefined, outPath: string | undefined): void {
+    this.label = label
+    this.outPath =
+      typeof outPath === 'string' && outPath.length > 0 && path.isAbsolute(outPath)
+        ? outPath
+        : undefined
+    this.lastKey = ''
   }
 
   /**

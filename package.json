@@ -1,7 +1,7 @@
 {
   "name": "@leisureyu/dsh-smart-dl",
-  "version": "1.4.6",
-  "description": "Multi-threaded downloader plugin for DeepSeek Harness: bundles aria2, probes file size and picks aria2 multi-connection or curl fallback automatically (Windows x64/arm64, Linux x64/arm64). Verifies downloads against the SHA-256 printed in official docs, sends custom UA/Referer/headers, and can auto-pick a GitHub mirror that provably serves the same file",
+  "version": "1.5.0",
+  "description": "Multi-threaded downloader plugin for DeepSeek Harness: bundles aria2, probes file size and picks aria2 multi-connection or curl fallback automatically (Windows x64/arm64, Linux x64/arm64; any platform with aria2c on PATH). Verifies downloads against MD5 / SHA-1 / SHA-256 / SHA-512 checksums, applies an if-exists policy (overwrite/skip/rename), preflights free disk space, sends custom UA/Referer/headers, and can auto-pick a GitHub mirror that provably serves the same file",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LeiSureYu/dsh-smart-download.git"
@@ -119,8 +119,13 @@
     "resumable-download",
     "github-mirror",
     "sha256",
+    "md5",
+    "sha1",
+    "sha512",
     "checksum",
     "checksum-verification",
+    "if-exists",
+    "disk-space",
     "user-agent"
   ],
   "license": "MIT",

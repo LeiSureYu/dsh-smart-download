@@ -11,10 +11,14 @@ execute(args, exec)                       src/index.ts
   ├─[0] checkDownloadUrl(url)             src/url.ts
   │      协议白名单：只放行 http / https，其余直接抛错
   │
-  ├─[0b] normalizeSha256(args.sha256)     src/hash.ts
-  │      摘要不合法 → 在下载开始前就抛错（不白下一遍）
+  ├─[0b] normalizeChecksum / normalizeSha256   src/hash.ts
+  │      checksum 支持 md5 / sha1 / sha256 / sha512；裸 hex 按长度识别；
+  │      sha256 与 checksum 二选一；写法不合法 → 在下载开始前就抛错（不白下一遍）
   │
-  ├─[0c] buildRequestHeaders(...)         src/headers.ts
+  ├─[0c] ifExists ∈ {overwrite, skip, rename}  src/index.ts
+  │      非法值在下载前拒绝，避免把拼错的值静默当成 overwrite
+  │
+  ├─[0d] buildRequestHeaders(...)         src/headers.ts
   │      headers + userAgent + referer 合成**一份**头表；
   │      自管头（Range / Accept-Encoding / Host / 连接级）与 CR/LF 注入一律拒绝
   │
@@ -28,15 +32,30 @@ execute(args, exec)                       src/index.ts
   ├─[3] probeUrl(requestedUrl, {headers}) src/probe.ts
   │      HEAD →（抛异常 / 405 / 无 Content-Length 时）Range GET
   │      强制 accept-encoding: identity
-  │      → ProbeResult { supportsMultiThread, contentLength, etag, lastModified, contentEncoding }
+  │      同时读取 Content-Disposition（真实文件名可能只在这里）
+  │      → ProbeResult { supportsMultiThread, contentLength, etag, lastModified,
+  │                      contentEncoding, contentDisposition }
   │
   ├─[3b] resolveAutoMirror(...)           src/auto-mirror.ts
   │      仅当 mirror === "auto"：并发探测候选表，采用第一个
   │      「长度一致、且原始有 ETag 时 ETag 也一致」的候选；
   │      否则退回原始地址并把原因写进 mirrorSkipped
   │
+  ├─[3c] 确定最终 outputPath             src/url.ts + src/index.ts
+  │      显式 output → Content-Disposition → ?filename= / ?file= → URL 末段
+  │      服务器文件名必须过 sanitizeFilename()（单段、无穿越、长度上限）
+  │      ifExists=rename：找第一个不存在的 `name (n).ext`，绝不覆盖
+  │
+  ├─[3d] ifExists=skip 且目标已存在       src/index.ts
+  │      不发下载请求；有摘要时仍校验已有文件，不匹配照样抛错
+  │
+  ├─[3e] checkDiskSpace(dir, size)        src/disk.ts
+  │      大小已知且响应未压缩时，要求可用空间 ≥ size + max(64MB, 5% × size)
+  │      不足 → 发请求前抛错；statfs 不可用 → 继续并记 diskCheckSkipped
+  │
   ├─[4] planResume(outputPath, probe)     src/resume.ts
   │      比对旁车 .part.json 指纹；不能证实同源就删掉半包
+  │      ifExists=rename 时禁用续传（半包属于另一个文件名）
   │
   ├─[5] decide(probe, aria2Available)     src/decision.ts
   │      → Decision { method, concurrency, fellback, reason }
@@ -46,8 +65,8 @@ execute(args, exec)                       src/index.ts
   │
   └─[7] assertIntegrity()                 src/verify.ts + src/hash.ts
           ① 落盘字节数 vs 远端声明长度
-          ② 传了 sha256 时：实际摘要 vs 期望摘要（流式计算）
-          全通过 → 清旁车、返回 success（+ sha256）
+          ② 传了 sha256 / checksum 时：实际摘要 vs 期望摘要（流式计算）
+          全通过 → 清旁车、返回 success（+ sha256 或 checksum / checksumAlgorithm）
           长度跳过 → 返回 success + verifySkipped 文案
           长度不符 / 哈希不符 → reporter.fail + IntegrityError
                                （**不**回退 curl 重下，见下）
@@ -57,21 +76,22 @@ execute(args, exec)                       src/index.ts
 
 | 文件 | 行数 | 职责 | 关键点 |
 | --- | --- | --- | --- |
-| `src/index.ts` | ~1128 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面 10 步 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
-| `src/types.ts` | ~354 | 所有跨模块类型与返回结构 | `verifySkipped` / `reason` / `mirrorSkipped` 三者语义不同，见下 |
-| `src/url.ts` | ~142 | URL 校验与输出文件名净化 | 纯函数；协议白名单 + 单段文件名 |
+| `src/index.ts` | ~1379 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面这些步骤 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
+| `src/types.ts` | ~404 | 所有跨模块类型与返回结构 | `verifySkipped` / `reason` / `mirrorSkipped` / `diskCheckSkipped` 语义不同，见下 |
+| `src/url.ts` | ~243 | URL 校验、输出文件名推导与净化 | 纯函数；协议白名单 + 单段文件名 + `Content-Disposition` 解析 |
 | `src/mirror.ts` | ~134 | 镜像前缀归一化、拼接、GitHub 判定、候选表 | 纯函数、不发请求；`auto` 模式与候选表覆盖的入口 |
 | `src/auto-mirror.ts` | ~198 | 自动镜像的挑选与「同源证明」 | 网络由调用方注入 `probe`；`ETag` 是镜像自报的，防不了投毒 |
 | `src/headers.ts` | ~212 | 请求头合成、校验与三种落地形式 | 探测与下载**共用一份**；自管头与 CR/LF 注入拒绝 |
-| `src/hash.ts` | ~153 | SHA-256 归一化、流式计算、比对与文案 | 纯函数 + 一次流式读取；四种官方文档写法归一化 |
-| `src/probe.ts` | ~270 | 探测远端能力（Range / 长度 / 指纹 / 编码） | 异常绝不抛出；HEAD 失败会走 Range GET 兜底；HEAD 分支同样读 `Content-Range` |
+| `src/hash.ts` | ~255 | MD5 / SHA-1 / SHA-256 / SHA-512 归一化、流式计算、比对与文案 | 纯函数 + 一次流式读取；裸 hex 按长度识别，支持前缀与 SRI；旧 `sha256` 路径保留 |
+| `src/probe.ts` | ~279 | 探测远端能力（Range / 长度 / 指纹 / 编码 / 文件名） | 异常绝不抛出；HEAD 失败会走 Range GET 兜底；HEAD 分支同样读 `Content-Range` |
 | `src/decision.ts` | ~215 | 按大小与 aria2 可用性选方式 / 并发，并按吞吐历史抬档 | 纯函数；环境通过 `DecideEnv` 注入；只抬不降 |
 | `src/throughput-cache.ts` | ~252 | 按「主机 + 端口」缓存**真实观测到**的吞吐与并发 | 数据是下载本身免费产生的，不发额外探测；损坏 / 不可写一律当「无历史」 |
 | `src/resume.ts` | ~217 | 续传前的安全性判定与旁车指纹读写 | 唯一会主动删用户文件的模块 |
 | `src/verify.ts` | ~137 | 落盘字节数校验（退出码 0 **之后**）与跳过文案 | 远端长度未知或被压缩时如实报 `skipped`，不假装校验过 |
-| `src/downloader.ts` | ~542 | 参数拼接、子进程执行、进度解析接线 | `-k 1M` 与 `--allow-overwrite=true` 不可删；用户可见文案只出现可执行文件名 |
+| `src/disk.ts` | ~70 | 下载前磁盘空间预检 | `requiredFreeBytes` / `evaluateDiskSpace` 为纯函数；`statfs` 失败返回 `checked:false`，不阻断下载 |
+| `src/downloader.ts` | ~614 | 参数拼接、子进程执行、进度解析接线 | 随包子包缺失时查 `PATH` 上的 `aria2c` 并跑 `--version` 验证；aria2 / curl 均带重试；curl 重定向仅 http(s)；`-k 1M` 与 `--allow-overwrite=true` 不可删 |
 | `src/progress-parse.ts` | ~73 | aria2 摘要行 / curl 进度条解析、行切分 | 纯函数；真实样本在 `test/fixtures/` |
-| `src/progress.ts` | ~500 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；1.4.0 起记 `outPath` / `size` / `fileMtimeMs` |
+| `src/progress.ts` | ~519 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；`setTarget()` 在文件名确定后修正 label / outPath；1.4.0 起记 `outPath` / `size` / `fileMtimeMs` |
 | `src/status.ts` | ~346 | `download_status` 的只读扫描与两条轨道合并 | 任何读取失败都退化为「少一条任务」，并用 `scanFailedDirs` 如实报出 |
 | `src/cleanup.ts` | ~291 | `/api/smartdl.cleanup`：按保留窗口删**过期**的进度文件 | 与 `ProgressReporter.cleanup()` 不同 —— 这是给外部的触发入口，不接自动调用 |
 | `src/rpc.ts` | ~770 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`） | 路径**只能来自本插件自己的记录**；非法请求一律 `ok:false`，绝不按默认值执行 |
@@ -160,23 +180,27 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 
 ## 返回字段的语义边界
 
-`SmartDownloadResult` 里有四个容易混淆的字符串字段，写代码时必须分清：
+`SmartDownloadResult` 里有几个容易混淆的字段，写代码时必须分清：
 
 | 字段 | 回答的问题 | 何时出现 |
 | --- | --- | --- |
 | `reason` | 「为什么选了这种下载方式」 | 发生回退时有值；aria2 正常路径下是决策依据说明 |
 | `verifySkipped` | 「为什么这次没做**字节数**校验」 | 只在确实跳过了长度比对时有值；传了 `sha256` 且核对通过时**不出现**（内容已逐字节核对，再报只会误导） |
 | `sha256` | 「内容核对过了吗」 | 只在调用方传了 `sha256` 且核对通过时出现；它的**存在本身**就是「已逐字节核对」的证明 |
+| `checksum` / `checksumAlgorithm` | 「通用摘要核对过了吗、用的哪种算法」 | 只在调用方传了 `checksum` 且核对通过时出现；旧 `sha256` 路径不会额外返回这两个字段 |
+| `skipped` | 「这次是不是因为文件已存在而没下载」 | 只在 `ifExists: "skip"` 命中已有文件时出现；此时没有 `method` 字段 |
+| `diskCheckSkipped` | 「为什么这次没做磁盘空间预检」 | 只在远端大小已知、但 `statfs` 查询失败时出现；大小未知或响应被压缩时不出现 |
 | `mirrorSkipped` | 「请求了自动镜像，为什么没用上」 | 只在 `mirror: "auto"` 且未启用镜像时有值 |
 
-四者可能同时出现（`reason` + `verifySkipped` + `mirrorSkipped`），因此不能合并成一个
-字段——合并后总有一方被顶掉。`verifySkipped` 的取值只有两个（定义在 `src/verify.ts`），
-`mirrorSkipped` 只有三个（定义在 `src/auto-mirror.ts`），都由测试断言字面量。
+它们可能同时出现（例如 `reason` + `verifySkipped` + `mirrorSkipped` + `diskCheckSkipped`），
+因此不能合并成一个字段——合并后总有一方被顶掉。`verifySkipped` 的取值只有两个
+（定义在 `src/verify.ts`），`mirrorSkipped` 只有三个（定义在 `src/auto-mirror.ts`），
+都由测试断言字面量。
 
-`reason` / `verifySkipped` / `mirrorSkipped` 都是给模型读的诊断文案：含中文与平台串
+`reason` / `verifySkipped` / `mirrorSkipped` / `diskCheckSkipped` 都是给模型读的诊断文案：含中文与平台串
 （例如 `未找到 aria2 二进制（当前平台 darwin-arm64 不受支持或子包未安装）`），
 **不保证跨版本稳定**。程序化判断请用 `success` / `method` / `fellback` / `mirrored`
-以及 `sha256` 是否存在。
+以及 `sha256` / `checksum` / `skipped` 是否存在。
 
 ### 为什么完整性校验失败不回退 curl
 
@@ -190,11 +214,13 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 
 `ARIA2_TARGETS`（`src/downloader.ts`）把 `${process.platform}-${process.arch}`
 映射到四个 npm 子包。子包用 `os` / `cpu` 字段声明适用平台，npm / pnpm 在不匹配的
-平台上直接跳过安装。`getAria2Path()` 用 `require.resolve` 定位子包内的二进制；
-解析不到就返回 `null`，由 `decide()` 回退 curl。
+平台上直接跳过安装。`getAria2Path()` 先尝试 `require.resolve` 定位子包内的二进制；
+解析不到时再在 `PATH` 上查找 `aria2c`（Windows 会按 `PATHEXT` 展开），并对候选执行
+一次 `--version` 验证。只有两者都失败才返回 `null`，由 `decide()` 回退 curl。
 
-未列入 `ARIA2_TARGETS` 的平台（当前只有 macOS）行为是「插件可用但永远走 curl」，
-不报错也不假装支持。详见 [COMPATIBILITY.md](./COMPATIBILITY.md)。
+因此未列入 `ARIA2_TARGETS` 的平台（当前是 macOS）不再是「永远走 curl」：
+`PATH` 上有可用的 `aria2c` 时同样会多线程下载，没有时插件仍可用，只是走 curl
+单线程。详见 [COMPATIBILITY.md](./COMPATIBILITY.md)。
 
 ## 相关文档
 

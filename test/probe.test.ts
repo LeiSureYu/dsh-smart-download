@@ -470,3 +470,105 @@ test('服务器无视 identity 仍返回 gzip -> contentEncoding 被捕获，供
     await s.close()
   }
 })
+
+/* ---------------------- 1.5.0：Content-Disposition 文件名 ---------------------- */
+
+test('Content-Disposition：HEAD 带该头时原样带回，供调用方推导真实文件名', async () => {
+  const s = await startHandler((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'accept-ranges': 'bytes',
+        'content-length': String(BIG),
+        'content-disposition': 'attachment; filename="real-name.zip"',
+      })
+      res.end()
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  try {
+    const r = await probeUrl(`${s.base}/download`)
+    assert.equal(r.contentDisposition, 'attachment; filename="real-name.zip"')
+  } finally {
+    await s.close()
+  }
+})
+
+test('Content-Disposition：HEAD 无长度 -> Range GET 的头被采用', async () => {
+  const s = await startHandler((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'accept-ranges': 'bytes' })
+      res.end()
+      return
+    }
+    res.writeHead(206, {
+      'content-range': `bytes 0-0/${BIG}`,
+      'accept-ranges': 'bytes',
+      'content-length': '1',
+      'content-disposition': "attachment; filename*=UTF-8''%E4%B8%AD%E6%96%87.zip",
+    })
+    res.end('x')
+  })
+  try {
+    const r = await probeUrl(`${s.base}/download`)
+    assert.equal(r.contentLength, BIG, '前置条件：确实走了 Range GET')
+    assert.equal(r.contentDisposition, "attachment; filename*=UTF-8''%E4%B8%AD%E6%96%87.zip")
+  } finally {
+    await s.close()
+  }
+})
+
+test('Content-Disposition：HEAD 已知长度时不发 GET，采用 HEAD 的 Content-Disposition', async () => {
+  const s = await startHandler((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'accept-ranges': 'bytes',
+        'content-length': String(BIG),
+        'content-disposition': 'attachment; filename="head-name.zip"',
+      })
+      res.end()
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  try {
+    // HEAD 已给出长度与 Range 支持时不会发 GET，此时用 HEAD 的值。
+    const r = await probeUrl(`${s.base}/download`)
+    assert.equal(r.contentDisposition, 'attachment; filename="head-name.zip"')
+  } finally {
+    await s.close()
+  }
+})
+
+test('Content-Disposition：HEAD 无长度而走 Range GET 时，以 GET 的响应头为准', async () => {
+  const s = await startHandler((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'accept-ranges': 'bytes',
+        'content-disposition': 'attachment; filename="head-name.zip"',
+      })
+      res.end()
+      return
+    }
+    res.writeHead(206, {
+      'content-range': `bytes 0-0/${BIG}`,
+      'accept-ranges': 'bytes',
+      'content-length': '1',
+      'content-disposition': 'attachment; filename="get-name.zip"',
+    })
+    res.end('x')
+  })
+  try {
+    const r = await probeUrl(`${s.base}/download`)
+    assert.equal(r.contentDisposition, 'attachment; filename="get-name.zip"')
+  } finally {
+    await s.close()
+  }
+})
+
+test('Content-Disposition：两边都没有 -> undefined（不凭空编一个文件名）', async () => {
+  const r = await probeUrl(`${base}/supported`)
+  assert.equal(r.contentDisposition, undefined)
+})

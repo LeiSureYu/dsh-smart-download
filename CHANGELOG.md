@@ -11,6 +11,53 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-22
+
+**从「能下」补到「下得对、下得稳、下完找得到」。** 这一版加入通用摘要校验、同名文件
+策略、服务器文件名解析、下载前磁盘预检，并让 macOS 上已有的 `aria2c` 真正参与多线程
+下载；同时补上 aria2 / curl 的瞬时故障重试与 curl 的重定向协议限制。
+
+**From "it downloads" to "it downloads the right bytes, reliably, under the right
+name".** This release adds generic checksum verification, an if-exists policy,
+`Content-Disposition` filename handling, a disk-space preflight, and uses an
+`aria2c` found on `PATH` (including macOS). It also adds transient-failure retries
+for aria2 / curl and restricts curl redirects to HTTP(S).
+
+### 新增 / Added
+
+- **通用 `checksum`**：支持 MD5 / SHA-1 / SHA-256 / SHA-512。裸十六进制按长度识别
+  （32 / 40 / 64 / 128），也接受 `md5:` / `sha1=` / `SHA512(...)` 等前缀写法与
+  `sha256-` / `sha512-` 的 SRI 写法；成功后返回 `checksum` 与 `checksumAlgorithm`。
+  旧的 `sha256` 参数与返回字段保持兼容，二者同时给出会在下载前拒绝。
+- **`ifExists` 同名文件策略**：`overwrite`（默认）/ `skip` / `rename`。`skip` 不发
+  下载请求，但传了摘要时仍校验已有文件；`rename` 另存为 `name (1).ext`，绝不覆盖，
+  并禁用续传。批量条目可逐条设置。
+- **`Content-Disposition` 文件名**：URL 末段没有可用文件名时，读取服务器给出的
+  `filename*=` / `filename=`；查询串 `?filename=` / `?file=` 也会被识别。服务器
+  文件名属于不可信输入，统一经过 `sanitizeFilename()`，不会造成路径穿越。
+- **磁盘空间预检**：远端大小已知且响应未压缩时，要求可用空间不少于
+  `大小 + max(64MB, 5% × 大小)`，不足则在发请求前拒绝。`statfs` 不可用时继续下载，
+  并在结果里返回 `diskCheckSkipped`，不假装检查过。
+- **`PATH` 上的 aria2**：随包子包不可用时，查找 `PATH` 上的 `aria2c` 并执行
+  `--version` 验证；macOS 用户安装 Homebrew aria2 后也能多线程下载。
+
+### 变更 / Changed
+
+- aria2 使用 `-m 3 --retry-wait=2`，curl 使用
+  `--retry 3 --retry-all-errors --retry-delay 2`，避免瞬时 5xx / 连接重置直接失败。
+- curl 增加 `--proto-redir =http,https`，重定向目标同样只允许 HTTP(S)。
+- 单条与批量 output schema 同步新增 `checksum` / `checksumAlgorithm` /
+  `skipped` / `diskCheckSkipped`；`additionalProperties: false` 的两支都保持一致。
+- 进度上报新增 `setTarget()`，在探测拿到真实文件名后修正面板中的文件名与
+  `outPath`，避免进度记录指向一个从未落盘的临时名。
+
+### 测试 / Tests
+
+- 新增 `test/disk.test.ts`，并补充 checksum、`ifExists`、`Content-Disposition`、
+  `PATH` aria2、重试参数与 output schema 的用例。
+- 基线：**599 例（596 通过 / 3 跳过 / 0 失败）**；行覆盖 **99.23%** / 分支
+  **91.83%** / 函数 **97.33%**。
+
 ## [1.4.6] - 2026-10-13
 
 **安装段改成与生态一致：图形界面优先。** 此前 README 把命令行

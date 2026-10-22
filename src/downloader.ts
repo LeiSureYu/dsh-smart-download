@@ -4,13 +4,21 @@
  * - 否则回退到系统自带的 curl；
  * - 统一处理 AbortSignal 取消、Windows 隐藏窗口、stderr 收集与进度解析。
  */
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type SpawnOptions,
+} from 'node:child_process'
 import { createRequire } from 'node:module'
+import { statSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import {
   basename,
+  delimiter as pathDelimiter,
   dirname,
   isAbsolute,
+  join as joinPath,
   resolve as resolvePath,
 } from 'node:path'
 import {
@@ -67,17 +75,70 @@ export function aria2TargetFor(
 
 /**
  * 定位随插件分发的 aria2 二进制。
- * 按当前平台 / 架构选择子包；平台不受支持或子包未安装时返回 null，
- * 由调用方回退到 curl。
+ * 先按当前平台 / 架构选择子包；子包不存在时再查 PATH 上的 `aria2c`。
+ *
+ * 为什么必须查 PATH（1.5.0）：macOS 没有随包子包（ARIA2_TARGETS 里没有 darwin），
+ * 而 Homebrew 安装的 `aria2c` 完全可用。此前 darwin 在第一步就直接返回 null，
+ * 于是 macOS 用户永远只能单线程 curl —— 明明装了 aria2 也用不上。
+ *
+ * 为什么查到的 PATH 二进制还要跑一次 `--version`：PATH 上可能是一个同名脚本、
+ * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在
+ * 「已经开始下载」之后；先验证则能在探测前就决定回退 curl，错误路径更短。
+ *
+ * @returns 可执行的 aria2 路径；找不到或验证失败时返回 null（调用方回退 curl）
  */
 export function getAria2Path(): string | null {
   const target = aria2TargetFor(process.platform, process.arch)
-  if (!target) return null
-  try {
-    return require.resolve(`${target.pkg}/${target.bin}`)
-  } catch {
-    return null
+  if (target) {
+    try {
+      return require.resolve(`${target.pkg}/${target.bin}`)
+    } catch {
+      // 子包没装：继续查 PATH，而不是直接放弃（macOS / 用户自行安装的场景）
+    }
   }
+  return findAria2OnPath()
+}
+
+/**
+ * 在 PATH 上查找可用的 aria2c，并验证它确实能执行。
+ *
+ * 抽成独立函数是为了可单测：测试可以传入一个只包含临时目录的 PATH，而不必
+ * 依赖开发机上是否装了 aria2。`spawnSync` 带超时与 `windowsHide`，避免探测
+ * 一个坏二进制时挂住整个工具调用，或在 Windows 上闪出黑框。
+ *
+ * @param envPath 用于查找的 PATH 字符串；缺省读 `process.env.PATH`
+ */
+export function findAria2OnPath(envPath: string | undefined = process.env.PATH): string | null {
+  if (!envPath) return null
+  const exts =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+      : ['']
+  const names = process.platform === 'win32' ? ['aria2c', 'aria2c.exe'] : ['aria2c']
+  const dirs = envPath.split(pathDelimiter).filter((dir) => dir.length > 0)
+
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidates =
+        process.platform === 'win32' && !/\.(exe|cmd|bat|com)$/i.test(name)
+          ? exts.map((ext) => joinPath(dir, name + ext.toLowerCase()))
+          : [joinPath(dir, name)]
+      for (const candidate of candidates) {
+        try {
+          if (!statSync(candidate).isFile()) continue
+        } catch {
+          continue
+        }
+        const check = spawnSync(candidate, ['--version'], {
+          windowsHide: true,
+          timeout: 5000,
+          encoding: 'utf-8',
+        })
+        if (check.status === 0) return candidate
+      }
+    }
+  }
+  return null
 }
 
 /**
@@ -122,6 +183,11 @@ export function buildAria2Args(
     '-k', '1M',
     // 断点续传：仅在确认安全时开启（见 src/resume.ts）
     ...(resume ? ['-c'] : []),
+    // 重试：aria2 默认 max-tries=5，但默认 retry-wait=0，失败后立刻重试，
+    // 对「临时 5xx / 连接被重置」这种瞬时故障几乎等于不重试。3 次 + 2 秒间隔
+    // 是保守取值：既能跨过短抖动，又不会让一个确实不可用的地址拖太久。
+    '-m', '3',
+    '--retry-wait=2',
     '--allow-overwrite=true', // 不能续传时覆盖旧文件，而不是另存 f.1.bin
     '--file-allocation=none', // 不预分配磁盘空间，Windows 上更快
     '--console-log-level=warn',
@@ -177,11 +243,19 @@ export function buildCurlArgs(
   return [
     '--progress-bar',
     '-L', // 跟随重定向
+    // 重定向协议白名单：`=` 不能省，否则 curl 会把 "http,https" 当成文件名。
+    // 只允许 http/https 跳转，避免一个 http 地址把我们带到 file:// 或 ftp://。
+    '--proto-redir', '=http,https',
     // 断点续传：自动读取已下载长度并从断点继续；文件不存在时从 0 开始
     ...(resume ? ['-C', '-'] : []),
     '-o', outputPath,
     '--fail', // HTTP 错误时返回非零退出码
     '--show-error', // 输出错误信息
+    // 瞬时网络故障重试：--retry-all-errors 让 5xx / 连接重置也重试，
+    // 而不是只重试 curl 认为「可重试」的少数错误。2 秒间隔避免瞬间打满对端。
+    '--retry', '3',
+    '--retry-all-errors',
+    '--retry-delay', '2',
     // 带宽上限（可选）：curl 是单连接，--limit-rate 就是这一条任务的上限；
     // 批量时由调用方按并发位分好份额再传进来（见 src/index.ts 的批量编排）。
     // 缺省时这一项整个不出现 —— 命令行与 1.2.0 逐字节相同（回归项）。

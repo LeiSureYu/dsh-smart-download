@@ -41,7 +41,7 @@ test('apply(): 工具 schema 通过 dsh-tools 校验并注册两个工具', () =
   )
 })
 
-test('smart_download 的 parameters 含 10 项，url 与 targets 二选一（都不再是必填）', () => {
+test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都不再是必填）', () => {
   const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
   const ctx = stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
     registered.push(tool)
@@ -70,7 +70,9 @@ test('smart_download 的 parameters 含 10 项，url 与 targets 二选一（都
   assert.deepEqual(
     Object.keys(params.properties).sort(),
     [
+      'checksum',
       'headers',
+      'ifExists',
       'maxBandwidth',
       'mirror',
       'output',
@@ -165,10 +167,15 @@ test('smart_download 的 parameters 含 10 项，url 与 targets 二选一（都
   assert.equal(items.additionalProperties, false)
   assert.deepEqual(
     Object.keys(items.properties ?? {}).sort(),
-    ['output', 'sha256', 'url'],
-    '条目字段与单条目同构：url / output / sha256',
+    ['checksum', 'ifExists', 'output', 'sha256', 'url'],
+    '条目字段与单条目同构：url / output / sha256 / checksum / ifExists',
   )
   assert.deepEqual(items.required, ['url'], '条目的 url 必填')
+  assert.deepEqual(
+    (items.properties?.ifExists as { enum?: string[] } | undefined)?.enum,
+    ['overwrite', 'skip', 'rename'],
+    '条目级 ifExists 必须把三个合法值写进 schema',
+  )
 
   // 总带宽上限：字符串 + 必须说明单位与「一批共享」语义
   assert.equal(params.properties.maxBandwidth?.type, 'string')
@@ -185,6 +192,15 @@ test('smart_download 的 parameters 含 10 项，url 与 targets 二选一（都
   // 不会想到把文档里的校验和传进来 —— 这一项的全部价值就在这里
   assert.match(params.properties.sha256?.description ?? '', /checksum|SHA-256/i)
   assert.match(params.properties.sha256?.description ?? '', /official documentation/i)
+  // 通用摘要必须让模型知道支持哪些算法，否则 MD5/SHA-1 用户不会想到这个参数
+  assert.match(params.properties.checksum?.description ?? '', /md5/i)
+  assert.match(params.properties.checksum?.description ?? '', /sha1/i)
+  assert.match(params.properties.checksum?.description ?? '', /sha512/i)
+  assert.deepEqual(
+    (params.properties.ifExists as { enum?: string[] } | undefined)?.enum,
+    ['overwrite', 'skip', 'rename'],
+    'ifExists 必须把三个合法值写进 schema',
+  )
   // headers 是 object 节点：dsh-tools 强制要求显式声明 additionalProperties
   assert.equal(params.properties.headers?.type, 'object')
   assert.equal(params.properties.headers?.additionalProperties, true)
@@ -331,6 +347,67 @@ test('smart_download.render：SHA-256 已校验与自动镜像未生效都必须
   assert.equal(text({ success: true, method: 'aria2' }), 'Download succeeded via aria2')
 })
 
+test('smart_download.render：通用摘要按真实算法显示，skip 不带 via undefined', () => {
+  const render = loadRender('smart_download')
+  const text = (value: unknown): string =>
+    render({} as never, value as never)
+      .map((part) => part.text)
+      .join('')
+
+  // MD5 校验通过时不得冒充 SHA-256
+  assert.equal(
+    text({
+      success: true,
+      method: 'aria2',
+      checksum: 'a'.repeat(32),
+      checksumAlgorithm: 'md5',
+    }),
+    'Download succeeded via aria2 (MD5 verified)',
+  )
+  // skip 是成功但不走下载器：不得拼出 "via undefined"
+  assert.equal(
+    text({ success: true, path: '/tmp/a.zip', skipped: true }),
+    'Download skipped (already exists): /tmp/a.zip',
+  )
+  assert.doesNotMatch(text({ success: true, path: '/tmp/a.zip', skipped: true }), /undefined/)
+  // 跳过下载但仍校验了已有文件时，摘要标记必须保留
+  assert.equal(
+    text({
+      success: true,
+      path: '/tmp/a.zip',
+      skipped: true,
+      checksum: 'b'.repeat(64),
+      checksumAlgorithm: 'sha256',
+    }),
+    'Download skipped (already exists): /tmp/a.zip (SHA-256 verified)',
+  )
+})
+
+test('smart_download.output schema：单条与批量都声明 1.5.0 新增字段', () => {
+  const registered: Array<{ name: string; output: { schema: unknown } }> = []
+  apply(stubCtx((tool: never) => registered.push(tool)) as never)
+  const schema = registered.find((t) => t.name === 'smart_download')!.output.schema as {
+    oneOf: Array<{
+      properties: Record<string, unknown>
+      additionalProperties?: boolean
+    }>
+  }
+
+  assert.equal(schema.oneOf.length, 2)
+  const [single, batch] = schema.oneOf
+  const item = (
+    batch!.properties.results as {
+      items: { properties: Record<string, unknown>; additionalProperties?: boolean }
+    }
+  ).items
+  for (const key of ['checksum', 'checksumAlgorithm', 'skipped', 'diskCheckSkipped']) {
+    assert.ok(single!.properties[key], `单条 output 必须声明 ${key}`)
+    assert.ok(item.properties[key], `批量 item output 必须声明 ${key}`)
+  }
+  assert.equal(single!.additionalProperties, false)
+  assert.equal(item.additionalProperties, false)
+})
+
 /* ---------------- 1.3.0：批量（路线 A）的模型可见文案 ---------------- */
 
 test('smart_download.render：批量结果先给汇总，再逐条列出成功条目', () => {
@@ -382,6 +459,43 @@ test('smart_download.render：批量里的失败与取消必须逐条给出原�
   // 失败与取消必须能区分，且各自带原因
   assert.match(out, /\[failed\] https:\/\/e\/bad\.zip: HTTP 404/)
   assert.match(out, /\[cancelled\] https:\/\/e\/slow\.zip: 已取消/)
+})
+
+test('smart_download.render：批量 skip 使用 [skipped] 且不出现 via undefined', () => {
+  const render = loadRender('smart_download')
+  const text = (value: unknown): string =>
+    render({} as never, value as never)
+      .map((part) => part.text)
+      .join('')
+
+  const out = text({
+    batch: 'b-3',
+    succeeded: 2,
+    failed: 0,
+    cancelled: 0,
+    results: [
+      {
+        url: 'https://e/a.zip',
+        output: '/tmp/a.zip',
+        success: true,
+        path: '/tmp/a.zip',
+        skipped: true,
+      },
+      {
+        url: 'https://e/b.zip',
+        output: '/tmp/b.zip',
+        success: true,
+        method: 'curl',
+        path: '/tmp/b.zip',
+        checksum: 'c'.repeat(40),
+        checksumAlgorithm: 'sha1',
+      },
+    ],
+  })
+
+  assert.match(out, /\[skipped\] https:\/\/e\/a\.zip -> \/tmp\/a\.zip/)
+  assert.match(out, /\[ok\] https:\/\/e\/b\.zip via curl -> \/tmp\/b\.zip \(SHA-1 verified\)/)
+  assert.doesNotMatch(out, /via undefined/)
 })
 
 test('download_status.render：无任务给固定文案，有任务逐行列出（速度 / ETA 可选）', () => {  const render = loadRender('download_status')

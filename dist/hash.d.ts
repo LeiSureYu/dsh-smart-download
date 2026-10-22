@@ -1,5 +1,28 @@
-/** 本插件支持的摘要算法（固定 SHA-256，不接受调用方指定算法） */
+/** 默认摘要算法：sha256 简写与 SRI 走这一种 */
 export declare const HASH_ALGORITHM = "sha256";
+/** 本插件支持的摘要算法（Node crypto 的名字） */
+export type ChecksumAlgorithm = 'sha256' | 'sha512' | 'sha1' | 'md5';
+/** 算法 → 十六进制摘要长度 */
+export declare const CHECKSUM_HEX_LENGTHS: Readonly<Record<ChecksumAlgorithm, number>>;
+/** 算法 → 人类可读标签（用于文案，避免在用户面前出现 `sha1` 这种裸名） */
+export declare const CHECKSUM_LABELS: Readonly<Record<ChecksumAlgorithm, string>>;
+/** 归一化后的摘要：算法 + 小写十六进制 */
+export interface ChecksumSpec {
+    algorithm: ChecksumAlgorithm;
+    digest: string;
+}
+/**
+ * 把各种写法的摘要归一化成 `{ algorithm, digest }`。
+ *
+ * 支持：
+ *   - 裸十六进制：按长度识别 MD5(32) / SHA-1(40) / SHA-256(64) / SHA-512(128)；
+ *   - 带算法前缀：`sha512:<hex>` / `md5=<hex>` / `SHA1(<hex>)`；
+ *   - SRI：`sha256-<base64>` / `sha512-<base64>`。
+ *
+ * 裸摘要按长度识别是**唯一**不歧义的规则：四种长度互不相同。带前缀时仍然校验
+ * 长度与算法匹配，例如 `md5:<64位>` 会被拒绝，而不是悄悄按 SHA-256 算。
+ */
+export declare function normalizeChecksum(input: string): ChecksumSpec | null;
 /**
  * 把官方文档里各种写法的 SHA-256 归一化成 64 位小写十六进制。
  *
@@ -22,6 +45,17 @@ export declare function normalizeSha256(input: string): string | null;
  * @returns 小写十六进制摘要；文件不存在 / 读不了时返回 null
  */
 export declare function sha256File(path: string): Promise<string | null>;
+/**
+ * 流式计算任意受支持算法的文件摘要。
+ *
+ * 与 `sha256File` 同一套实现：只把 `createHash` 的算法名参数化，避免两套流式
+ * 读取逻辑各自演化（其中一套漏了 error 处理就是「校验静默跳过」）。
+ *
+ * @param path 待校验文件路径
+ * @param algorithm 摘要算法，默认 sha256
+ * @returns 小写十六进制摘要；文件不存在 / 读不了时返回 null
+ */
+export declare function hashFile(path: string, algorithm?: ChecksumAlgorithm): Promise<string | null>;
 /** 哈希校验结论 */
 export type HashOutcome = 
 /** 内容一致：`digest` 是实际算出的摘要，等于调用方给的期望值 */
@@ -34,10 +68,16 @@ export type HashOutcome =
     kind: 'mismatch';
     expected: string;
     actual: string;
+    /** 期望摘要所用算法；旧调用点不传时按 SHA-256 渲染 */
+    algorithm?: ChecksumAlgorithm;
 }
-/** 文件读不到，无法计算 —— 退出码 0 却没有可读文件，本身就是异常 */
+/**
+ * 文件读不到，无法计算 —— 退出码 0 却没有可读文件，本身就是异常。
+ * `algorithm` 用于让错误文案说出真正在算的算法；旧调用点不传时按 SHA-256 渲染。
+ */
  | {
     kind: 'unreadable';
+    algorithm?: ChecksumAlgorithm;
 };
 /**
  * 纯函数：比较期望摘要与实际摘要。不碰文件系统，便于单元测试。
@@ -47,6 +87,10 @@ export type HashOutcome =
  */
 export declare function verifySha256(expected: string, actual: string | null): HashOutcome;
 /**
+ * 纯函数：比较期望摘要与实际摘要（任意受支持算法）。
+ */
+export declare function verifyChecksum(expected: ChecksumSpec, actual: string | null): HashOutcome;
+/**
  * 文件读不到时的固定文案。
  *
  * 定成常量而不是就地拼字符串，理由与 `verify.ts` 里的跳过文案相同：
@@ -54,6 +98,13 @@ export declare function verifySha256(expected: string, actual: string | null): H
  *
  * 为什么带「下一步」：这条路径意味着「下载器说成功了，但产物读不出来」，
  * 用户能做的只有「重跑一次」和「去看路径」两件事，必须写明。
+ */
+export declare function checksumUnreadableMessage(algorithm?: ChecksumAlgorithm): string;
+/**
+ * SHA-256 路径的固定文案。
+ *
+ * 保留这个常量而不是让所有调用点改用函数：`sha256` 是 1.2.0 起的公开入参，
+ * 它的错误文案已经被测试逐字锁定。函数版本只用于通用 `checksum` 的其它算法。
  */
 export declare const HASH_UNREADABLE_MESSAGE: string;
 /**
@@ -89,3 +140,5 @@ export declare function describeHashFailure(outcome: Exclude<HashOutcome, {
 }>): string;
 /** 哈希校验通过时写进进度终态与工具返回的固定文案 */
 export declare const HASH_VERIFIED_MESSAGE = "SHA-256 \u5DF2\u6821\u9A8C";
+/** 任意算法校验通过时的固定文案 */
+export declare function checksumVerifiedMessage(spec: ChecksumSpec): string;

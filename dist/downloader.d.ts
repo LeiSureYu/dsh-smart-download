@@ -29,10 +29,29 @@ export interface ProcessLineHandlers {
 export declare function aria2TargetFor(platform: string, arch: string): Aria2Target | null;
 /**
  * 定位随插件分发的 aria2 二进制。
- * 按当前平台 / 架构选择子包；平台不受支持或子包未安装时返回 null，
- * 由调用方回退到 curl。
+ * 先按当前平台 / 架构选择子包；子包不存在时再查 PATH 上的 `aria2c`。
+ *
+ * 为什么必须查 PATH（1.5.0）：macOS 没有随包子包（ARIA2_TARGETS 里没有 darwin），
+ * 而 Homebrew 安装的 `aria2c` 完全可用。此前 darwin 在第一步就直接返回 null，
+ * 于是 macOS 用户永远只能单线程 curl —— 明明装了 aria2 也用不上。
+ *
+ * 为什么查到的 PATH 二进制还要跑一次 `--version`：PATH 上可能是一个同名脚本、
+ * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在
+ * 「已经开始下载」之后；先验证则能在探测前就决定回退 curl，错误路径更短。
+ *
+ * @returns 可执行的 aria2 路径；找不到或验证失败时返回 null（调用方回退 curl）
  */
 export declare function getAria2Path(): string | null;
+/**
+ * 在 PATH 上查找可用的 aria2c，并验证它确实能执行。
+ *
+ * 抽成独立函数是为了可单测：测试可以传入一个只包含临时目录的 PATH，而不必
+ * 依赖开发机上是否装了 aria2。`spawnSync` 带超时与 `windowsHide`，避免探测
+ * 一个坏二进制时挂住整个工具调用，或在 Windows 上闪出黑框。
+ *
+ * @param envPath 用于查找的 PATH 字符串；缺省读 `process.env.PATH`
+ */
+export declare function findAria2OnPath(envPath?: string | undefined): string | null;
 /**
  * 拼接 aria2 命令行参数。
  * -x/-s 使用决策得到的并发数；

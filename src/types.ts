@@ -20,6 +20,16 @@ export interface DownloadTarget {
   output?: string
   /** 该条目的期望 SHA-256，可选；逐条独立校验 */
   sha256?: string
+  /**
+   * 该条目的期望摘要，可选；支持 sha256 / sha512 / sha1 / md5。
+   * 与 `sha256` 同时给出会被拒绝（两种真相）。
+   */
+  checksum?: string
+  /**
+   * 该条目的同名文件策略，可选；缺省沿用单条目默认值 `overwrite`。
+   * 逐条独立生效，因为同一批里「覆盖安装包」与「保留已有报告」完全可能同时存在。
+   */
+  ifExists?: IfExistsPolicy
 }
 
 /** 工具入参 */
@@ -82,6 +92,18 @@ export interface SmartDownloadArgs {
    * 「等长但内容不同」。摘要不合法会在下载开始前直接拒绝。
    */
   sha256?: string
+  /**
+   * 通用摘要，可选；接受 `sha512:<hex>` / `md5:<hex>` / `sha1:<hex>`，
+   * 也接受裸十六进制（按长度识别算法）。与 `sha256` 二选一。
+   */
+  checksum?: string
+  /**
+   * 目标文件已存在时的策略，可选，默认 `overwrite`。
+   * - `overwrite`：覆盖（沿用 aria2 --allow-overwrite / curl -o）
+   * - `skip`：不下载，返回 skipped: true（已有文件若带摘要仍会校验）
+   * - `rename`：另存为 `name (1).ext`，绝不覆盖已有文件
+   */
+  ifExists?: IfExistsPolicy
   /** `User-Agent`，可选；探测与下载使用同一个值 */
   userAgent?: string
   /** `Referer`，可选；部分站点/镜像按它放行 */
@@ -97,6 +119,9 @@ export interface SmartDownloadArgs {
 /** 下载使用的底层方式 */
 export type DownloadMethod = 'aria2' | 'curl'
 
+/** 同名冲突策略 */
+export type IfExistsPolicy = 'overwrite' | 'skip' | 'rename'
+
 /** 工具返回结果 */
 export interface SmartDownloadResult {
   /** 是否下载成功 */
@@ -104,7 +129,7 @@ export interface SmartDownloadResult {
   /** 最终落盘的文件路径 */
   path: string
   /** 实际使用的下载方式 */
-  method: DownloadMethod
+  method?: DownloadMethod
   /** 文件大小（字节），探测到时返回 */
   size?: number
   /** 是否发生了回退（aria2 -> curl） */
@@ -127,6 +152,17 @@ export interface SmartDownloadResult {
    * 仅在调用方传了 `sha256` 且校验通过时出现 —— 它的存在就是「内容已核对」。
    */
   sha256?: string
+  /** 实际算出的摘要（通用校验时出现） */
+  checksum?: string
+  /** 实际摘要所用算法：md5 / sha1 / sha256 / sha512 */
+  checksumAlgorithm?: string
+  /** 因目标已存在且 ifExists=skip 而未下载（此时 success 仍为 true） */
+  skipped?: boolean
+  /**
+   * 本次**没有**做磁盘空间预检的说明（仅在远端声明了大小、但 `statfs` 查询失败时出现）。
+   * 远端大小未知时该字段不出现：那种情况下 `verifySkipped` 已经说明校验受限。
+   */
+  diskCheckSkipped?: string
   /** 实际请求的地址（启用镜像时为「镜像前缀 + 原始 URL」，否则等于原始 URL） */
   requestedUrl: string
   /** 是否走了镜像加速 */
@@ -176,6 +212,14 @@ export interface BatchItemResult {
   verifySkipped?: string
   /** 校验通过的 SHA-256（传了 sha256 且通过时出现） */
   sha256?: string
+  /** 实际算出的摘要（通用校验时出现） */
+  checksum?: string
+  /** 实际摘要所用算法 */
+  checksumAlgorithm?: string
+  /** 因目标已存在且 ifExists=skip 而未下载 */
+  skipped?: boolean
+  /** 未做磁盘空间预检的说明（仅在 statfs 查询失败时出现） */
+  diskCheckSkipped?: string
   /** 实际请求的地址（启用镜像时与 url 不同） */
   requestedUrl?: string
   /** 是否走了镜像 */
@@ -217,6 +261,13 @@ export interface ProbeResult {
   acceptRanges?: string
   /** Content-Type 响应头 */
   contentType?: string
+  /**
+   * `Content-Disposition` 响应头原始值。
+   *
+   * 很多下载站（尤其是 GitHub release / 对象存储）的 URL 末段没有真实文件名，
+   * 真名只在这个头里。调用方据此推导落盘文件名，避免所有下载都叫 `download`。
+   */
+  contentDisposition?: string
   /** 不支持多线程 / 回退的原因 */
   reason?: string
   /**

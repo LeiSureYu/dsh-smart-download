@@ -6,7 +6,8 @@
 ## 一句话结论
 
 Windows 与 Linux 的 x64 / arm64 四个组合是**完整支持**：随包 aria2 多线程加速可用。
-macOS **能用但不会加速** —— 插件装得上、下得动，只是永远走 `curl` 单线程。
+macOS **插件完全可用**；`PATH` 上有可用的 `aria2c`（例如 `brew install aria2` 安装的）时
+同样多线程，没有时才回退 `curl` 单线程。
 
 ## 平台矩阵
 
@@ -16,15 +17,20 @@ macOS **能用但不会加速** —— 插件装得上、下得动，只是永�
 | Windows | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-win32-arm64` | 第三方 ARM64 构建（官方无此架构） |
 | Linux | x64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-x64` | musl 静态构建，任意发行版可用 |
 | Linux | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-arm64` | 同上 |
-| macOS | x64 / arm64 | ⚠️ 走 curl | ❌ | — | 无可信来源的二进制子包，见下 |
+| macOS | x64 / arm64 | ✅ | `PATH` 有 `aria2c` 时支持 | — | 不随包分发，可用 Homebrew 安装，见下 |
 
-**「插件可用」与「多线程可用」是两件事。** 每个支持平台对应一个独立 npm 子包，
-子包用 `os` / `cpu` 字段声明适用平台。包管理器在不匹配的平台上会**直接跳过安装**，
-不会报错；`src/downloader.ts` 的 `getAria2Path()` 解析不到二进制时返回 `null`，
-由 `decide()` 回退到 `curl`，并在返回结果的 `reason` 里写明「未找到 aria2 二进制
-（当前平台 … 不受支持或子包未安装）」。
+**「插件可用」与「多线程可用」是两件事。** Windows / Linux 的四个组合各对应一个独立
+npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在不匹配的平台上会**直接跳过安装**，
+不会报错。`src/downloader.ts` 的 `getAria2Path()` 按以下顺序定位 aria2：
 
-因此**不支持的平台不会装出一个坏掉的插件**，只会装出一个单线程下载器。
+1. 尝试 `require.resolve` 随包二进制子包；
+2. 子包不可用时，在 `PATH` 上查找 `aria2c`（Windows 按 `PATHEXT` 展开）；
+3. 对找到的候选执行一次 `aria2c --version`，退出码为 0 才采用；
+4. 两条路径都失败才返回 `null`，由 `decide()` 回退到 `curl`，并在返回结果的 `reason`
+   里写明「未找到 aria2 二进制（当前平台 … 不受支持或子包未安装）」。
+
+因此**没有随包子包的平台不会装出一个坏掉的插件**，只会装出一个单线程下载器；
+如果用户在 `PATH` 上自备了可用的 aria2，则仍可多线程。
 
 ### macOS 为什么搁置
 
@@ -80,7 +86,17 @@ macOS **能用但不会加速** —— 插件装得上、下得动，只是永�
 但那是**新增长期维护负担**而不是「补个子包」（runner 标签有生命周期：`macos-14` 已进入
 废弃流程，见 <https://github.com/actions/runner-images/issues/13518>），且两条前置条件
 未确证，1.3 内不做。因此如实搁置。**没有硬做的版本。**
-在 macOS 上插件保持可用、行为可预测：所有下载走 `curl`，路径与校验逻辑与其他平台一致。
+在 macOS 上插件保持可用、行为可预测：`PATH` 上没有可用 `aria2c` 时所有下载走 `curl`，
+路径、校验与进度逻辑与其他平台一致。想启用多线程可自行安装：
+
+```bash
+brew install aria2
+aria2c --version
+```
+
+安装后如果 DSH 已经启动，建议重启宿主以刷新 `PATH`。**`PATH` 上的 aria2 是用户自行安装、
+非本项目分发的二进制**，项目不校验它的来源或哈希；随包二进制才有发布前的哈希核对。
+这一点是信任边界，不是兼容性差异。
 
 如果后续补齐了 macOS 子包，只需要往 `ARIA2_TARGETS`（`src/downloader.ts`）加
 `darwin-x64` / `darwin-arm64` 两项并发布对应子包，其余代码不用改。
@@ -157,16 +173,17 @@ dsh plugin --profile <profile> revoke-version <包@版本> --dsh-version <精确
 | `0.2.1` ~ `0.3.0` | ✅ 通过 | 已经写成预发布元组 |
 | `0.4.0` | ❌ 被拒 | 三个 `dsh-client-*` peer 写的是 `>=0.1.7-rc.1 <0.2.0-0` |
 | `0.4.1` ~ `1.0.1` | ✅ 通过 | 三个 `dsh-client-*` peer 补上了 0.2.0 分支 |
-| `1.1.0` | ✅ 通过 | 当前版本 |
+| `1.1.0` ~ `1.4.6` | ✅ 通过 | 已发布版本 |
+| `1.5.0` | ✅ 通过 | 当前版本 |
 
 因此 0.4.0 的用户升级后即可恢复；0.4.1 ~ 1.0.1 的用户在 0.2.0 上本来就能用，
-升级到 1.1.0 主要是拿到桌面版说明与这份兼容性文档。
+升级到 1.5.0 可拿到通用摘要校验、`ifExists`、磁盘预检、服务器文件名与 `PATH` aria2 支持。
 
 ### 包管理器要求
 
 npm 与 pnpm 都可以，但**必须支持 `optionalDependencies` 的 `os` / `cpu` 过滤**
-（npm 7+ / pnpm 6+ 均支持）。极老的镜像源可能没有同步这四个子包，表现为
-「装完一直走 curl」；切回官方 npm 源重装即可，具体排查见
+（npm 7+ / pnpm 6+ 均支持）。极老的镜像源可能没有同步这四个随包子包，表现为
+「在四个随包平台上装完一直走 curl」；切回官方 npm 源重装即可，具体排查见
 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)。
 
 **pnpm 11 的本机注意事项**：`pnpm.onlyBuiltDependencies` 写在 `package.json` 的 `pnpm`
@@ -244,6 +261,6 @@ macOS `open -R`、Linux `xdg-open`）。缺这个服务只会少一点原生贴�
 ## 相关文档
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) —— 内部结构与决策表
-- [SECURITY.md](./SECURITY.md) —— 四层防护与威胁模型
+- [SECURITY.md](./SECURITY.md) —— 五层防护与威胁模型
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) —— 症状 → 原因 → 处理
 - [REVIEW-1.0.md](./REVIEW-1.0.md) —— 1.0 代码审查记录

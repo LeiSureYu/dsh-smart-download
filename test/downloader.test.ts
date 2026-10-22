@@ -8,7 +8,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  statSync,
+} from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,6 +30,7 @@ import {
   buildCurlArgs,
   downloadWithAria2,
   downloadWithCurl,
+  findAria2OnPath,
   getAria2Path,
   runProcess,
   summarySpeedBytes,
@@ -35,6 +45,8 @@ test('buildAria2Args 纯文件名 -> 仅使用 -o（默认 8 连接 + 续传 + �
     '-s', '8',
     '-k', '1M',
     '-c',
+    '-m', '3',
+    '--retry-wait=2',
     '--allow-overwrite=true',
     '--file-allocation=none',
     '--console-log-level=warn',
@@ -93,9 +105,13 @@ test('buildCurlArgs 默认不续传：progress-bar，无 silent，无 -C -', () 
   assert.deepEqual(args, [
     '--progress-bar',
     '-L',
+    '--proto-redir', '=http,https',
     '-o', 'b.zip',
     '--fail',
     '--show-error',
+    '--retry', '3',
+    '--retry-all-errors',
+    '--retry-delay', '2',
     'https://example.com/b.zip',
   ])
 })
@@ -105,10 +121,14 @@ test('buildCurlArgs resume=true -> 在 -L 之后插入 -C -', () => {
   assert.deepEqual(args, [
     '--progress-bar',
     '-L',
+    '--proto-redir', '=http,https',
     '-C', '-',
     '-o', 'b.zip',
     '--fail',
     '--show-error',
+    '--retry', '3',
+    '--retry-all-errors',
+    '--retry-delay', '2',
     'https://example.com/b.zip',
   ])
 })
@@ -118,6 +138,31 @@ test('buildCurlArgs resume=false -> 明确不含 -C', () => {
   assert.equal(args.includes('-C'), false)
   // -o 与输出路径必须紧邻，续传开关不能插到中间
   assert.equal(args[args.indexOf('-o') + 1], 'b.zip')
+})
+
+test('buildCurlArgs 限制重定向协议 -> --proto-redir 必须带等号且只放行 http/https', () => {
+  // 没有等号时 curl 会把 `http,https` 当成一个「要跳转到的文件名」，限制不会生效。
+  // 这一条是安全边界：不能让一个 http 地址把我们带到 file:// 或 ftp://。
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip')
+  const at = args.indexOf('--proto-redir')
+  assert.ok(at >= 0, '必须显式限制重定向协议')
+  assert.equal(args[at + 1], '=http,https', '值必须以 = 开头')
+  assert.ok(at > args.indexOf('-L'), '限制必须紧跟重定向开关之后')
+})
+
+test('buildCurlArgs 重试 -> 3 次、所有错误、2 秒间隔', () => {
+  const args = buildCurlArgs('https://example.com/b.zip', 'b.zip')
+  assert.equal(args[args.indexOf('--retry') + 1], '3')
+  assert.ok(args.includes('--retry-all-errors'), '瞬时 5xx / 连接重置也要重试')
+  assert.equal(args[args.indexOf('--retry-delay') + 1], '2')
+  assert.equal(args[args.length - 1], 'https://example.com/b.zip', 'URL 仍必须是最后一个参数')
+})
+
+test('buildAria2Args 重试 -> -m 3 与 --retry-wait=2', () => {
+  const args = buildAria2Args('https://example.com/a.zip', 'a.zip')
+  assert.equal(args[args.indexOf('-m') + 1], '3')
+  assert.ok(args.includes('--retry-wait=2'))
+  assert.equal(args[args.length - 1], 'https://example.com/a.zip')
 })
 
 /* ------------------------------ 自定义请求头 ------------------------------ */
@@ -130,9 +175,13 @@ test('buildCurlArgs 带请求头 -> 每个头一条 -H，URL 仍排在最后', (
   assert.deepEqual(args, [
     '--progress-bar',
     '-L',
+    '--proto-redir', '=http,https',
     '-o', 'b.zip',
     '--fail',
     '--show-error',
+    '--retry', '3',
+    '--retry-all-errors',
+    '--retry-delay', '2',
     '-H', 'User-Agent: ua/1',
     '-H', 'Referer: https://r.example/',
     'https://example.com/b.zip',
@@ -191,19 +240,49 @@ test('aria2TargetFor：未支持平台返回 null（回退 curl）', () => {
   assert.equal(aria2TargetFor('freebsd', 'x64'), null)
 })
 
-test('getAria2Path 返回子包二进制路径或 null', () => {
+test('getAria2Path 返回子包二进制路径、PATH 上的 aria2c，或 null', () => {
   const result = getAria2Path()
   const target = aria2TargetFor(process.platform, process.arch)
-  // 两种合法状态：找到二进制（返回路径）或未找到（返回 null）
-  // 子包发布后，pnpm install 会把它装到 node_modules，因此这里不能再假设一定为 null
-  if (target) {
-    assert.ok(
-      result === null || result.endsWith(target.bin.replace('/', path.sep)) ||
-        result.includes(target.bin.split('/').pop() as string),
-      `预期为 null 或指向 ${target.bin} 的路径，实际: ${result}`,
+  // 1.5.0 起 macOS 等没有随包子包的平台会回退到 PATH 上的 aria2c。
+  // 因此「未支持平台 -> null」不再是唯一合法结果：装了 Homebrew aria2 的机器
+  // 必须返回那个路径。无论走哪条分支，返回的路径都必须真的指向 aria2c。
+  if (result !== null) {
+    assert.equal(
+      path.basename(result).toLowerCase(),
+      process.platform === 'win32' ? 'aria2c.exe' : 'aria2c',
+      `返回的路径必须指向 aria2c，实际: ${result}`,
     )
-  } else {
-    assert.equal(result, null, `不支持的平台应返回 null，实际: ${result}`)
+    assert.equal(existsSync(result), true, `返回的 aria2 路径必须真实存在: ${result}`)
+    if (target && result.includes('dsh-aria2')) {
+      // 走随包子包时必须指向该平台的二进制（子包没装则允许回退 PATH）。
+      assert.ok(
+        result.endsWith(target.bin.replace('/', path.sep)),
+        `有随包子包时应优先使用 ${target.bin}，实际: ${result}`,
+      )
+    }
+  }
+})
+
+test('findAria2OnPath：空 PATH 返回 null；PATH 上有可执行的 aria2c 时能找到', () => {
+  assert.equal(findAria2OnPath(''), null, '空 PATH 不得凭空返回一个路径')
+
+  const bundled = getAria2Path()
+  if (!bundled) {
+    // 当前环境没有可用的 aria2：只验证空 PATH 分支，不把测试变成环境依赖
+    return
+  }
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-aria2-path-'))
+  try {
+    const name = process.platform === 'win32' ? 'aria2c.exe' : 'aria2c'
+    const target = path.join(dir, name)
+    copyFileSync(bundled, target)
+    if (process.platform !== 'win32') {
+      chmodSync(target, 0o755)
+    }
+    const found = findAria2OnPath(dir)
+    assert.equal(found, target, 'PATH 上的可执行 aria2c 必须被找到')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 

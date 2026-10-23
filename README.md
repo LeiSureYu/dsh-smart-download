@@ -19,11 +19,17 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 桌面版（DeepSeek Harness 0.2.0 起）装同一个包：用桌面版自带的 CLI，或侧边栏的 Plugins 页面。
 
+> **最近更新（1.6.0）**：下载管理器现在可以直接**取消**进行中的任务、**原地重试**
+> 失败或已取消的任务（复用同一个 `taskId`；请求头与凭证不落盘、不重放）。
+> 1.5.0 带来了通用摘要校验、同名文件策略、磁盘预检与服务器文件名。
+> 完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
+
 - **自动多线程加速** —— 下载前先探测目标服务器，支持多连接就调用内置 `aria2c` 并发下载，不支持则自动回退到系统 `curl`，两种情况都能下完。
 - **零配置** —— aria2 二进制随插件一起安装（npm `optionalDependencies`），无需自行下载或配置 PATH。
 - **进度看得见** —— 带 Web 界面的 profile（`web` / 桌面版）右下角有实时进度面板（文件名 / 百分比 / 速度 / 剩余时间），下载完成后自动消失。
 - **断点续传** —— 中断后用同样的 `url` + `output` 再调用一次即可续传。
 - **进度可查询** —— `download_status` 工具只读查询最近任务的百分比 / 速度 / ETA。
+- **下完还能管** —— 下载管理器可取消进行中的任务、原地重试失败 / 已取消的任务；重试复用同一 `taskId`，请求头与凭证不落盘、不重放。见[下载管理器](#下载管理器140-起)。
 - **一次下一批** —— `targets` 在单次调用内下载多个文件（逐条给出结果、一条失败不影响其余、批内并发受「总连接数有界」约束），`maxBandwidth` 给整批一个共享的带宽上限，`timeoutMs` 给每个条目一个超时。见[批量下载](#一次下载多个文件targets--maxbandwidth--timeoutms)。
 - **照官方文档核对内容** —— 把官方文档里印着的摘要传给 `checksum`（MD5 / SHA-1 / SHA-256 / SHA-512）或 `sha256`，下载后逐字节核对。长度校验挡不住「等长但内容不同」，哈希能。
 - **同名文件有策略** —— `ifExists: "overwrite" | "skip" | "rename"`：覆盖、已存在就跳过（有摘要时仍校验），或另存为 `name (1).ext` 绝不覆盖。批量条目可逐条设置。
@@ -151,9 +157,9 @@ dsh plugin --profile web add github:LeiSureYu/dsh-smart-download
 >
 > **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 >
-> **版本要求：请使用 `1.2.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
+> **版本要求：请使用 `1.5.0` 或更高。** 仓库 `main` 当前为 `1.6.0`（待发布）。0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
 >
-> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.2.0` 即可。
+> 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.5.0` 或更高即可。
 
 ## 照着官方文档下载
 
@@ -1020,7 +1026,7 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**626 例用例（623 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.18%** / 分支 **92.01%** / 函数 **97.18%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
+当前基线：**627 例用例（624 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.18%** / 分支 **92.01%** / 函数 **97.18%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字，未覆盖行号也会整体漂移（1.4.x 的对照数据是 CRLF **99.36%** / LF **99.40%**，见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
 3 个跳过用例是平台限制（只在 Linux / 特定文件系统复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。

@@ -19,11 +19,18 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: use the app's own CLI, or the **Plugins** page in the sidebar.
 
+> **What's new in 1.6.0** — the download manager can now **cancel** running tasks and
+> **retry** failed or cancelled ones in place (same `taskId`; headers and credentials are
+> never persisted or replayed). 1.5.0 added generic checksum verification, the `ifExists`
+> policy, disk-space preflight and server-supplied filenames.
+> See [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
+
 - **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
 - **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
 - **Visible progress** — on profiles with the web UI (`web`, or the desktop app) a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
+- **Manage it after it starts** — the download manager can cancel running tasks and retry failed / cancelled ones in place, reusing the same `taskId`; headers and credentials are never persisted or replayed. See [Download manager](#download-manager-140).
 - **A batch in one call** — `targets` downloads several files inside a single call (one result per entry, a failing entry never discards the rest, in-batch concurrency bounded by a connection budget), `maxBandwidth` caps the whole batch, and `timeoutMs` bounds each entry. See [Downloading several files](#downloading-several-files-targets--maxbandwidth--timeoutms).
 - **Verify against the official docs** — pass the checksum the docs print as `checksum` (MD5 / SHA-1 / SHA-256 / SHA-512) or `sha256` and the downloaded bytes are hashed and compared. A byte-length check cannot catch a payload of the right size but the wrong content; a hash can.
 - **A policy for existing files** — `ifExists: "overwrite" | "skip" | "rename"`: replace, skip the download (still verifying an existing file when a checksum is given), or save as `name (1).ext` without ever touching the old file. Set per entry in a batch.
@@ -147,9 +154,9 @@ Requirements and caveats:
 >
 > **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 >
-> **Use `1.2.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
+> **Use `1.5.0` or newer.** The repository `main` is currently `1.6.0` (not yet published). The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 >
-> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.2.0`.
+> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.5.0` or newer.
 
 ## Downloading from official documentation
 
@@ -1035,7 +1042,7 @@ default" has a positive assertion — see the contract table above).
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **626 cases (623 pass / 3 skip / 0 fail)**, **99.18%** line / **92.01%** branch / **97.18%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
+Current baseline: **627 cases (624 pass / 3 skip / 0 fail)**, **99.18%** line / **92.01%** branch / **97.18%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets: measured on the same tree, CRLF reports **99.36%** line coverage while LF reports
 **99.40%**, and the uncovered line numbers shift as well (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).

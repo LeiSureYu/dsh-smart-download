@@ -154,7 +154,7 @@ Requirements and caveats:
 >
 > **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 >
-> **Use `1.5.0` or newer.** The repository `main` is currently `1.6.0` (not yet published). The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
+> **Use `1.5.0` or newer; the current release is `1.6.0`.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 >
 > The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.5.0` or newer.
 

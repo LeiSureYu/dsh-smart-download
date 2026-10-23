@@ -11,11 +11,6 @@
 
 ## [Unreleased]
 
-### 测试 / Tests
-
-- 重试用例改用平台原生绝对路径，修掉 Linux CI 上把 Windows 路径误判为相对路径的假红。
-- 自定义请求头用例失败时输出实际请求方法与 URL，便于区分探测请求缺失与 aria2 / curl 回退。
-
 ## [1.6.0] - 2026-10-23
 
 **下载管理器从「看得见」补到「管得动」。** 这一版给进行中的任务加上取消、给失败 / 已取消的
@@ -54,6 +49,8 @@ credentials are never stored or replayed**.
 
 - 新增 `test/tasks.test.ts`、`test/retry.test.ts`，并补充 `test/client.test.ts` /
   `test/rpc.test.ts` 的取消、重试、拒绝原因与「不误删」用例。
+- 重试用例改用平台原生绝对路径，修掉 Linux CI 上把 Windows 路径误判为相对路径的假红。
+- 自定义请求头用例失败时输出实际请求方法与 URL，便于区分探测请求缺失与 aria2 / curl 回退。
 - 基线：**627 例（624 通过 / 3 跳过 / 0 失败）**。
 
 ## [1.5.0] - 2026-10-22

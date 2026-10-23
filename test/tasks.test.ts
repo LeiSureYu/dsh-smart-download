@@ -8,6 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import {
   cancelRunningTask,
   getRetryHandler,
@@ -74,9 +75,12 @@ test('重试处理器：可安装、可读取、可清除', () => {
 })
 
 test('parseRetryRequest：合法字段原样保留，额外字段（含 headers）一律丢弃', () => {
+  // 绝对路径必须按当前平台拼：`C:\...` 在 Linux 上不是绝对路径，
+  // 用它写死会让这条用例在 CI 的 ubuntu runner 上假红。
+  const absoluteOutput = path.resolve('a.bin')
   const parsed = parseRetryRequest({
     url: '  https://example.com/a.bin  ',
-    output: 'C:\\Downloads\\a.bin',
+    output: absoluteOutput,
     sha256: 'a'.repeat(64),
     ifExists: 'rename',
     mirror: 'auto',
@@ -88,7 +92,7 @@ test('parseRetryRequest：合法字段原样保留，额外字段（含 headers�
   })
   assert.deepEqual(parsed, {
     url: 'https://example.com/a.bin',
-    output: 'C:\\Downloads\\a.bin',
+    output: absoluteOutput,
     sha256: 'a'.repeat(64),
     ifExists: 'rename',
     mirror: 'auto',
@@ -100,11 +104,12 @@ test('parseRetryRequest：合法字段原样保留，额外字段（含 headers�
 })
 
 test('parseRetryRequest：相对 output 不覆盖绝对 outPath；没有绝对路径时省略 output', () => {
+  const absoluteOutPath = path.resolve('a.bin')
   const withOutPath = parseRetryRequest(
     { url: 'https://example.com/a.bin', output: 'relative/a.bin' },
-    'D:\\Downloads\\a.bin',
+    absoluteOutPath,
   )
-  assert.equal(withOutPath?.output, 'D:\\Downloads\\a.bin')
+  assert.equal(withOutPath?.output, absoluteOutPath)
 
   const withoutAny = parseRetryRequest({ url: 'https://example.com/a.bin', output: 'a.bin' })
   assert.equal(withoutAny?.output, undefined)

@@ -19,6 +19,11 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { registerStatusRpc } from '../src/rpc.js'
 import { DEFAULT_STATUS_LIMIT } from '../src/status.js'
+import {
+  registerRunningTask,
+  resetTaskRegistry,
+  setRetryHandler,
+} from '../src/tasks.js'
 
 /* --------------------------- 桩 ctx / connection --------------------------- */
 
@@ -1442,4 +1447,175 @@ test('manage reveal：taskId 不在白名单 → 拒绝（不接受调用方给�
     ).json()) as { result: { ok: boolean } }
     assert.equal(res.result.ok, false, '非法 taskId 必须被白名单拒')
   })
+})
+
+/* ---------------- op:'cancel' / 'retry'（1.6.0 面板行级动作） ---------------- */
+
+/**
+ * 1.6.0 的 cancel / retry 用例都要碰进程内注册表与重试 handler。
+ * 每个用例结束必须清干净：否则上一条的 controller / handler 会串到下一条，
+ * 表现为「明明没注入 handler 却 retry 成功了」这种最难查的假绿。
+ */
+async function withTaskRegistry(fn: () => Promise<void>): Promise<void> {
+  resetTaskRegistry()
+  try {
+    await fn()
+  } finally {
+    resetTaskRegistry()
+  }
+}
+
+test('manage/cancel：运行中的任务 → abort 并返回 cancelled:true（不需要 confirm）', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async ({ downloadDir }) => {
+      seedTask(downloadDir, 'dl-cancel', { status: 'running', progress: 0.3 })
+      const controller = new AbortController()
+      registerRunningTask('dl-cancel', controller)
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'cancel', taskId: 'dl-cancel' })),
+      )
+      assert.equal(env.body.result?.ok, true)
+      assert.deepEqual(env.body.result?.value, { cancelled: true, taskId: 'dl-cancel' })
+      assert.equal(controller.signal.aborted, true, 'cancel 必须真的终止这一条')
+    }),
+  )
+})
+
+test('manage/cancel：没有记录也没有运行 -> reason=unknown', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async () => {
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'cancel', taskId: 'dl-nowhere' })),
+      )
+      assert.equal(env.body.result?.ok, true, '这是一次有效查询，不是坏请求')
+      const value = env.body.result?.value as Record<string, unknown>
+      assert.equal(value.cancelled, false)
+      assert.equal(value.reason, 'unknown')
+    }),
+  )
+})
+
+test('manage/cancel：有记录但没在跑 -> reason=not-running，并回报记录状态', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async ({ downloadDir }) => {
+      seedTask(downloadDir, 'dl-done', { status: 'completed', progress: 1 })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'cancel', taskId: 'dl-done' })),
+      )
+      const value = env.body.result?.value as Record<string, unknown>
+      assert.equal(value.cancelled, false)
+      assert.equal(value.reason, 'not-running')
+      assert.equal(value.state, 'completed', '面板据此说明「它其实已经完成了」')
+    }),
+  )
+})
+
+test('manage/cancel：带 confirm:true 也绝不能落到删除产物（分派顺序护栏）', async () => {
+  const products = tempDir()
+  await withTaskRegistry(() =>
+    withDirs(async ({ downloadDir }) => {
+      try {
+        const out = seedProduct(products, 'must-survive.bin')
+        seedTask(downloadDir, 'dl-cancel-confirm', { outPath: out, size: 32, status: 'completed' })
+        const env = await readEnvelope(
+          await manageHandler()(
+            manageRequest({ op: 'cancel', taskId: 'dl-cancel-confirm', confirm: true }),
+          ),
+        )
+        const value = env.body.result?.value as Record<string, unknown>
+        assert.equal(value.cancelled, false)
+        assert.equal(value.reason, 'not-running')
+        assert.equal(existsSync(out), true, 'cancel 即使多带 confirm 也不得删除产物')
+        assert.equal(
+          existsSync(path.join(downloadDir, 'dl-cancel-confirm.json')),
+          true,
+          'cancel 不得删除记录',
+        )
+      } finally {
+        rmSync(products, { recursive: true, force: true })
+      }
+    }),
+  )
+})
+
+test('manage/retry：注入 handler 后调用它并原样返回 started:true', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async () => {
+      const calls: Array<{ taskId: string; session?: unknown }> = []
+      setRetryHandler((taskId, session) => {
+        calls.push({ taskId, session })
+        return { started: true, taskId }
+      })
+      const env = await readEnvelope(
+        await manageHandler()(
+          manageRequest({
+            op: 'retry',
+            taskId: 'dl-retry',
+            session: { id: 's1', cwd: 'C:\\work' },
+          }),
+        ),
+      )
+      assert.deepEqual(env.body.result?.value, { started: true, taskId: 'dl-retry' })
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0]?.taskId, 'dl-retry')
+      assert.deepEqual(calls[0]?.session, { id: 's1', cwd: 'C:\\work' })
+    }),
+  )
+})
+
+test('manage/retry：没有注入 handler -> reason=unavailable（不假装开始）', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async () => {
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'retry', taskId: 'dl-retry' })),
+      )
+      const value = env.body.result?.value as Record<string, unknown>
+      assert.equal(value.started, false)
+      assert.equal(value.reason, 'unavailable')
+    }),
+  )
+})
+
+test('manage/retry：带 confirm:true 也不能落到 delete（分派顺序护栏）', async () => {
+  const products = tempDir()
+  await withTaskRegistry(() =>
+    withDirs(async ({ downloadDir }) => {
+      try {
+        const out = seedProduct(products, 'retry-must-survive.bin')
+        seedTask(downloadDir, 'dl-retry-confirm', { outPath: out, size: 32, status: 'failed' })
+        setRetryHandler((taskId) => ({ started: true, taskId }))
+        const env = await readEnvelope(
+          await manageHandler()(
+            manageRequest({ op: 'retry', taskId: 'dl-retry-confirm', confirm: true }),
+          ),
+        )
+        assert.deepEqual(env.body.result?.value, {
+          started: true,
+          taskId: 'dl-retry-confirm',
+        })
+        assert.equal(existsSync(out), true, 'retry 即使多带 confirm 也不得删除产物')
+        assert.equal(
+          existsSync(path.join(downloadDir, 'dl-retry-confirm.json')),
+          true,
+          'retry 不得删除记录',
+        )
+      } finally {
+        rmSync(products, { recursive: true, force: true })
+      }
+    }),
+  )
+})
+
+test('manage/cancel / retry：非法 taskId 被白名单拒绝', async () => {
+  await withTaskRegistry(() =>
+    withDirs(async () => {
+      for (const op of ['cancel', 'retry'] as const) {
+        const env = await readEnvelope(
+          await manageHandler()(manageRequest({ op, taskId: '..\\evil' })),
+        )
+        assert.equal(env.body.result?.ok, false, `${op} 必须拒绝非法 taskId`)
+        assert.match(env.body.result?.error?.message ?? '', /taskId/)
+      }
+    }),
+  )
 })

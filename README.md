@@ -571,7 +571,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - **插槽**：注册到 `shell.overlay`（`kind: 'list'`，`order: 100`），因此不会覆盖宿主自身界面；无内容时渲染为 `null`。
 - **只依赖 `react`**：客户端脚本以 classic script 形式通过 `window.__ModuleLoader__.load` 注册，不做打包。
 - **陈旧任务自动忽略**：超过 10 分钟没有更新的 `running` 任务不再计入面板，避免历史残留文件让面板永久卡住。
-- **面板是只读的（本轮明确不提供取消 / 重试）**：面板侧没有任何能触发宿主动作的 API —— 客户端插件只拿到 `connection.rpc.call`（一次请求一个响应），没有「让宿主去做某件事」的通道；宿主侧也没有 `taskId → AbortController` 表：那次下载的 `AbortSignal` 只活在 `execute()` 的调用栈里，RPC 处理函数够不到它。因此本轮不加任何「点了没反应」的按钮；要做取消/重试，先得扩建 RPC 写端点、进程内任务注册表与任务元数据（原 URL / 输出路径 / 摘要）。
+- **浮层只读，管理器可写（1.6.0）**：浮层进度面板只调用 `/api/smartdl.status`，不提供按钮；下载管理器通过 `/api/smartdl.manage` 调用 `cancel` / `retry`。`cancel` 只对**当前 Host 进程内登记**的下载有效（`AbortController` 不能跨进程）；`retry` 只允许 `failed` / `cancelled`，复用原 `taskId` 与最小请求元数据（URL / 输出路径 / 摘要 / 镜像 / 限速 / 超时），**不重放** `Authorization` / Cookie / `Referer` / UA / 自定义请求头。受保护地址需要重新调用 `smart_download` 并传 `headers`；1.6.0 之前的记录没有 `request` 时不可重试。
 
 > 该面板仅在带 Web 界面的 profile 提供；CLI 等 profile 下插件会静默跳过客户端注册，工具与下载功能不受影响。
 
@@ -586,7 +586,7 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 
 **每行显示**：状态色点 + 彩色状态文字、进度条（按状态着色）、文件名与百分比、大小、最近更新时间，
 以及 `presence` 徽标（文件在原位 / 已移走 / 已改变 / 路径不可删）；**下载中另有实时速度与剩余时间**
-（ETA 只在下载中显示 —— 给已完成的任务报「剩余 0s」是噪声）。行内两个操作：
+（ETA 只在下载中显示 —— 给已完成的任务报「剩余 0s」是噪声）。行内操作：
 
 - **在文件夹中显示**：打开系统文件管理器并**选中那个文件**。优先走宿主的 `remote.session`；该服务不可用时
   **自动降级到服务端**（宿主进程执行 `explorer.exe /select,` / `open -R` / `xdg-open`），因此**不依赖任何
@@ -594,11 +594,19 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 - **删除**：二次确认框会显示**完整绝对路径、文件大小**，并明写「**删除本地文件不可恢复，不进回收站**」。
   「**同时删除本地文件**」只在文件仍在原位时提供；**文件已被移走、或与下载完成时不一致（大小/修改时间变了）时，
   只能删除记录** —— 这是「删的是当初下载的那个文件」的安全边界，不是偷懒。
+- **取消**（仅 `running` 行）：向当前 Host 进程发出 abort，子进程按 `SIGTERM` → 1s 后 `SIGKILL`
+  结束，进度记为 `cancelled`。成功回执只表示**取消请求已被接受**，终态由下一次轮询呈现；
+  已经结束或来自别的 Host 进程的任务会如实回 `not-running`，不会假装取消成功。
+- **重试**（仅 `failed` / `cancelled` 行）：以**同一个 `taskId`** 在后台重新发起下载，复用原 URL、
+  输出路径、摘要、镜像、限速与超时，面板里是原地刷新而不是多出一条重复记录。重试**不会重放**
+  `Authorization` / Cookie / `Referer` / UA / 自定义请求头（这些从不落盘）；需要鉴权的地址请重新调用
+  `smart_download` 并传 `headers`。旧版本留下的记录没有 `request` 字段时，只能重新下载。
 
 **键盘操作**：行获得焦点后按 `Delete` 打开该行确认框（不是直接删 —— 不可逆操作的刹车仍在）；确认框把焦点放在
 **上次用的那个选项**上，`Enter` 即确认（选择记在 `localStorage`）。文件已移走时焦点自动落回「只删记录」。
 
-删除走 `POST /api/smartdl.manage`（`inspect` / `forget` / `delete` / `reveal`），服务端按 14 条安全规则执行：
+删除、取消与重试走 `POST /api/smartdl.manage`（`inspect` / `forget` / `delete` / `reveal` / `cancel` /
+`retry`），服务端按 14 条安全规则执行：
 路径**只能来自本插件自己的记录**（客户端只发 `taskId`，不接受任何调用方传来的路径）、只接受绝对路径、
 `normalize` 一致且无 `..`/NUL、只用 `lstat`（拒目录与符号链接）、**尺寸不符即拒**、任务未终态拒、
 拒删记录目录内的路径、**先删文件再删记录**、失败按 `gone`/`busy`/`denied`/`is-dir`/`is-link`/`changed`/`no-path`/`running`
@@ -638,7 +646,7 @@ macOS 为什么没有随包子包、`PATH` 查找的边界在哪，见 [COMPATIB
 | 读取磁盘元数据 | 远端声明大小且响应未压缩时，用 `statfs` 查询**目标目录所在文件系统**的可用空间，用于下载前预检；只读，不扫描文件内容。`statfs` 不可用时跳过预检并在结果里说明。 |
 | 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
 | 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
-| HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册两条精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）与 `POST /api/smartdl.cleanup`（**会删文件**）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。**影响面**：进度文件是「已完成 / 失败」回执的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用该端点的人就能清理本机所有会话的历史进度。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
+| HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册**三条**精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）、`POST /api/smartdl.cleanup`（**会删进度文件**）与 `POST /api/smartdl.manage`（单条任务的 `inspect` / `forget` / `delete` / `reveal` / `cancel` / `retry`）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。manage 的 `cancel` 只 abort **当前 Host 进程内**登记的任务，`retry` 只接受 `failed` / `cancelled` 且请求信息只能来自本插件记录（不保存也不重放请求头）；两者都不需要 `confirm`，也不会落到删除产物分支。**影响面**：进度文件是「已完成 / 失败」回执与重试元数据的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用这些端点的人就能清理本机所有会话的历史进度、取消本机正在跑的下载。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
 | 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
 | 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）。 |
 
@@ -1012,15 +1020,15 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**600 例用例（597 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.23%** / 分支 **91.87%** / 函数 **97.70%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
+当前基线：**626 例用例（623 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.18%** / 分支 **92.01%** / 函数 **97.18%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字，未覆盖行号也会整体漂移（1.4.x 的对照数据是 CRLF **99.36%** / LF **99.40%**，见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
 3 个跳过用例是平台限制（只在 Linux / 特定文件系统复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 
 > 「未覆盖行」一列会把**块结束的 `}`、多行表达式 / 对象字面量的续行、以及类型声明与注释行**
-> 报成未覆盖。1.5.0 已逐条核对（`index.ts:350-356` / `361-362` / `568-574` / `644-651` / `765`
-> 的 schema 与类型声明、`downloader.ts:79` / `274` 的注释与「路径必为绝对路径」防御分支、
-> `headers.ts:119`、`url.ts:69` 的块结束 `}`）：**没有「有逻辑但缺用例」的语句**，
+> 报成未覆盖。1.6.0 已逐条核对（`index.ts` 的 schema 与类型声明、`downloader.ts:79` / `274`
+> 的注释与「路径必为绝对路径」防御分支、`headers.ts` / `url.ts:69` 的块结束 `}`、`tasks.ts:21-22`
+> 的文件头注释）：**没有「有逻辑但缺用例」的语句**，
 > 对应的行为都有用例断言到具体值（自管头的拒绝文案、工具 schema 的字段等）。
 > 属于 tsx 源码映射的行归属问题。判断时以百分比为准。
 

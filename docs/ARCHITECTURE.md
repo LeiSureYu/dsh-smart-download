@@ -91,10 +91,11 @@ execute(args, exec)                       src/index.ts
 | `src/disk.ts` | ~70 | 下载前磁盘空间预检 | `requiredFreeBytes` / `evaluateDiskSpace` 为纯函数；`statfs` 失败返回 `checked:false`，不阻断下载 |
 | `src/downloader.ts` | ~614 | 参数拼接、子进程执行、进度解析接线 | 随包子包缺失时查 `PATH` 上的 `aria2c` 并跑 `--version` 验证；aria2 / curl 均带重试；curl 重定向仅 http(s)；`-k 1M` 与 `--allow-overwrite=true` 不可删 |
 | `src/progress-parse.ts` | ~73 | aria2 摘要行 / curl 进度条解析、行切分 | 纯函数；真实样本在 `test/fixtures/` |
-| `src/progress.ts` | ~519 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；`setTarget()` 在文件名确定后修正 label / outPath；1.4.0 起记 `outPath` / `size` / `fileMtimeMs` |
+| `src/progress.ts` | ~560 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；`setTarget()` 在文件名确定后修正 label / outPath；1.4.0 起记 `outPath` / `size` / `fileMtimeMs`，1.6.0 起记不含请求头的 `request` |
+| `src/tasks.ts` | ~210 | 进程内任务注册表（`taskId → AbortController`）与重试元数据校验 | 只存内存，不持久化；请求头**永不落盘**；`parseRetryRequest` 只接受可安全重放的字段 |
 | `src/status.ts` | ~346 | `download_status` 的只读扫描与两条轨道合并 | 任何读取失败都退化为「少一条任务」，并用 `scanFailedDirs` 如实报出 |
 | `src/cleanup.ts` | ~291 | `/api/smartdl.cleanup`：按保留窗口删**过期**的进度文件 | 与 `ProgressReporter.cleanup()` 不同 —— 这是给外部的触发入口，不接自动调用 |
-| `src/rpc.ts` | ~770 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`） | 路径**只能来自本插件自己的记录**；非法请求一律 `ok:false`，绝不按默认值执行 |
+| `src/rpc.ts` | ~880 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`·`cancel`·`retry`） | 路径**只能来自本插件自己的记录**；`cancel` 只作用于本进程，`retry` 只接受 `failed` / `cancelled`；非法请求一律 `ok:false`，绝不按默认值执行 |
 | `src/client.js` | ~2333 | 浏览器端：进度浮层 + 侧边栏入口 + 下载管理页（classic script） | 不打包，只依赖 `react`；会话由浮层写进共享 store，供 `manage` 定位轨道一 |
 
 ## 数据流：进度怎么从子进程走到界面
@@ -128,22 +129,35 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 **为什么终态要 `awaitFlush()`**：`report()` 是异步落盘的，`done()` 之后调用方通常
 立刻 `return`；不等一下，那条「已完成」还躺在队列里，面板就会永远停在「下载中」。
 
-## 下载管理器：删除与「在文件夹中显示」
+## 下载管理器：删除、取消、重试与「在文件夹中显示」
 
-这两件事都必须在**宿主进程**里做（浏览器既拿不到文件系统，也起不了文件管理器），
-所以它们走同一条 `POST /api/smartdl.manage`，用 `op` 区分；客户端只发 `taskId`。
+这些事都必须在**宿主进程**里做（浏览器既拿不到文件系统，也起不了文件管理器，
+更够不到下载的 `AbortController`），所以它们走同一条 `POST /api/smartdl.manage`，
+用 `op` 区分；客户端只发 `taskId`。
 
 ```
 浏览器（下载管理页）
-   │  op:'inspect' | 'forget' | 'delete' | 'reveal'  +  taskId  +  session
+   │  op:'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'retry'  +  taskId  +  session
    ▼
 /api/smartdl.manage ──► readManagePayload（op 白名单 + taskId 白名单 + confirm 检查）
                           │
                           ├─ inspect → checkManagedTarget：lstat 判定产物现状（只读）
                           ├─ forget  → 只删本插件的两条进度记录，不碰产物
                           ├─ delete  → **先删产物、成功后再删记录**（顺序不可颠倒）
-                          └─ reveal  → 宿主进程起 explorer / open / xdg-open
+                          ├─ reveal  → 宿主进程起 explorer / open / xdg-open
+                          ├─ cancel  → 本进程任务表里 abort 对应的 AbortController
+                          └─ retry   → 从记录里的 request 重建一次后台下载（同 taskId）
 ```
+
+`cancel` / `retry` 在 `confirm:true` 的 delete 分支**之前**分派：它们不需要确认，
+也不能因为调用方多带一个 `confirm` 就落到「删产物」路径上。`cancel` 与 `retry`
+的拒绝原因是固定枚举，客户端逐条翻译，而不是统一显示「操作失败」。
+
+**为什么取消表只在内存**：`AbortController` 只对创建它的进程有效；写进磁盘没有意义
+（重启后进程已不存在）。因此 `cancel` 只对当前 Host 进程有效，没在跑时如实回
+`not-running`，不假装成功。**为什么重试只落最小元数据**：`Authorization` / Cookie
+等请求头是长期凭证，落盘会把秘密留在任务文件里；代价是受保护地址重试会失败，
+需要重新调用 `smart_download` 并传 `headers`。
 
 三条硬约束：
 

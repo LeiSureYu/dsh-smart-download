@@ -11,6 +11,8 @@
  * 已在 0.2.0-rc.2（含桌面版）上验证兼容。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { ProgressSession } from './progress.js';
+import type { RetryStartResult } from './tasks.js';
 export declare const name = "dsh-smart-dl";
 export declare const inject: string[];
 /**
@@ -22,3 +24,19 @@ export declare const inject: string[];
  */
 export declare const NO_TASKS_TEXT = "No download tasks found.";
 export declare function apply(ctx: Context): void;
+/**
+ * 从面板重试一条已结束（failed / cancelled）的任务（1.6.0）。
+ *
+ * 关键取舍：
+ * - **复用原 taskId**：面板按 id 渲染行，换一个新 id 会让「重试的那一条」变成
+ *   列表里的另一条记录，用户看到的是重复项而不是原地刷新；
+ * - **不携带原请求头**：任务文件里从不保存 Authorization / Cookie（见 tasks.ts
+ *   文件头），所以重试是一个「干净」的请求。需要鉴权的地址会因此失败 —— 这是
+ *   刻意的安全取舍，UI 与 README 都写明了；
+ * - **后台启动**：这里返回 `started:true` 表示已经开始跑，不等待下载完成。
+ *   RPC 是给面板按钮用的，不能把一次几十分钟的下载挂在 HTTP 请求上。
+ *
+ * 失败原因用固定的 `reason` 枚举表达（running / unknown / not-retryable /
+ * no-request），客户端据此给不同文案，而不是只显示一句「失败」。
+ */
+export declare function startRetry(taskId: string, session?: ProgressSession): RetryStartResult;

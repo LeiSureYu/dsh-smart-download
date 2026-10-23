@@ -11,6 +11,46 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-23
+
+**下载管理器从「看得见」补到「管得动」。** 这一版给进行中的任务加上取消、给失败 / 已取消的
+任务加上原地重试；两者都走宿主进程，客户端只发 `taskId`。重试所需的元数据最小化落盘，
+**请求头与凭证一律不保存、不重放**。
+
+**The download manager can now act, not just observe.** This release adds cancel for running
+tasks and in-place retry for failed / cancelled ones. Both go through the host process and the
+client only sends a `taskId`. Retry metadata is kept minimal, and **request headers and
+credentials are never stored or replayed**.
+
+### 新增 / Added
+
+- **取消**：`POST /api/smartdl.manage` 的 `op:"cancel"` 会 abort 当前 Host 进程内该任务的
+  `AbortController`，子进程按既有 `SIGTERM` → 1s 后 `SIGKILL` 结束，终态记为 `cancelled`。
+  管理器只在 `running` 行显示该按钮；不需要 `confirm`。只对**当前进程**有效，已结束或来自
+  别的进程时如实回 `not-running`，未知 id 回 `unknown`。
+- **重试**：`op:"retry"` 只接受 `failed` / `cancelled`，复用原 `taskId` 在后台重新下载，
+  复用 URL、输出路径、摘要、`ifExists`、镜像、限速与超时；面板原地刷新，不新增重复行。
+  重试前重新校验 URL 与摘要格式，非法值回 `not-retryable`。
+- **最小重试元数据**：进度记录新增可选 `request` 字段，只含可安全落盘的请求信息。
+  **`Authorization` / Cookie / `Referer` / UA / 自定义请求头不落盘、不重放**；受保护地址
+  需重新调用 `smart_download` 并传 `headers`。旧记录没有 `request` 时回 `no-request`。
+- 管理器行内新增「取消下载」/「重试」按钮（中英文案齐全），行级动作在途时其余行按钮禁用，
+  当前行显示进行中文案。
+
+### 变更 / Changed
+
+- `smartdl.manage` 的 `op` 白名单扩展为 `inspect` / `forget` / `delete` / `reveal` /
+  `cancel` / `retry`；`cancel` / `retry` 在 `delete` 的 `confirm:true` 分支之前分派，
+  即使多带 `confirm` 也绝不会落到删除产物的路径。
+- 条目级取消信号与批量信号、`timeoutMs` 信号合并；同时修正 aria2 → curl 回退路径此前只传
+  批量信号、导致条目级取消与超时失效的问题。
+
+### 测试 / Tests
+
+- 新增 `test/tasks.test.ts`、`test/retry.test.ts`，并补充 `test/client.test.ts` /
+  `test/rpc.test.ts` 的取消、重试、拒绝原因与「不误删」用例。
+- 基线：**626 例（623 通过 / 3 跳过 / 0 失败）**。
+
 ## [1.5.0] - 2026-10-22
 
 **从「能下」补到「下得对、下得稳、下完找得到」。** 这一版加入通用摘要校验、同名文件

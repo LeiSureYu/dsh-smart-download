@@ -188,6 +188,51 @@ export function removeTaskRecords(taskId, session) {
     return removed;
 }
 /**
+ * 按 taskId 读取轨道二的任务快照（同步、只读）。
+ *
+ * 为什么单独开一个读取函数而不是复用 `status.ts`：`download_status` 返回的是
+ * 面向面板的扁平快照（不含 `request`，因为它不需要知道怎么重试），而重试入口
+ * 需要原始请求字段。把两件事塞进同一个返回类型，只会让 `request` 出现在每个
+ * 状态响应里，既扩大暴露面，也让「老记录没有 request」更难表达。
+ *
+ * 任何读取 / 解析失败都返回 `undefined`：损坏的任务文件不该让 manage 端点
+ * 抛错，调用方据此如实回 `no-request`。
+ */
+export function readTaskRecord(taskId, session) {
+    void session;
+    if (!isSafeTaskId(taskId))
+        return undefined;
+    const file = path.join(resolveDownloadProgressDir(), `${taskId}.json`);
+    let raw;
+    try {
+        raw = fs.readFileSync(file, 'utf-8');
+    }
+    catch {
+        return undefined;
+    }
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed === null || typeof parsed !== 'object')
+            return undefined;
+        const task = parsed;
+        // 只做「够调用方安全使用」的形状校验：任务文件是本地输入，但仍可能被
+        // 旧版本、备份工具或用户手工改坏。id 必须与文件名一致，status 必须是
+        // 已知状态；缺了这两项就没有重试判定可言，按损坏记录处理。
+        if (task.id !== taskId)
+            return undefined;
+        if (task.status !== 'running' &&
+            task.status !== 'completed' &&
+            task.status !== 'failed' &&
+            task.status !== 'cancelled') {
+            return undefined;
+        }
+        return task;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
  * 从状态文案兜底推断终态。
  *
  * 只在调用方没有显式给 `state` 时使用，属于对老调用点的兼容垫片：
@@ -226,6 +271,8 @@ export class ProgressReporter {
      * `unknown`（UI 据此只允许「删除记录」）。
      */
     outPath;
+    /** 重试所需的最小请求信息；缺省时不写该字段（老记录逐字节兼容）。 */
+    request;
     taskProgressFile = null;
     downloadProgressFile = null;
     lastPct = -1;
@@ -262,8 +309,10 @@ export class ProgressReporter {
      * @param outPath 输出文件的绝对路径，可选（1.4.0 新增）。调用方**必须**传
      *   `path.resolve(...)` 的结果：子进程没有指定 cwd，相对路径的含义取决于
      *   进程 cwd，记下来也无法安全地用于删除。相对路径会被忽略（不记录）。
+     * @param request 重试所需的最小请求信息，可选（1.6.0 新增）。**不得包含
+     *   请求头**：凭据落盘是不可接受的代价，见 `tasks.ts` 文件头。
      */
-    constructor(taskId, label, session, batch, outPath) {
+    constructor(taskId, label, session, batch, outPath, request) {
         this.taskId = taskId;
         this.label = label;
         this.batch = batch;
@@ -271,6 +320,7 @@ export class ProgressReporter {
             typeof outPath === 'string' && outPath.length > 0 && path.isAbsolute(outPath)
                 ? outPath
                 : undefined;
+        this.request = request;
         const taskDir = resolveTaskProgressDir(session);
         if (taskDir) {
             const ready = ensureDir(taskDir);
@@ -339,6 +389,8 @@ export class ProgressReporter {
         // 输出路径同理：只在调用方给了绝对路径时写，老记录与缺省路径逐字节不受影响
         if (this.outPath)
             rec.outPath = this.outPath;
+        if (this.request)
+            rec.request = this.request;
         // 尺寸与 mtime **只在终态那一条**记录上写：进行中的尺寸是中间值，写下来会
         // 让「文件是否还是当初那一个」的判定拿着一个永远对不上的数字。
         // 只 stat 一次（终态一条记录一次系统调用），且必须是普通文件 —— 目录/链接
@@ -432,6 +484,8 @@ export class ProgressReporter {
             task.size = rec.size;
         if (rec.fileMtimeMs !== undefined)
             task.fileMtimeMs = rec.fileMtimeMs;
+        if (this.request)
+            task.request = this.request;
         return task;
     }
     /**

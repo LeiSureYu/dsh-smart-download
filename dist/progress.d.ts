@@ -1,4 +1,5 @@
 import type { ProgressState } from './types.js';
+import type { RetryRequest } from './tasks.js';
 /** 当前会话的定位信息，来自 `exec.agent.session.header`。 */
 export interface ProgressSession {
     /** 会话 ID，同时也是进度目录名 */
@@ -28,6 +29,30 @@ export declare function resolveTaskProgressDir(session?: ProgressSession): strin
  * 设置了 `$DSH_DOWNLOAD_PROGRESS_DIR` 时优先使用，否则为 `<DSH_HOME>/downloads/tasks`。
  */
 export declare function resolveDownloadProgressDir(): string;
+/** 轨道二任务文件的运行态结构（本插件自有格式） */
+export interface DownloadTaskFile {
+    id: string;
+    /** 展示名；旧记录 / 手工记录可能缺失，读取端不应因此拒绝整条记录。 */
+    name?: string;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    progress: number;
+    speed?: string;
+    eta?: string;
+    updatedAt: number;
+    /**
+     * 批次 ID，可选（1.3.0 新增）：与轨道一同名同值，见 `ProgressRecord.batch`。
+     * 两条轨道都写，读取端无论走哪条都能还原「这几次是同一次调用」。
+     */
+    batch?: string;
+    /** 输出文件绝对路径，可选（1.4.0 新增）；见 `ProgressRecord.outPath`。 */
+    outPath?: string;
+    /** 终态时的字节数，可选（1.4.0 新增）；见 `ProgressRecord.size`。 */
+    size?: number;
+    /** 终态时的 mtime（毫秒），可选（1.4.0 新增）；见 `ProgressRecord.fileMtimeMs`。 */
+    fileMtimeMs?: number;
+    /** 重试所需的最小请求信息，可选（1.6.0 新增）；见 `ProgressRecord.request`。 */
+    request?: RetryRequest;
+}
 /** 判定一个 taskId 是否可以安全地拼进文件名。 */
 export declare function isSafeTaskId(taskId: unknown): taskId is string;
 /**
@@ -55,6 +80,18 @@ export declare function taskRecordFiles(taskId: string, session?: ProgressSessio
  * 「以为删了」。
  */
 export declare function removeTaskRecords(taskId: string, session?: ProgressSession): string[];
+/**
+ * 按 taskId 读取轨道二的任务快照（同步、只读）。
+ *
+ * 为什么单独开一个读取函数而不是复用 `status.ts`：`download_status` 返回的是
+ * 面向面板的扁平快照（不含 `request`，因为它不需要知道怎么重试），而重试入口
+ * 需要原始请求字段。把两件事塞进同一个返回类型，只会让 `request` 出现在每个
+ * 状态响应里，既扩大暴露面，也让「老记录没有 request」更难表达。
+ *
+ * 任何读取 / 解析失败都返回 `undefined`：损坏的任务文件不该让 manage 端点
+ * 抛错，调用方据此如实回 `no-request`。
+ */
+export declare function readTaskRecord(taskId: string, session?: ProgressSession): DownloadTaskFile | undefined;
 export declare class ProgressReporter {
     /**
      * 写盘调用集中在这个对象上。
@@ -78,6 +115,8 @@ export declare class ProgressReporter {
      * `unknown`（UI 据此只允许「删除记录」）。
      */
     private outPath;
+    /** 重试所需的最小请求信息；缺省时不写该字段（老记录逐字节兼容）。 */
+    private readonly request;
     private taskProgressFile;
     private downloadProgressFile;
     private lastPct;
@@ -114,8 +153,10 @@ export declare class ProgressReporter {
      * @param outPath 输出文件的绝对路径，可选（1.4.0 新增）。调用方**必须**传
      *   `path.resolve(...)` 的结果：子进程没有指定 cwd，相对路径的含义取决于
      *   进程 cwd，记下来也无法安全地用于删除。相对路径会被忽略（不记录）。
+     * @param request 重试所需的最小请求信息，可选（1.6.0 新增）。**不得包含
+     *   请求头**：凭据落盘是不可接受的代价，见 `tasks.ts` 文件头。
      */
-    constructor(taskId: string, label?: string, session?: ProgressSession, batch?: string, outPath?: string);
+    constructor(taskId: string, label?: string, session?: ProgressSession, batch?: string, outPath?: string, request?: RetryRequest);
     /**
      * 探测后修正展示名与落盘路径（1.5.0）。
      *

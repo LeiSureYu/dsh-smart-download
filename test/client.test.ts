@@ -2647,3 +2647,281 @@ test('管理器：行内删除按钮叫「删除」（不是「删除记录」�
     panel.dispose()
   }
 })
+
+/* ---------------- 取消 / 重试（1.6.0） ---------------- */
+
+/** 按 `data-task-id` 取一行（多行时不能用全局 `clickDataAttr`，它只拿第一个）。 */
+function rowById(node: unknown, taskId: string): FakeElement {
+  const row = findAll(
+    node,
+    (el) =>
+      el.props?.['data-dsh-smart-dl'] === 'manager-row' && el.props?.['data-task-id'] === taskId,
+  )[0]
+  assert.ok(row, `必须找到 ${taskId} 这一行`)
+  return row
+}
+
+/** 点某一行里的行级按钮（cancel / retry），返回该按钮元素。 */
+function clickRowAction(node: unknown, taskId: string, attr: string, label: string): FakeElement {
+  const row = rowById(node, taskId)
+  const btn = findAll(row, (el) => el.props?.['data-dsh-smart-dl'] === attr)[0]
+  assert.ok(btn, `${label}：${taskId} 行内必须有 ${attr}`)
+  const onClick = btn.props?.onClick as (() => void) | undefined
+  assert.equal(typeof onClick, 'function', `${label}：${attr} 必须可点`)
+  onClick?.()
+  return btn
+}
+
+test('管理器：只有运行中的行有取消，只有失败 / 已取消的行有重试', async () => {
+  const { request } = serve([
+    managedTask({ id: 'run1', status: 'running', pct: 40 }),
+    managedTask({ id: 'fail1', status: 'failed', pct: 30 }),
+    managedTask({ id: 'cancel1', status: 'cancelled', pct: 10 }),
+    managedTask({ id: 'done1', status: 'completed', pct: 100 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+
+    const buttons = (id: string, attr: string) =>
+      findAll(
+        rowById(tree, id),
+        (el) => el.props?.['data-dsh-smart-dl'] === attr,
+      ).length
+
+    assert.equal(buttons('run1', 'cancel'), 1, '运行中的行必须能取消')
+    assert.equal(buttons('run1', 'retry'), 0, '运行中的行不该出现重试')
+    assert.equal(buttons('fail1', 'retry'), 1, '失败的行必须能重试')
+    assert.equal(buttons('fail1', 'cancel'), 0, '失败的行不该出现取消')
+    assert.equal(buttons('cancel1', 'retry'), 1, '已取消的行必须能重试')
+    assert.equal(buttons('cancel1', 'cancel'), 0, '已取消的行不该出现取消')
+    assert.equal(buttons('done1', 'cancel'), 0, '完成的行不该出现取消')
+    assert.equal(buttons('done1', 'retry'), 0, '完成的行不该出现重试')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：点取消只发 cancel，不带 confirm，也绝不发 delete / forget', async () => {
+  const { request } = serve([managedTask({ id: 'run1', status: 'running', pct: 40 })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'cancel'
+        ? { ok: true, value: { cancelled: true } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    clickRowAction(tree, 'run1', 'cancel', '取消')
+    await settle()
+    await settle()
+
+    const cancels = manage.calls.filter((c) => c.op === 'cancel')
+    assert.equal(cancels.length, 1, '只发一次 cancel')
+    assert.equal(cancels[0].taskId, 'run1')
+    assert.ok(!Object.hasOwn(cancels[0], 'confirm'), 'cancel 不是不可逆操作，不该带 confirm')
+    assert.equal(
+      manage.calls.filter((c) => c.op === 'delete' || c.op === 'forget').length,
+      0,
+      '取消绝不能顺带删除记录或文件',
+    )
+    assert.match(textOf(await renderManagerSettled(panel)), /cancelRequested/, '成功要给出「已请求取消」')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：点重试只发 retry，不带 confirm，也绝不发 delete / forget', async () => {
+  const { request } = serve([managedTask({ id: 'fail1', status: 'failed', pct: 30 })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+      : body.op === 'retry'
+        ? { ok: true, value: { started: true } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    clickRowAction(tree, 'fail1', 'retry', '重试')
+    await settle()
+    await settle()
+
+    const retries = manage.calls.filter((c) => c.op === 'retry')
+    assert.equal(retries.length, 1, '只发一次 retry')
+    assert.equal(retries[0].taskId, 'fail1')
+    assert.ok(!Object.hasOwn(retries[0], 'confirm'), 'retry 不该带 confirm')
+    assert.equal(
+      manage.calls.filter((c) => c.op === 'delete' || c.op === 'forget').length,
+      0,
+      '重试绝不能顺带删除记录或文件',
+    )
+    assert.match(textOf(await renderManagerSettled(panel)), /retryStarted/, '成功要给出「已重新开始」')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：取消 / 重试被拒绝时，按原因显示具体文案（不是笼统的操作失败）', async () => {
+  const cases: Array<{
+    label: string
+    status: 'running' | 'failed'
+    attr: 'cancel' | 'retry'
+    value: Record<string, unknown>
+    expected: RegExp
+  }> = [
+    {
+      label: 'cancel unknown',
+      status: 'running',
+      attr: 'cancel',
+      value: { cancelled: false, reason: 'unknown' },
+      expected: /cancelUnknown/,
+    },
+    {
+      label: 'cancel not-running',
+      status: 'running',
+      attr: 'cancel',
+      value: { cancelled: false, reason: 'not-running', state: 'completed' },
+      expected: /cancelNotRunning/,
+    },
+    {
+      label: 'retry no-request',
+      status: 'failed',
+      attr: 'retry',
+      value: { started: false, reason: 'no-request' },
+      expected: /retryNoRequest/,
+    },
+    {
+      label: 'retry not-retryable',
+      status: 'failed',
+      attr: 'retry',
+      value: { started: false, reason: 'not-retryable' },
+      expected: /retryNotRetryable/,
+    },
+    {
+      label: 'retry running',
+      status: 'failed',
+      attr: 'retry',
+      value: { started: false, reason: 'running' },
+      expected: /retryRunning/,
+    },
+    {
+      label: 'retry unknown',
+      status: 'failed',
+      attr: 'retry',
+      value: { started: false, reason: 'unknown' },
+      expected: /retryUnknown/,
+    },
+    {
+      label: 'retry unavailable',
+      status: 'failed',
+      attr: 'retry',
+      value: { started: false, reason: 'unavailable' },
+      expected: /retryUnavailable/,
+    },
+  ]
+
+  for (const item of cases) {
+    const { request } = serve([managedTask({ id: 'x1', status: item.status, pct: 30 })])
+    const manage = manageStub((body) =>
+      body.op === 'inspect'
+        ? { ok: true, value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 } }
+        : body.op === item.attr
+          ? { ok: true, value: item.value }
+          : { ok: true, value: {} },
+    )
+    const panel = mountPanel(request)
+    try {
+      panel.render()
+      await settle()
+      replaceManage(panel, manage.fn)
+      const tree = await renderManagerSettled(panel)
+      clickRowAction(tree, 'x1', item.attr, item.label)
+      await settle()
+      await settle()
+      const text = textOf(await renderManagerSettled(panel))
+      assert.match(text, item.expected, `${item.label}：必须显示对应的原因`)
+      assert.doesNotMatch(
+        text,
+        /actionFailed/,
+        `${item.label}：不得退回「操作失败」这种不知道原因的文案`,
+      )
+    } finally {
+      panel.dispose()
+    }
+  }
+})
+
+test('管理器：行级操作在途时禁用删除按钮，Delete 键也不打开确认框', async () => {
+  const { request } = serve([managedTask({ id: 'run1', status: 'running', pct: 40 })])
+  const calls: Array<Record<string, unknown>> = []
+  let release: ((value: unknown) => void) | undefined
+  const pending = new Promise<unknown>((resolve) => {
+    release = resolve
+  })
+  const manage = (body: Record<string, unknown>) => {
+    calls.push(body)
+    if (body.op === 'inspect') {
+      return Promise.resolve({
+        ok: true,
+        value: { presence: 'present', outPath: 'D:\\Downloads\\report.pdf', size: 5242880 },
+      })
+    }
+    // cancel 故意挂起：模拟 Host 还没回应，行级操作仍处于「在途」。
+    return body.op === 'cancel' ? pending : Promise.resolve({ ok: true, value: {} })
+  }
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage)
+    const tree = await renderManagerSettled(panel)
+    clickRowAction(tree, 'run1', 'cancel', '取消')
+
+    const during = panel.renderManager()
+    const del = findAll(
+      rowById(during, 'run1'),
+      (el) => el.props?.['data-dsh-smart-dl'] === 'delete',
+    )[0]
+    assert.ok(del, '取消在途时删除按钮仍应存在（只是禁用）')
+    assert.equal(del.props?.disabled, true, '取消在途时删除按钮必须禁用')
+
+    pressDeleteOnRow(during, '取消在途时的 Delete 键')
+    const after = panel.renderManager()
+    assert.equal(
+      findAll(
+        after,
+        (el) =>
+          el.props?.['data-dsh-smart-dl'] === 'confirm-with-file' ||
+          el.props?.['data-dsh-smart-dl'] === 'confirm-record-only',
+      ).length,
+      0,
+      '取消在途时按 Delete 不得打开删除确认框',
+    )
+    assert.equal(
+      calls.filter((c) => c.op === 'delete' || c.op === 'forget').length,
+      0,
+      '取消在途时绝不能发 delete / forget',
+    )
+  } finally {
+    release?.({ ok: true, value: { cancelled: true } })
+    await settle()
+    panel.dispose()
+  }
+})

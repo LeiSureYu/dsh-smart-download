@@ -15,6 +15,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ProgressSession } from './progress.js';
+import type { RetryStartResult } from './tasks.js';
 /**
  * `inspect` 的 `presence` 取值。**这是与浏览器端（t32）钉死的契约**，
  * 值集合不得单方面增删 —— 客户端按它渲染文案。
@@ -23,7 +24,7 @@ export type ManagePresence = 'present' | 'changed' | 'missing' | 'unknown' | 'bl
 /** `delete` 的 `reason` 取值。同样是与客户端钉死的契约。 */
 export type DeleteReason = 'gone' | 'busy' | 'denied' | 'is-dir' | 'is-link' | 'changed' | 'no-path' | 'running';
 /** 固定文案做成常量：客户端与测试都按同一份措辞断言，散落的字面量迟早对不上。 */
-export declare const MANAGE_BAD_PAYLOAD = "\u62D2\u7EDD\u7BA1\u7406\u8BF7\u6C42\uFF1Abody \u5FC5\u987B\u662F\u5BF9\u8C61\uFF0C\u4E14\u5E26 op\uFF08inspect / forget / delete\uFF09\u4E0E taskId";
+export declare const MANAGE_BAD_PAYLOAD = "\u62D2\u7EDD\u7BA1\u7406\u8BF7\u6C42\uFF1Abody \u5FC5\u987B\u662F\u5BF9\u8C61\uFF0C\u4E14\u5E26 op\uFF08inspect / forget / delete / reveal / cancel / retry\uFF09\u4E0E taskId";
 export declare const MANAGE_CONFIRM_REQUIRED = "\u62D2\u7EDD\u5220\u9664\u672C\u5730\u6587\u4EF6\uFF1A\u9700\u8981 confirm:true\uFF1B\u53EA\u60F3\u5220\u8BB0\u5F55\u8BF7\u7528 op:\"forget\"";
 /**
  * 不可逆性必须明写（1.4.0）：删除不进回收站。
@@ -71,9 +72,26 @@ export interface ManageRevealResult {
     reason?: DeleteReason;
     errorCode?: string;
 }
+/**
+ * `cancel` 的返回形状（1.6.0 契约）。
+ *
+ * `cancelled:false` 的两种原因刻意分开：
+ * - `not-running`：记录存在，但当前 Host 进程里没有它的下载（已结束 / 别的进程）；
+ * - `unknown`：连记录都没有，调用方给的 id 不对。
+ *
+ * 为什么不在没在跑时返回 `ok:false`：这是一次**有效**的查询，答案就是「它没在跑」。
+ * 用错误信封会把「已经结束」与「请求坏了」混在一起，面板只能报一句笼统的失败。
+ */
+export interface ManageCancelResult {
+    cancelled: boolean;
+    taskId: string;
+    reason?: 'not-running' | 'unknown';
+    /** 记录里的状态（没在跑时给出，便于面板显示「它其实已经完成了」） */
+    state?: string;
+}
 /** 已校验的管理请求。 */
 export interface ManageRequest {
-    op: 'inspect' | 'forget' | 'delete' | 'reveal';
+    op: 'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'retry';
     taskId: string;
     confirm: boolean;
     session?: ProgressSession;
@@ -199,6 +217,21 @@ export declare function revealManagedTask(taskId: string, session?: ProgressSess
  */
 export declare function forgetManagedTask(taskId: string, session?: ProgressSession): string[];
 /**
+ * `op:'cancel'`：中止当前 Host 进程里正在跑的那一条（1.6.0）。
+ *
+ * 只对**本进程**有效：`AbortController` 无法跨进程使用，重启 Host 后旧任务本来
+ * 也不存在了。因此「没在跑」不是错误，而是如实回答；再结合进度记录区分
+ * 「已结束」与「未知 id」。
+ */
+export declare function cancelManagedTask(taskId: string, session?: ProgressSession): ManageCancelResult;
+/**
+ * `op:'retry'`：以同一个 taskId 重新发起一条已失败 / 已取消的下载（1.6.0）。
+ *
+ * 真正的实现由插件入口通过 `setRetryHandler` 注入（rpc.ts 不 import index.ts，
+ * 否则会形成循环依赖）。没注入时如实回 `unavailable`，而不是假装开始。
+ */
+export declare function retryManagedTask(taskId: string, session?: ProgressSession): Promise<RetryStartResult>;
+/**
  * `op:'delete'`：**先删产物、成功后再删记录**（顺序不得颠倒）。
  *
  * ⚠️ **此函数不做 confirm 校验。** 确认（`confirm:true`）由分派层
@@ -231,9 +264,10 @@ export declare function deleteManagedTask(taskId: string, session?: ProgressSess
  * connection 服务（web profile）时才注册，纯 CLI profile 下静默跳过，
  * 不会因为缺少 connection 而让整个插件加载失败。
  *
- * 浏览器端目前只调用 status（面板保持只读）；cleanup 是 D7-② 拍板要加的
- * **清理入口** —— 从前 `ProgressReporter.cleanup()` 只有调用方在代码里显式
- * 调用才有效，这个端点把它变成可被外部（脚本、未来的面板按钮）触发的入口。
+ * 浮层进度面板只调用 status（保持只读）；下载管理器另外调用 manage 的
+ * cancel / retry（1.6.0）。cleanup 是 D7-② 拍板要加的**清理入口** ——
+ * 从前 `ProgressReporter.cleanup()` 只有调用方在代码里显式调用才有效，
+ * 这个端点把它变成可被外部（脚本、面板按钮）触发的入口。
  * manage 是 1.4.0 下载管理器要的**单条操作入口**，删除规则见上方那一节。
  *
  * @param ctx 插件上下文

@@ -608,7 +608,7 @@ lopsided trade; to delete a file, use that row's confirmation dialog.
 **Each row shows**: a status dot with coloured status text, a progress bar (coloured by status), the file name and
 percentage, size, last-update time, and a `presence` badge (in place / moved / changed / not deletable);
 **while downloading it also shows live speed and ETA** (ETA only while running — reporting "0s left" for a finished
-task is noise). Two per-row actions:
+task is noise). Per-row actions:
 
 - **Show in folder**: opens the system file manager with **that file selected**. It prefers the host's
   `remote.session`; when that service is unavailable it **falls back to the server** (the host process runs
@@ -618,16 +618,26 @@ task is noise). Two per-row actions:
   local file is permanent — it does not go to the recycle bin**. "Also delete the local file" is offered only while
   the file is still in place; **a moved file, or one that no longer matches the download (size/mtime changed), allows
   deleting the record only** — the safety boundary of "deleting the file that was actually downloaded", not laziness.
+- **Cancel** (`running` rows only): sends an abort to the **current Host process**; the child process is terminated
+  with `SIGTERM`, then `SIGKILL` after 1s, and the task is recorded as `cancelled`. A successful response only means
+  the **cancel request was accepted** — the terminal state appears on the next poll. A task that already finished, or
+  one started by another Host process, honestly reports `not-running` instead of pretending it was cancelled.
+- **Retry** (`failed` / `cancelled` rows only): restarts the download **in the background under the same `taskId`**,
+  reusing the original URL, output path, checksum, mirror, bandwidth cap and timeout, so the panel refreshes in place
+  instead of growing a duplicate row. Retry **never replays** `Authorization` / Cookie / `Referer` / user-agent /
+  custom headers (they are never persisted); for a protected URL, call `smart_download` again with `headers`. Records
+  written before 1.6.0 have no `request` field and can only be downloaded again.
 
 **Keyboard**: focus a row and press `Delete` to open that row's confirmation dialog (not an immediate delete — the
 brake on an irreversible action stays); the dialog focuses **the option you used last time**, so `Enter` confirms
 (the choice is stored in `localStorage`). When the file has been moved, focus falls back to "Delete record only".
 
-Deletion goes through `POST /api/smartdl.manage` (`inspect` / `forget` / `delete` / `reveal`) and the server enforces
-14 safety rules: the path **can only come from this plugin's own records** (the client sends a `taskId`; caller-supplied
-paths are never read), only absolute paths, `normalize`-stable with no `..`/NUL, `lstat` only (directories and symlinks
-are refused), **a size mismatch is refused**, running tasks are refused, paths inside the record directories are
-refused, **the file is deleted before the record**, failures are classified as
+Deletion, cancellation and retry go through `POST /api/smartdl.manage` (`inspect` / `forget` / `delete` / `reveal` /
+`cancel` / `retry`) and the server enforces 14 safety rules for deletion: the path **can only come from this plugin's
+own records** (the client sends a `taskId`; caller-supplied paths are never read), only absolute paths,
+`normalize`-stable with no `..`/NUL, `lstat` only (directories and symlinks are refused), **a size mismatch is
+refused**, running tasks are refused, paths inside the record directories are refused, **the file is deleted before
+the record**, failures are classified as
 `gone`/`busy`/`denied`/`is-dir`/`is-link`/`changed`/`no-path`/`running`, and **nothing ever pretends to have
 succeeded**. When a deletion fails the row **stays on screen** with the specific reason (in use / permission denied /
 file replaced…).
@@ -669,7 +679,7 @@ This plugin does exactly these things: **start downloads, verify the downloaded 
 | Writing the downloaded file | Writes to the path given by the `output` argument (the caller may explicitly choose any writable path, including one outside the current working directory); when omitted the filename comes from `Content-Disposition` first, then the `filename` / `file` query parameter, then the URL, and lands in the current working directory. All three are reduced to a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so a derived filename cannot escape the working directory. Parent directories are created as needed (`mkdir -p`). **Overwrite semantics are governed by `ifExists`**: `overwrite` (default) replaces a file of the same name, `skip` does not touch it at all, and `rename` only writes a new name and leaves the old file untouched. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
 | Reading disk metadata | When the server declares a size and the response is not compressed, `statfs` queries free space on the **target directory's filesystem** for the preflight check; read-only, no file contents scanned. If `statfs` is unavailable the check is skipped and the result says so. |
 | Reading progress files | `download_status` (and `/api/smartdl.status`) only **reads** the two progress-track directories described in "Progress reporting". It writes nothing and performs no network access. |
-| HTTP endpoints (web-UI profiles only) | The plugin registers two exact routes on the shared `/api` carrier: `POST /api/smartdl.status` (**read-only** snapshot, reading the same progress files as `download_status`) and `POST /api/smartdl.cleanup` (**deletes files**). Cleanup's deletion scope is strictly limited to the two progress-track directories, and only touches **regular files** whose names match this plugin's convention (`*.json` / `*.jsonl`) and whose mtime is older than the retention window (via `lstat`; directories and symlinks are never touched): the default window is 24 hours (lower bound 60 seconds, upper 365 days), 200 deletions per call by default (hard cap 500), oldest first. It does **not** delete download artifacts, does **not** recurse, and does **not** touch other directories; an invalid parameter (window or count out of range) is refused with `ok:false` plus actionable text rather than being clamped to a bound and then deleting. **Blast radius**: progress files are the only source of the "completed / failed" receipts, so deleting them hides those tasks from the panel and `download_status` (downloaded files are unaffected, but that history cannot be recovered from anywhere else). **Auth**: inherited from the carrier itself (browser session cookie + loopback / Origin checks) — there is no per-task or per-session authorisation, so anyone who can call the endpoint can clean up the progress history of all sessions on this machine. To clean track 1 (`<session.cwd>/.dsh-progress/<session.id>/`) the request payload must carry `session: { id, cwd }`; without it the response states `taskDirSkipped` explicitly ("track 1 did not participate") instead of pretending it cleaned everything. |
+| HTTP endpoints (web-UI profiles only) | The plugin registers **three** exact routes on the shared `/api` carrier: `POST /api/smartdl.status` (**read-only** snapshot, reading the same progress files as `download_status`), `POST /api/smartdl.cleanup` (**deletes progress files**) and `POST /api/smartdl.manage` (per-task `inspect` / `forget` / `delete` / `reveal` / `cancel` / `retry`). Cleanup's deletion scope is strictly limited to the two progress-track directories, and only touches **regular files** whose names match this plugin's convention (`*.json` / `*.jsonl`) and whose mtime is older than the retention window (via `lstat`; directories and symlinks are never touched): the default window is 24 hours (lower bound 60 seconds, upper 365 days), 200 deletions per call by default (hard cap 500), oldest first. It does **not** delete download artifacts, does **not** recurse, and does **not** touch other directories; an invalid parameter (window or count out of range) is refused with `ok:false` plus actionable text rather than being clamped to a bound and then deleting. `manage`'s `cancel` only aborts a task registered in the **current Host process**, and `retry` accepts only `failed` / `cancelled` tasks whose request information comes solely from this plugin's own records (headers are never stored or replayed); neither needs `confirm`, and neither can fall through to the delete-artifact branch. **Blast radius**: progress files are the only source of the "completed / failed" receipts and of retry metadata, so deleting them hides those tasks from the panel and `download_status` (downloaded files are unaffected, but that history cannot be recovered from anywhere else). **Auth**: inherited from the carrier itself (browser session cookie + loopback / Origin checks) — there is no per-task or per-session authorisation, so anyone who can call these endpoints can clean up the progress history of all sessions on this machine and cancel downloads running in it. To clean track 1 (`<session.cwd>/.dsh-progress/<session.id>/`) the request payload must carry `session: { id, cwd }`; without it the response states `taskDirSkipped` explicitly ("track 1 did not participate") instead of pretending it cleaned everything. |
 | Writing progress files | Track 1: `$DSH_PROGRESS_DIR/<taskId>.jsonl`; when that variable is unset, `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl` (skipped entirely without a session context). Track 2: `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`, defaulting to `<DSH_HOME>/downloads/tasks/<taskId>.json`. If a directory is unwritable it is skipped silently without affecting the download. |
 | Child processes | Launches the bundled `aria2c` or the system `curl`, both with `windowsHide: true` (no console window) and honouring `AbortSignal` cancellation (SIGTERM first, `SIGKILL` if still alive after 1s — that fallback is armed on **every** platform, since a POSIX process can ignore SIGTERM just as well). A cancellation is recorded as the `cancelled` state, distinct from a failure. |
 | Environment variables read | Only `DSH_PROGRESS_DIR`, `DSH_DOWNLOAD_PROGRESS_DIR` and `DSH_HOME` (used to locate the default progress directory; the fallback home comes from `os.homedir()`, so `USERPROFILE` / `HOME` are not read directly), plus `DSH_SMARTDL_MIRRORS` (overrides the auto-mirror candidate list; only affects `mirror: "auto"`). |
@@ -1025,7 +1035,7 @@ default" has a positive assertion — see the contract table above).
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **600 cases (597 pass / 3 skip / 0 fail)**, **99.23%** line / **91.87%** branch / **97.70%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
+Current baseline: **626 cases (623 pass / 3 skip / 0 fail)**, **99.18%** line / **92.01%** branch / **97.18%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets: measured on the same tree, CRLF reports **99.36%** line coverage while LF reports
 **99.40%**, and the uncovered line numbers shift as well (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).
@@ -1033,10 +1043,10 @@ The 3 skipped cases are platform-limited (they only reproduce on Linux or on spe
 See [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 
 > The "uncovered lines" column reports **closing braces, continuation lines of multi-line
-> expressions / object literals, and type-declaration or comment lines** as uncovered. The current
-> entries have been checked by hand (`index.ts:350-356` / `361-362` / `568-574` / `644-651` / `765`
-> schema and type declarations, `downloader.ts:79` / `274` comments and the "path must be absolute"
-> defensive branch, `headers.ts:119`, `url.ts:69` closing brace): every one falls into those categories — **no statement
+> expressions / object literals, and type-declaration or comment lines** as uncovered. The 1.6.0
+> entries have been checked by hand (`index.ts` schema and type declarations, `downloader.ts:79` /
+> `274` comments and the "path must be absolute" defensive branch, `headers.ts` / `url.ts:69`
+> closing braces, `tasks.ts:21-22` file-header comments): every one falls into those categories — **no statement
 > with real logic is missing a test** — and the behaviour behind them is asserted to concrete
 > values (the self-managed-header rejection text, the tool schema fields). This is tsx source-map
 > line attribution. Judge by the percentages.

@@ -285,6 +285,29 @@ Windows 上打包 Linux 二进制会把它记成 `0644`，装完直接调用就�
 然后继续跑，此时取消就永远等不到 `close` 事件，`smart_download` 会一直不返回。
 `1.0.0` 起兜底对所有平台生效（`SIGTERM` 后 1 秒 `SIGKILL`）。若你仍在旧版本上遇到，升级。
 
+## 管理器里点「取消」或「重试」失败
+
+这两个按钮走 `POST /api/smartdl.manage`，服务端会按固定原因回告，客户端逐条翻译成文案。
+先对照原因，再决定是重试、重下还是不用管：
+
+| 原因 | 含义 | 处理 |
+| --- | --- | --- |
+| `cancelNotRunning`（`not-running`） | 记录还在，但**当前 Host 进程**里没有这条下载：它已经结束、来自别的 Host 进程，或 Host 重启过 | 不需要处理；看行内状态确认它其实已完成 / 失败。若状态仍是 `running`，那是崩溃留下的陈旧记录，下一次轮询会按陈旧规则忽略 |
+| `cancelUnknown`（`unknown`） | 连进度记录都找不到，`taskId` 已失效（可能被清理或删记录） | 刷新列表；确实要重下就重新调用 `smart_download` |
+| `retryNoRequest`（`no-request`） | 记录是 1.6.0 之前写的，没有 `request` 字段，无法知道原 URL / 输出路径 | 重新调用 `smart_download`。这不是文件损坏 |
+| `retryNotRetryable`（`not-retryable`） | 状态不是 `failed` / `cancelled`，或记录里的 URL / 摘要不合法 | 只对失败 / 已取消的任务重试；记录被手改过时重新下载 |
+| `retryRunning`（`running`） | 这条正在跑，重试会造成同一路径两个写入者 | 等它结束，或先取消 |
+| `retryUnknown`（`unknown`） | 记录不存在 | 刷新列表后重下 |
+| `retryUnavailable`（`unavailable`） | 当前 Host 没有注入重试实现（例如纯 CLI profile、旧宿主加载了新客户端脚本） | 重新调用 `smart_download`；必要时重启 DSH 让插件完整加载 |
+
+**重试成功后仍可能立刻失败**：重试**不重放** `Authorization` / Cookie / `Referer` / UA /
+自定义请求头（这些从不落盘）。需要鉴权的地址会收到 401 / 403 —— 这是安全取舍，不是重试
+坏了；请重新调用 `smart_download` 并传 `headers`。签名 URL 过期同理，重下时换新链接。
+
+点「取消」后的成功提示只表示 **abort 请求已被接受**。子进程退出、终态 `cancelled` 写盘
+需要一点时间，面板在下一次轮询后才会变色；如果超过几秒仍是 `running`，按上一节检查
+子进程是否卡住（`SIGTERM` 后 1 秒应有 `SIGKILL` 兜底）。
+
 ## 进度文件把磁盘写满了
 
 进度文件不会被自动清理，这是刻意的：面板依赖它们渲染「已完成 / 失败」回执，立刻删除会让回执

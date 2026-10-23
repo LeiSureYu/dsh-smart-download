@@ -200,6 +200,20 @@ window.__ModuleLoader__.load({
 			'deleteReasonChanged': '本地文件与下载完成时不一致（可能已被替换），为安全起见不删除',
 			'deleteReasonNoPath': '这条记录没有保存输出路径，只能删除记录',
 			'deleteReasonRunning': '下载仍在进行，未删除',
+			/* ---- 1.6.0 取消 / 重试 ---- */
+			'cancel': '取消下载',
+			'cancelling': '正在取消…',
+			'cancelRequested': '已请求取消，正在停止下载…',
+			'cancelUnknown': '找不到这条任务，可能记录已被删除',
+			'cancelNotRunning': '这条任务已经不在运行中',
+			'retry': '重试',
+			'retrying': '正在重试…',
+			'retryStarted': '已重新开始下载',
+			'retryRunning': '这条任务正在下载中，无需重试',
+			'retryUnknown': '找不到这条任务，可能记录已被删除',
+			'retryNotRetryable': '只有失败或已取消的任务可以重试',
+			'retryNoRequest': '这条记录没有保存原始下载信息（可能来自旧版本），请重新调用 smart_download',
+			'retryUnavailable': '当前宿主没有提供重试能力，请重新调用 smart_download',
 			'actionFailed': '操作失败',
 		};
 
@@ -262,6 +276,20 @@ window.__ModuleLoader__.load({
 			'deleteReasonChanged': 'The local file no longer matches what was downloaded (it may have been replaced); for safety it was not deleted',
 			'deleteReasonNoPath': 'This record has no saved output path; only the record could be deleted',
 			'deleteReasonRunning': 'The download is still running; nothing was deleted',
+			/* ---- 1.6.0 cancel / retry ---- */
+			'cancel': 'Cancel download',
+			'cancelling': 'Cancelling…',
+			'cancelRequested': 'Cancellation requested; stopping the download…',
+			'cancelUnknown': 'That task could not be found; its record may have been deleted',
+			'cancelNotRunning': 'That task is no longer running',
+			'retry': 'Retry',
+			'retrying': 'Retrying…',
+			'retryStarted': 'Download restarted',
+			'retryRunning': 'That task is already downloading; no retry is needed',
+			'retryUnknown': 'That task could not be found; its record may have been deleted',
+			'retryNotRetryable': 'Only failed or cancelled tasks can be retried',
+			'retryNoRequest': 'This record has no saved request information (it may predate retry support); call smart_download again',
+			'retryUnavailable': 'The host does not provide retry support; call smart_download again',
 			'actionFailed': 'Action failed',
 		};
 
@@ -490,6 +518,36 @@ window.__ModuleLoader__.load({
 			if (!value) return t('revealFailed');
 			const key = deleteReasonKey(value.reason);
 			return key ? t(key) : t('revealFailed');
+		}
+
+		/**
+		 * Map a `cancel` refusal onto dictionary copy.
+		 *
+		 * `cancelled:false` is a valid answer, not a transport error: the Host is
+		 * saying the task already finished (or the id is unknown). Keeping the
+		 * two reasons distinct is what lets the row tell the user which one it is.
+		 */
+		function cancelFailureText(value, t) {
+			const reason = value && value.reason;
+			if (reason === 'unknown') return t('cancelUnknown');
+			if (reason === 'not-running') {
+				const state = value && typeof value.state === 'string' ? value.state : '';
+				return state === '' ? t('cancelNotRunning') : `${t('cancelNotRunning')}（${state}）`;
+			}
+			return t('actionFailed');
+		}
+
+		/** Map a `retry` refusal onto dictionary copy (reason set is frozen in rpc.ts). */
+		function retryFailureText(value, t) {
+			const reason = value && value.reason;
+			switch (reason) {
+				case 'running': return t('retryRunning');
+				case 'unknown': return t('retryUnknown');
+				case 'not-retryable': return t('retryNotRetryable');
+				case 'no-request': return t('retryNoRequest');
+				case 'unavailable': return t('retryUnavailable');
+				default: return t('actionFailed');
+			}
 		}
 
 		/** Human byte size; falls back to the caller's "unknown" copy. */
@@ -1409,14 +1467,30 @@ window.__ModuleLoader__.load({
 		 * @param props - the task, the locale seat, and the row's callbacks.
 		 * @returns the row element.
 		 */
-		function SmartDlManagerRow({ task, t, presence, onReveal, onDelete, checked, onToggle }) {
+		function SmartDlManagerRow({
+			task,
+			t,
+			presence,
+			onReveal,
+			onDelete,
+			onCancel,
+			onRetry,
+			busy,
+			actionsDisabled,
+			checked,
+			onToggle,
+		}) {
 			// Delete 键：焦点在本行时打开确认框（不是直接删——不可逆操作的刹车仍在）。
 			const onRowKeyDown = (event) => {
 				if (event.key !== 'Delete') return;
+				// 行级动作在途时不允许再打开删除确认：取消 / 重试还没落定时
+				// 删除可能与它抢同一条记录，用户会看到「删掉的文件又回来了」。
+				if (actionsDisabled === true) return;
 				event.preventDefault();
 				onDelete(task);
 			};
-			void onRowKeyDown;			const label = shortLabel(task) || t('untitled');
+			void onRowKeyDown;
+			const label = shortLabel(task) || t('untitled');
 			const state = panelStore_PresenceOf(presence, task.id);
 			const deletable = canDeleteLocalFile(state.presence);
 			const revealable = canReveal(task, state.presence);
@@ -1427,6 +1501,17 @@ window.__ModuleLoader__.load({
 			const pct = pctOf(task);
 			const statusColor = semanticColor('task', task.status);
 			const presenceColor = semanticColor('presence', state.presence);
+			// 取消只对**正在跑**的任务有意义；重试只对失败 / 已取消有意义。
+			// 其余状态不渲染按钮，而不是渲染一个永远置灰的按钮：管理器里每条
+			// 记录都要扫一眼，恒定无效的控件只是噪声。
+			const canCancel = task.status === 'running';
+			const canRetry = task.status === 'failed' || task.status === 'cancelled';
+			const isBusy = busy === true;
+			// 只允许一条行级动作在途。别的行在这期间必须**禁用**，否则点击会被
+			// `acting !== null` 静默吞掉（看起来像按钮坏了）。但只有当前行显示
+			// 「正在取消 / 正在重试」—— 把全局禁用当成 busy 会让所有行都变成
+			// 「正在重试」，那是假的。
+			const blocked = actionsDisabled === true || isBusy;
 
 			return react.createElement(
 				'div',
@@ -1624,9 +1709,10 @@ window.__ModuleLoader__.load({
 							type: 'button',
 							'data-dsh-smart-dl': 'delete',
 							'aria-label': t('deleteRecord'),
+							disabled: blocked,
 							onClick: () => onDelete(task),
 							style: {
-								cursor: 'pointer',
+								cursor: blocked ? 'default' : 'pointer',
 								fontSize: 12,
 								padding: '4px 10px',
 								borderRadius: 6,
@@ -1635,11 +1721,63 @@ window.__ModuleLoader__.load({
 								border: '1px solid var(--dsw-alias-label-error, #dc2626)',
 								background: 'transparent',
 								color: 'var(--dsw-alias-label-error, #dc2626)',
-								opacity: 0.9,
+								opacity: blocked ? 0.45 : 0.9,
 							},
 						},
 						t('deleteRecord'),
 					),
+					canCancel
+						? react.createElement(
+								'button',
+								{
+									type: 'button',
+									'data-dsh-smart-dl': 'cancel',
+									'aria-label': t('cancel'),
+									disabled: blocked,
+									title: isBusy ? t('cancelling') : t('cancel'),
+									onClick: () => {
+										if (typeof onCancel === 'function') onCancel(task);
+									},
+									style: {
+										cursor: blocked ? 'default' : 'pointer',
+										fontSize: 12,
+										padding: '4px 10px',
+										borderRadius: 6,
+										border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+										background: 'transparent',
+										color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+										opacity: blocked ? 0.45 : 1,
+									},
+								},
+								isBusy ? t('cancelling') : t('cancel'),
+							)
+						: null,
+					canRetry
+						? react.createElement(
+								'button',
+								{
+									type: 'button',
+									'data-dsh-smart-dl': 'retry',
+									'aria-label': t('retry'),
+									disabled: blocked,
+									title: isBusy ? t('retrying') : t('retry'),
+									onClick: () => {
+										if (typeof onRetry === 'function') onRetry(task);
+									},
+									style: {
+										cursor: blocked ? 'default' : 'pointer',
+										fontSize: 12,
+										padding: '4px 10px',
+										borderRadius: 6,
+										border: '1px solid var(--dsw-alias-label-primary, #2563eb)',
+										background: 'transparent',
+										color: 'var(--dsw-alias-label-primary, #2563eb)',
+										opacity: blocked ? 0.45 : 1,
+									},
+								},
+								isBusy ? t('retrying') : t('retry'),
+							)
+						: null,
 				),
 				// Why the destructive option is missing, when it is. Silence here
 				// reads as "the button is broken"; one line reads as "by design".
@@ -1822,6 +1960,9 @@ window.__ModuleLoader__.load({
 			const [query, setQuery] = react.useState('');
 			const [checked, setChecked] = react.useState([]);
 			const [batching, setBatching] = react.useState(false);
+			// 正在执行的行级动作（取消 / 重试）。只允许一条在途：这两个操作都会
+			// 改变同一条任务的运行态，连点两次没有第二种合理解释。
+			const [acting, setActing] = react.useState(null);
 
 			const state = panelStore.getSnapshot();
 			const tasks = state.tasks === null ? [] : state.tasks;
@@ -1994,6 +2135,55 @@ window.__ModuleLoader__.load({
 				// 例如点击后文件被移走），也要说清楚——记录没了但文件还在磁盘上。
 				if (withFile && value.fileDeleted === false) {
 					setNotice(deleteFailureText(value, t));
+				}
+			};
+
+			/**
+			 * 取消一条正在跑的任务。
+			 *
+			 * 不发 `confirm`：取消不是不可逆操作（最多损失未完成的进度），
+			 * 而删除产物仍走确认框。成功只代表 Host 已发出 abort；真正的
+			 * cancelled 终态由下一次状态轮询呈现。
+			 */
+			const cancelTask = async (task) => {
+				if (acting !== null) return;
+				setActing({ id: task.id, op: 'cancel' });
+				try {
+					const result = await manage({ op: 'cancel', taskId: task.id });
+					const value = result && result.ok ? result.value : null;
+					if (value && value.cancelled === true) {
+						setNotice(t('cancelRequested'));
+					} else {
+						setNotice(cancelFailureText(value, t));
+					}
+				} catch {
+					setNotice(t('actionFailed'));
+				} finally {
+					setActing(null);
+				}
+			};
+
+			/**
+			 * 重试一条失败 / 已取消的任务。
+			 *
+			 * 同样不发 `confirm`：它只会在**原有记录**上重新发起下载，
+			 * 不改动已有产物（是否覆盖仍由记录里的 ifExists 决定）。
+			 */
+			const retryTask = async (task) => {
+				if (acting !== null) return;
+				setActing({ id: task.id, op: 'retry' });
+				try {
+					const result = await manage({ op: 'retry', taskId: task.id });
+					const value = result && result.ok ? result.value : null;
+					if (value && value.started === true) {
+						setNotice(t('retryStarted'));
+					} else {
+						setNotice(retryFailureText(value, t));
+					}
+				} catch {
+					setNotice(t('actionFailed'));
+				} finally {
+					setActing(null);
 				}
 			};
 
@@ -2243,6 +2433,10 @@ window.__ModuleLoader__.load({
 								onToggle: toggleChecked,
 								onReveal: revealTask,
 								onDelete: (row) => setPending(row.id),
+								onCancel: cancelTask,
+								onRetry: retryTask,
+								busy: acting !== null && acting.id === task.id,
+								actionsDisabled: acting !== null,
 							}),
 						),
 				pending === null

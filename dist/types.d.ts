@@ -1,6 +1,7 @@
 /**
  * smart_download 工具的参数与返回结果类型定义
  */
+import type { RetryRequest } from './tasks.js';
 /** 请求头表：头名 -> 头值（头名已归一化为 `X-Foo-Bar` 形式） */
 export type RequestHeaders = Record<string, string>;
 /**
@@ -399,6 +400,14 @@ export interface ProgressRecord {
     size?: number;
     /** 下载结束时的 mtime（毫秒），可选（1.4.0 新增，只在**终态**记录里写）。 */
     fileMtimeMs?: number;
+    /**
+     * 重试这条任务所需的最小请求信息，可选（1.6.0 新增）。
+     *
+     * 只包含 URL / 输出路径 / 摘要 / 镜像 / 限速 / 超时这些「可以安全落盘」的字段，
+     * **绝不包含请求头**：Authorization / Cookie 写进任务文件等于把凭据留在磁盘上。
+     * 老记录没有该字段时，字段整个不出现（读取端与 1.5.0 逐字节兼容）。
+     */
+    request?: RetryRequest;
 }
 /** 进度状态，取值与 dsh-task-progress 的协议一致 */
 export type ProgressState = 'running' | 'done' | 'failed' | 'cancelled';

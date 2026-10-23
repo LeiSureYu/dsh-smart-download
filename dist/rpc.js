@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js';
 import { cleanupHistory, readCleanupQuery } from './cleanup.js';
 import { isSafeTaskId, removeTaskRecords, resolveDownloadProgressDir, resolveTaskProgressDir, } from './progress.js';
+import { cancelRunningTask, getRetryHandler, isKnownTask } from './tasks.js';
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
 const API_PATH = '/api';
 /** status 端点名（只读）；客户端以 `rpc.call('/api', 'smartdl.status', ...)` 调用。 */
@@ -24,11 +25,16 @@ const STATUS_ENDPOINT = 'smartdl.status';
  */
 const CLEANUP_ENDPOINT = 'smartdl.cleanup';
 /**
- * 管理端点名（1.4.0）：下载管理器的服务端入口，按 `op` 分派三个操作。
+ * 管理端点名（1.4.0）：下载管理器的服务端入口，按 `op` 分派。
  *
  * 与 cleanup 的区别是**粒度**：cleanup 按保留窗口批量清进度文件，manage 处理
- * 「用户显式点的那一条任务」（查状态 / 只删记录 / 连产物一起删）。两者不合并：
- * 时间窗口语义与单条确认语义混在一起，迟早出现「随手清一下却删掉了刚下的文件」。
+ * 「用户显式点的那一条任务」（查状态 / 只删记录 / 连产物一起删 / 取消 / 重试）。
+ * 两者不合并：时间窗口语义与单条确认语义混在一起，迟早出现「随手清一下却
+ * 删掉了刚下的文件」。
+ *
+ * 1.6.0 起它**不再是只读面板**：cancel 会 abort 当前 Host 进程内的下载，
+ * retry 会以同一个 taskId 重新发起一次下载。两者都不接受调用方给的路径或
+ * 请求头 —— 重试所需的信息只能来自本插件自己写下的进度记录。
  */
 const MANAGE_ENDPOINT = 'smartdl.manage';
 function ok(value) {
@@ -175,7 +181,7 @@ function registerApiRoute(child, endpoint, handle) {
     child.effect(start, `dsh-smart-dl: ${API_PATH}/${endpoint} Fetch route`);
 }
 /** 固定文案做成常量：客户端与测试都按同一份措辞断言，散落的字面量迟早对不上。 */
-export const MANAGE_BAD_PAYLOAD = '拒绝管理请求：body 必须是对象，且带 op（inspect / forget / delete）与 taskId';
+export const MANAGE_BAD_PAYLOAD = '拒绝管理请求：body 必须是对象，且带 op（inspect / forget / delete / reveal / cancel / retry）与 taskId';
 export const MANAGE_CONFIRM_REQUIRED = '拒绝删除本地文件：需要 confirm:true；只想删记录请用 op:"forget"';
 /**
  * 不可逆性必须明写（1.4.0）：删除不进回收站。
@@ -200,8 +206,15 @@ export function readManagePayload(payload) {
         return { error: MANAGE_BAD_PAYLOAD };
     const body = payload;
     const op = body.op;
-    if (op !== 'inspect' && op !== 'forget' && op !== 'delete' && op !== 'reveal') {
-        return { error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete / reveal）` };
+    if (op !== 'inspect' &&
+        op !== 'forget' &&
+        op !== 'delete' &&
+        op !== 'reveal' &&
+        op !== 'cancel' &&
+        op !== 'retry') {
+        return {
+            error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete / reveal / cancel / retry）`,
+        };
     }
     // **R2 落点**：taskId 会被拼进文件名，必须过白名单；带分隔符 / `..` / 驱动器号
     // 的 id 能让 path.join 指到记录目录之外，而删除是不可逆的。
@@ -441,6 +454,42 @@ export function forgetManagedTask(taskId, session) {
     return removeTaskRecords(taskId, session);
 }
 /**
+ * `op:'cancel'`：中止当前 Host 进程里正在跑的那一条（1.6.0）。
+ *
+ * 只对**本进程**有效：`AbortController` 无法跨进程使用，重启 Host 后旧任务本来
+ * 也不存在了。因此「没在跑」不是错误，而是如实回答；再结合进度记录区分
+ * 「已结束」与「未知 id」。
+ */
+export function cancelManagedTask(taskId, session) {
+    if (cancelRunningTask(taskId) === 'cancelled') {
+        // 只表示「取消请求已被接受」。进度记录要等子进程真正退出、reporter
+        // 写完终态才会变成 cancelled；这里报 state:'cancelled' 会让面板在下一次
+        // 轮询前短暂显示一个尚未发生的事实。
+        return { cancelled: true, taskId };
+    }
+    const task = findTask(taskId, session);
+    if (!task) {
+        return {
+            cancelled: false,
+            taskId,
+            reason: isKnownTask(taskId) ? 'not-running' : 'unknown',
+        };
+    }
+    return { cancelled: false, taskId, reason: 'not-running', state: task.status };
+}
+/**
+ * `op:'retry'`：以同一个 taskId 重新发起一条已失败 / 已取消的下载（1.6.0）。
+ *
+ * 真正的实现由插件入口通过 `setRetryHandler` 注入（rpc.ts 不 import index.ts，
+ * 否则会形成循环依赖）。没注入时如实回 `unavailable`，而不是假装开始。
+ */
+export async function retryManagedTask(taskId, session) {
+    const handler = getRetryHandler();
+    if (!handler)
+        return { started: false, taskId, reason: 'unavailable' };
+    return handler(taskId, session);
+}
+/**
  * `op:'delete'`：**先删产物、成功后再删记录**（顺序不得颠倒）。
  *
  * ⚠️ **此函数不做 confirm 校验。** 确认（`confirm:true`）由分派层
@@ -563,9 +612,10 @@ function reasonFromErrno(code) {
  * connection 服务（web profile）时才注册，纯 CLI profile 下静默跳过，
  * 不会因为缺少 connection 而让整个插件加载失败。
  *
- * 浏览器端目前只调用 status（面板保持只读）；cleanup 是 D7-② 拍板要加的
- * **清理入口** —— 从前 `ProgressReporter.cleanup()` 只有调用方在代码里显式
- * 调用才有效，这个端点把它变成可被外部（脚本、未来的面板按钮）触发的入口。
+ * 浮层进度面板只调用 status（保持只读）；下载管理器另外调用 manage 的
+ * cancel / retry（1.6.0）。cleanup 是 D7-② 拍板要加的**清理入口** ——
+ * 从前 `ProgressReporter.cleanup()` 只有调用方在代码里显式调用才有效，
+ * 这个端点把它变成可被外部（脚本、面板按钮）触发的入口。
  * manage 是 1.4.0 下载管理器要的**单条操作入口**，删除规则见上方那一节。
  *
  * @param ctx 插件上下文
@@ -602,6 +652,13 @@ export function registerStatusRpc(ctx) {
             if (op === 'forget') {
                 return ok({ recordRemoved: forgetManagedTask(taskId, session) });
             }
+            // cancel / retry 必须在 delete 的 confirm 分支之前分派：它们不需要
+            // confirm，且绝不能因为调用方多带了一个 confirm:true 就落到删除产物的
+            // 路径上（那是不可逆操作）。
+            if (op === 'cancel')
+                return ok(cancelManagedTask(taskId, session));
+            if (op === 'retry')
+                return ok(await retryManagedTask(taskId, session));
             // op === 'delete'：没有 confirm:true 就整个拒绝。
             // 契约里 `reason` 的取值集合没有「未确认」这一项，所以这里不能悄悄降级成
             // 「只删记录」—— 那会让客户端在 fileDeleted 处理不当时以为产物也删了。

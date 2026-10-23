@@ -23,7 +23,7 @@ import {
 } from './downloader.js'
 import type { Aria2Observation } from './downloader.js'
 import { decide, decideConcurrency, LARGE_FILE } from './decision.js'
-import { ProgressReporter } from './progress.js'
+import { isSafeTaskId, ProgressReporter, readTaskRecord } from './progress.js'
 import type { ProgressSession } from './progress.js'
 import { applyMirror, isAutoMirror } from './mirror.js'
 import { resolveAutoMirror } from './auto-mirror.js'
@@ -62,6 +62,14 @@ import {
   verifySize,
 } from './verify.js'
 import type { DownloadStatusSnapshot } from './status.js'
+import {
+  isRunning,
+  parseRetryRequest,
+  registerRunningTask,
+  setRetryHandler,
+  unregisterRunningTask,
+} from './tasks.js'
+import type { RetryRequest, RetryStartResult } from './tasks.js'
 import type {
   BatchDownloadResult,
   BatchItemResult,
@@ -200,6 +208,9 @@ function renderBatch(value: BatchDownloadResult): string {
 export function apply(ctx: Context): void {
   // 浏览器端进度面板的数据源；纯 CLI profile 下没有 connection 服务时静默跳过。
   registerStatusRpc(ctx)
+  // manage 端点的 retry 由这里注入：rpc.ts 不 import index.ts（会成环），
+  // 因此通过注册表拿实现。重复 apply 覆盖同一个 handler 是幂等的。
+  setRetryHandler((taskId, session) => startRetry(taskId, session))
 
   ctx.tools.register(
     defineTool({
@@ -588,6 +599,24 @@ interface ItemContext {
    * 条目级超时只终止它自己，同批其它条目照常跑（见 downloadOne 里的信号合并）。
    */
   timeoutMs?: number
+  /**
+   * 复用已有 taskId（1.6.0：重试时原地刷新同一条记录）。
+   * 缺省时由 downloadOne 生成新 id。
+   */
+  taskIdOverride?: string
+  /**
+   * 本条目自己的取消手柄（1.6.0）。
+   *
+   * 为什么不能只靠 exec.signal：面板的「取消这一条」必须只终止一条，
+   * 而同一次工具调用的 exec.signal 是整批共享的。这里保留一个条目级
+   * controller，并在 downloadOne 里与 exec.signal / 超时信号合并。
+   */
+  controller?: AbortController
+  /**
+   * 重试元数据（1.6.0）。缺省时由 downloadOne 按条目构造并落盘；
+   * 从面板重试时直接复用磁盘上读回的那一份，避免二次推导改变路径。
+   */
+  request?: RetryRequest
 }
 
 /** 批量里的一个条目（与 DownloadTarget 同构，内部别名，便于单条目复用同一条路径）。 */
@@ -608,7 +637,51 @@ interface DownloadItem {
  *
  * 失败时抛错（与单条目语义一致）；批量编排负责把抛错变成逐条结果。
  */
+function buildRetryRequest(item: DownloadItem, ctx: ItemContext): RetryRequest {
+  const output = item.output === undefined ? undefined : path.resolve(item.output)
+  return {
+    url: item.url,
+    ...(output === undefined ? {} : { output }),
+    ...(item.sha256 === undefined ? {} : { sha256: item.sha256 }),
+    ...(item.checksum === undefined ? {} : { checksum: item.checksum }),
+    ...(item.ifExists === undefined ? {} : { ifExists: item.ifExists }),
+    ...(ctx.mirror === undefined ? {} : { mirror: ctx.mirror }),
+    ...(ctx.maxBandwidthBytes === undefined
+      ? {}
+      : { maxBandwidthBytes: ctx.maxBandwidthBytes }),
+    ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
+    ...(ctx.batchId === undefined ? {} : { batchId: ctx.batchId }),
+  }
+}
+
+/**
+ * 下载单个条目。
+ *
+ * 这一层只做三件事：定 taskId、登记进程内取消手柄、确保无论成功/失败/同步抛错
+ * 都会注销。真正的下载主体在 `downloadOneInner` 里。
+ *
+ * 为什么登记必须发生在 URL 校验之前：面板可能在你点取消的同一瞬间才拿到这条
+ * 任务的记录，若登记晚于探测，取消请求会得到 `not-running`，而任务其实马上
+ * 就要开始跑。先登记、后校验，最坏情况只是多一次会被立即注销的登记。
+ */
 async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartDownloadResult> {
+  const taskId = ctx.taskIdOverride ?? makeTaskId()
+  const controller = ctx.controller ?? new AbortController()
+  const request = ctx.request ?? buildRetryRequest(item, ctx)
+  registerRunningTask(taskId, controller, request)
+  try {
+    return await downloadOneInner(item, {
+      ...ctx,
+      taskIdOverride: taskId,
+      controller,
+      request,
+    })
+  } finally {
+    unregisterRunningTask(taskId)
+  }
+}
+
+async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<SmartDownloadResult> {
   // 0. 协议白名单：URL 可能来自模型读到的任意页面，必须先收紧到 http(s)。
   // 实测（0.4.1）file:// 会被 curl 接受并复制本地文件到目标路径。
   const checked = checkDownloadUrl(item.url)
@@ -687,7 +760,8 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   // 变了就会指向另一个文件，而下载管理器会拿这个路径去删除。解析一次、复用，
   // 是这个风险唯一的收口点。`resolve` 对已经是绝对路径的输入是幂等的。
   const provisionalPath = path.resolve(item.output ?? deriveFilenameFromUrl(item.url))
-  const taskId = makeTaskId()
+  const taskId = ctx.taskIdOverride ?? makeTaskId()
+  const retryRequest = ctx.request ?? buildRetryRequest(item, ctx)
   // 会话上下文（轨道一的落点）由**调用**构造一次并放在 ctx 里：每一批的条目
   // 共用同一份，条目之间不会出现「同一批写了两个会话目录」的分叉。
   const reporter = new ProgressReporter(
@@ -696,14 +770,20 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
     ctx.session,
     ctx.batchId,
     provisionalPath,
+    retryRequest,
   )
 
   // 单条目的超时信号：与整批信号合并（AbortSignal.any），因此超时只终止这一条，
   // 同批其它条目照常跑。为什么不用 Promise.race：子进程必须**真的**被结束
   // （runProcess 的 SIGTERM → SIGKILL 兜底），race 只会让调用方提前返回、把进程留在后台。
+  const controller = ctx.controller ?? new AbortController()
+  const itemSignal = controller.signal
   const timeoutSignal =
     ctx.timeoutMs === undefined ? undefined : AbortSignal.timeout(ctx.timeoutMs)
-  const signal = timeoutSignal ? AbortSignal.any([ctx.exec.signal, timeoutSignal]) : ctx.exec.signal
+  const signals = [ctx.exec.signal, itemSignal, timeoutSignal].filter(
+    (value): value is AbortSignal => value !== undefined,
+  )
+  const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals)
   const timeoutMessage = ctx.timeoutMs === undefined ? '' : describeTimeout(ctx.timeoutMs)
 
   /**
@@ -713,7 +793,11 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
    * 兜底），先判超时会让用户以为自己没按过取消。
    */
   const abortOutcome = (): 'cancelled' | 'timeout' | 'failed' =>
-    ctx.exec.signal.aborted ? 'cancelled' : timeoutSignal?.aborted === true ? 'timeout' : 'failed'
+    ctx.exec.signal.aborted || itemSignal.aborted
+      ? 'cancelled'
+      : timeoutSignal?.aborted === true
+        ? 'timeout'
+        : 'failed'
 
   /**
    * 中止（取消 / 超时）的唯一收口：写**一次**终态记录，返回要抛出的错误。
@@ -732,7 +816,11 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
       }
       reporter.cancel()
       await reporter.awaitFlush()
-      throw err
+      throw new DownloadCancelledError(
+        err instanceof Error && /取消|abort/i.test(err.message)
+          ? err.message
+          : '已取消：下载被用户中止',
+      )
     })()
     return abortRecorded
   }
@@ -1054,11 +1142,13 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
       if (err instanceof IntegrityError) throw err
       // aria2 失败，降级到 curl
       reporter.report(0, 'aria2 失败，回退 curl…')
+      // 必须传合并后的 signal：这里原来传的是 ctx.exec.signal，导致
+      // 条目级取消与 timeoutMs 在 aria2 → curl 回退这一路径上完全失效。
       try {
         await downloadWithCurl(
           requestedUrl,
           outputPath,
-          ctx.exec.signal,
+          signal,
           reporter,
           resume,
           requestHeaders,
@@ -1271,6 +1361,15 @@ function describeTimeout(timeoutMs: number): string {
 class DownloadTimeoutError extends Error {}
 
 /**
+ * 取消专用的错误类型（1.6.0）。
+ *
+ * 与超时同理：runBatch 必须把「用户取消」与「下载失败」分成两种结果，而
+ * exec.signal 是整批共享的 —— 条目级取消（面板上点某一条的取消）不会让
+ * exec.signal 变成 aborted，只靠那个信号判断会把取消误报成失败。
+ */
+class DownloadCancelledError extends Error {}
+
+/**
  * 解析单条目超时（毫秒）。
  *
  * 与 maxBandwidth 同一套做法：非法值在**发起任何请求之前**抛错 —— aria2 / curl 对
@@ -1385,12 +1484,15 @@ async function cancelTarget(target: DownloadItem, ctx: ItemContext): Promise<Bat
   // 未开工的条目也要能定位到产物：这里同样把路径解析成绝对路径再交给 reporter
   // （它只接受绝对路径，相对路径会被忽略）。`output` 可能是空串（URL 非法），
   // 那种情况下不传，记录里就不会出现 outPath —— 管理端点据此只允许「删除记录」。
+  const taskId = makeTaskId()
+  const request = buildRetryRequest(target, ctx)
   const reporter = new ProgressReporter(
-    makeTaskId(),
+    taskId,
     output,
     ctx.session,
     ctx.batchId,
     output === '' ? undefined : path.resolve(output),
+    request,
   )
   reporter.cancel()
   await reporter.awaitFlush()
@@ -1431,7 +1533,10 @@ async function runBatch(
         // 与单条目路径的中止判定同语义：signal 已 abort 时这条是「取消」而不是
         // 「失败」，不能混成一个状态。**超时例外**：它只终止这一条、整批信号并没有
         // abort，因此必须记成失败（用户没有按取消）。
-        const cancelled = err instanceof DownloadTimeoutError ? false : ctx.exec.signal.aborted
+        const cancelled =
+          err instanceof DownloadTimeoutError
+            ? false
+            : err instanceof DownloadCancelledError || ctx.exec.signal.aborted
         results[index] = toFailedItem(target, message, cancelled)
       }
     }
@@ -1439,4 +1544,83 @@ async function runBatch(
   const workers = Math.max(1, Math.min(limit, targets.length))
   await Promise.all(Array.from({ length: workers }, worker))
   return results
+}
+
+/**
+ * 从面板重试一条已结束（failed / cancelled）的任务（1.6.0）。
+ *
+ * 关键取舍：
+ * - **复用原 taskId**：面板按 id 渲染行，换一个新 id 会让「重试的那一条」变成
+ *   列表里的另一条记录，用户看到的是重复项而不是原地刷新；
+ * - **不携带原请求头**：任务文件里从不保存 Authorization / Cookie（见 tasks.ts
+ *   文件头），所以重试是一个「干净」的请求。需要鉴权的地址会因此失败 —— 这是
+ *   刻意的安全取舍，UI 与 README 都写明了；
+ * - **后台启动**：这里返回 `started:true` 表示已经开始跑，不等待下载完成。
+ *   RPC 是给面板按钮用的，不能把一次几十分钟的下载挂在 HTTP 请求上。
+ *
+ * 失败原因用固定的 `reason` 枚举表达（running / unknown / not-retryable /
+ * no-request），客户端据此给不同文案，而不是只显示一句「失败」。
+ */
+export function startRetry(
+  taskId: string,
+  session?: ProgressSession,
+): RetryStartResult {
+  if (!isSafeTaskId(taskId)) {
+    return { started: false, taskId, reason: 'unknown' }
+  }
+  if (isRunning(taskId)) {
+    return { started: false, taskId, reason: 'running' }
+  }
+  const task = readDownloadStatus(1, taskId, session).tasks[0]
+  if (!task) return { started: false, taskId, reason: 'unknown' }
+  if (task.status !== 'failed' && task.status !== 'cancelled') {
+    return { started: false, taskId, reason: 'not-retryable' }
+  }
+  const record = readTaskRecord(taskId, session)
+  const request = parseRetryRequest(record?.request, task.outPath)
+  if (!request) return { started: false, taskId, reason: 'no-request' }
+  if (!checkDownloadUrl(request.url).ok) {
+    return { started: false, taskId, reason: 'not-retryable' }
+  }
+  // 摘要在这里先校验：parseRetryRequest 只保证字段形状，不保证摘要是合法摘要。
+  // 否则会出现「返回 started:true，随后立刻在 downloadOne 里同步失败，而记录
+  // 还是旧的那条」—— 用户点了一次重试，什么都没发生。
+  if (request.sha256 !== undefined && !normalizeSha256(request.sha256)) {
+    return { started: false, taskId, reason: 'not-retryable' }
+  }
+  if (request.checksum !== undefined && !normalizeChecksum(request.checksum)) {
+    return { started: false, taskId, reason: 'not-retryable' }
+  }
+
+  const output = request.output ?? (task.outPath !== '' ? task.outPath : undefined)
+  const item: DownloadItem = {
+    url: request.url,
+    ...(output === undefined ? {} : { output }),
+    ...(request.sha256 === undefined ? {} : { sha256: request.sha256 }),
+    ...(request.checksum === undefined ? {} : { checksum: request.checksum }),
+    ...(request.ifExists === undefined ? {} : { ifExists: request.ifExists }),
+  }
+  const controller = new AbortController()
+  const exec: ToolExecutionContext = {
+    signal: controller.signal,
+    agent: {
+      session: {
+        header: { id: session?.id, cwd: session?.cwd },
+      },
+    },
+  }
+  void downloadOne(item, {
+    exec,
+    session: session ?? {},
+    batchId: request.batchId ?? makeBatchId(),
+    mirror: request.mirror,
+    maxBandwidthBytes: request.maxBandwidthBytes,
+    timeoutMs: request.timeoutMs,
+    taskIdOverride: taskId,
+    controller,
+    request,
+  }).catch(() => {
+    // 后台任务的失败已经写进进度记录；这里再抛只会变成未处理的 rejection。
+  })
+  return { started: true, taskId }
 }

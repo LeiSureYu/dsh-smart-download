@@ -926,9 +926,11 @@ test('sha256：摘要不合法 -> 在发起任何请求之前就拒绝', async (
 
 test('自定义请求头：探测与下载使用同一套（UA / Referer / 自定义头都到达服务器）', async () => {
   const seen: Array<IncomingMessage['headers']> = []
+  const seenMethods: string[] = []
   const body = Buffer.alloc(2048, 0x53)
   await withServer((req, res) => {
     seen.push(req.headers)
+    seenMethods.push(`${req.method} ${req.url}`)
     res.writeHead(200, {
       'content-length': String(body.length),
       'accept-ranges': 'bytes',
@@ -946,7 +948,10 @@ test('自定义请求头：探测与下载使用同一套（UA / Referer / 自�
     })
 
     assert.equal(result.success, true)
-    assert.ok(seen.length >= 2, `应至少被探测与下载各访问一次，实际 ${seen.length} 次`)
+    assert.ok(
+      seen.length >= 2,
+      `应至少被探测与下载各访问一次，实际 ${seen.length} 次: ${seenMethods.join(' | ')} method=${result.method} reason=${result.reason}`,
+    )
     for (const headers of seen) {
       // 每个请求都必须带同一套头：站点按 UA 分流时，两边不一致会让探测结论
       // 与真实下载错位（见 src/headers.ts 文件头）

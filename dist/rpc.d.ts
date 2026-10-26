@@ -273,4 +273,13 @@ export declare function deleteManagedTask(taskId: string, session?: ProgressSess
  * @param ctx 插件上下文
  */
 export declare function registerStatusRpc(ctx: Context): void;
+/**
+ * 把偏好端点挂上共享 `/api` 载体。
+ *
+ * 与 status / cleanup / manage 不同，这条端点在**没有会话**时同样可用 ——
+ * 偏好是全局设置，不按会话隔离（见 prefs.ts 文件头）。因此 payload 里不读 session。
+ *
+ * @param ctx 插件上下文
+ */
+export declare function registerPrefsRpc(ctx: Context): void;
 export {};

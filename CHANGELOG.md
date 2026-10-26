@@ -11,6 +11,72 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-26
+
+**连接数从「插件替你决定」变成「你可以自己选」。** 之前并发数只有三档（1 / 4 / 8），
+按文件大小自动定，用户无法干预。这一版在输入框旁加了一个选择器，可选 `auto` 或
+**1–16 任意整数**，保存后对之后的所有下载生效，不必每次重复说明。
+
+**Connection count is now yours to choose.** Previously it was fixed at three tiers
+(1 / 4 / 8) picked automatically by file size. This release adds a picker next to the
+composer: `auto` or **any integer from 1 to 16**. The choice is saved and applies to
+every later download.
+
+### 新增 / Added
+
+- **输入框旁的「下载连接数」选择器**（模型选择器左侧）：`auto` + 1–16，写入 Host 侧
+  的 `$DSH_HOME/smart-dl-prefs.json`，跨会话共享。界面只是入口 —— 值由 Host 读取，
+  因为它要交给真正开连接的 `smart_download` 工具。
+- **`smart_download` 新增 `connections` 参数**：`"auto"` 或 `"1"`..`"16"`。不传时
+  **采用界面里保存的值**；显式传入则只影响这一次（临时指令压过默认值）。
+- **`POST /api/smartdl.prefs`**：`op:"read"` / `op:"write"`，供界面读写偏好。
+
+### 改变 / Changed
+
+- `decide()` 增加第 5 个可选参数 `requested`。点名的数字**原样使用**：不再按文件大小
+  缩水（2MB 也能用 16 条），也不被历史吞吐抬档改写。
+- 点名 `1` 时走 curl（`fellback:false`），不再为「只用一条连接」起一个 aria2 子进程。
+- 批量窗口预算改为 `max(decideConcurrency(LARGE_FILE), perItemTier) * 2`：
+  `auto` 下窗口仍为 2（与 1.6.0 逐字段相同），点名 `1` 时放开到 16。
+- **`ConcurrencyLevel` 从 `1 | 4 | 8` 放宽为 `number`**：合法值变成连续区间后，
+  字面量联合已表达不了。区间校验改由 `parseConnections()` 承担，它同时覆盖工具入参、
+  磁盘上的重试元数据与手改的偏好文件。
+
+### 修复 / Fixed
+
+- `writePrefs()` 会擦掉偏好文件里自己不认识的字段（注释写着保留、实现却基于投影后的
+  快照展开）。现在落盘基底改为原始对象，降级再升级不会丢配置。
+- `runProcess()` 在子进程 `error`（如 ENOENT）之后没有释放管道与 Process 句柄。
+
+### 为什么上限是 16 / Why the ceiling is 16
+
+aria2 的 `-x/--max-connection-per-server` 取值范围是 1–16，传 32 时 aria2c 以
+`errorCode=28` 直接退出（「must be between 1 and 16」）。`-s` 没有这个限制，但决定
+「对同一服务器最多开几条」的是 `-x`。给一个注定失败的档位比不给更糟。
+
+`auto` 模式的上限仍然是 `MAX_CONCURRENCY = 8`；点名的数字由选择它的人承担风险。
+
+### 实测 / Measurements
+
+本地限速服务器（每条连接 1.5MB/s），21MB 文件，`sha256` 全部与源文件一致：
+
+| connections | 实测速度 | 观察到的 CN |
+| --- | --- | --- |
+| 1 | 1.49 MB/s | 1 |
+| 4 | 5.19 MB/s | 4 |
+| 8 | 10.50 MB/s | 8 |
+| 16 | 15.92 MB/s | 5 |
+
+另在一个 16MB 文件上用分段计数器验证「界面保存 9 → 工具未传 `connections` →
+服务器收到 9 段 Range 请求（起点 0/1/2/4/6/8/10/12/14 MB）」，确认偏好值确实
+驱动了实际的连接数，而不只是显示。
+
+### 说明 / Notes
+
+- 小于 1MB 的文件仍然走 curl 单线程：分段开销大于收益，与 `connections` 取值无关。
+- 偏好读取失败（文件缺失 / 写坏 / 无权限）一律回落 `auto`，绝不让下载失败；
+  写入失败会如实报告，不会假装保存成功。
+
 ## [1.6.0] - 2026-10-23
 
 **下载管理器从「看得见」补到「管得动」。** 这一版给进行中的任务加上取消、给失败 / 已取消的

@@ -7,11 +7,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from 'node:os'
 import path from 'node:path'
 import {
+  CONNECTION_CHOICES,
   HISTORY_RAISE_REASON,
   MAX_CONCURRENCY,
+  MAX_CONNECTIONS,
+  MIN_CONNECTIONS,
   RAISE_MIN_EFFECTIVE_CONNECTIONS,
   decide,
   decideConcurrency,
+  parseConnections,
   LARGE_FILE,
   SIZE_THRESHOLD,
 } from '../src/decision.js'
@@ -403,5 +407,140 @@ test('P1-2 抬档不影响 curl 分支：不支持多线程 / 太小 / 无长度
     assert.deepEqual(decide(noAria2, false, ENV, history), decide(noAria2, false, ENV))
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------ 1.7.0：点名的连接数 ------------------------------ */
+
+test('parseConnections: 三态必须严格区分 —— undefined / "auto" / 数字', () => {
+  assert.equal(parseConnections(undefined), undefined, '没传')
+  assert.equal(parseConnections(null), undefined, 'null 等同没传')
+  assert.equal(parseConnections('auto'), 'auto', '显式 auto')
+  assert.equal(parseConnections(1), 1)
+  assert.equal(parseConnections(9), 9)
+  assert.equal(parseConnections(16), 16)
+})
+
+test('parseConnections: 字符串数字被接受（schema 给的是字符串枚举）', () => {
+  assert.equal(parseConnections('1'), 1)
+  assert.equal(parseConnections('4'), 4)
+  assert.equal(parseConnections('16'), 16)
+  assert.equal(parseConnections(' 7 '), 7, '两端空白应被 trim')
+})
+
+test('parseConnections: 越界与非法值一律返回 null（不是回落到 auto）', () => {
+  for (const bad of [0, -1, 17, 32, 1.5, '0', '17', '1.5', 'abc', '16x', '', ' ', true, {}, []]) {
+    assert.equal(parseConnections(bad), null, `应拒绝 ${JSON.stringify(bad)}`)
+  }
+})
+
+test('parseConnections: 不做四舍五入 —— 1.4 不能被悄悄变成 1', () => {
+  assert.equal(parseConnections(1.4), null)
+  assert.equal(parseConnections(15.9), null)
+})
+
+test('CONNECTION_CHOICES: 覆盖 1..16 的全部整数且不含 auto', () => {
+  assert.deepEqual(
+    [...CONNECTION_CHOICES],
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16'],
+  )
+  assert.equal(CONNECTION_CHOICES.includes('auto'), false, 'auto 由 schema 自己加在前面')
+})
+
+test('CONNECTION_CHOICES 与 parseConnections 的边界一致（两份清单不能漂移）', () => {
+  for (const choice of CONNECTION_CHOICES) {
+    assert.equal(typeof parseConnections(choice), 'number', `${choice} 必须合法`)
+  }
+  assert.equal(parseConnections(String(MIN_CONNECTIONS - 1)), null)
+  assert.equal(parseConnections(String(MAX_CONNECTIONS + 1)), null)
+})
+
+test('decide: 点名 1 -> 走 curl，且 fellback=false（这是用户要的结果，不是回退）', () => {
+  const d = decide(probe({ contentLength: 100 * MB }), true, {}, undefined, 1)
+  assert.equal(d.method, 'curl')
+  assert.equal(d.concurrency, 1)
+  assert.equal(d.fellback, false)
+  assert.match(d.reason, /connections=1/)
+})
+
+test('decide: 点名 1 即使文件很大也不开 aria2（用户明确要单连接）', () => {
+  const d = decide(probe({ contentLength: 500 * MB }), true, {}, undefined, 1)
+  assert.equal(d.method, 'curl')
+})
+
+test('decide: 点名 16 时小文件（2MB）也用 16 —— 点名的数字不被大小缩水', () => {
+  const d = decide(probe({ contentLength: 2 * MB }), true, {}, undefined, 16)
+  assert.equal(d.method, 'aria2')
+  assert.equal(d.concurrency, 16)
+  assert.equal(d.fellback, false)
+  assert.match(d.reason, /connections=16/)
+})
+
+test('decide: 点名 9 时 100MB 文件仍用 9（不被上限 8 截断）', () => {
+  const d = decide(probe({ contentLength: 100 * MB }), true, {}, undefined, 9)
+  assert.equal(d.concurrency, 9)
+})
+
+test('decide: 点名值不被历史抬档改写（16 仍然是 16，不是 8）', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-dec-named-'))
+  try {
+    recordThroughput(
+      { url: 'https://named.example/f', throughput: 10 * MB, concurrency: 8, cn: 8 },
+      { dir },
+    )
+    const d = decide(
+      probe({ contentLength: 2 * MB }),
+      true,
+      {},
+      { url: 'https://named.example/f', dir },
+      16,
+    )
+    assert.equal(d.concurrency, 16)
+    assert.equal(d.reason.includes(HISTORY_RAISE_REASON), false, '点名时不该出现抬档文案')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('decide: 点名数字时「做不到多线程」的回退条件依然成立（不支持 Range）', () => {
+  const d = decide(
+    probe({ supportsMultiThread: false, contentLength: 100 * MB, reason: '服务器不支持 Range' }),
+    true,
+    {},
+    undefined,
+    16,
+  )
+  assert.equal(d.method, 'curl')
+  assert.equal(d.fellback, true)
+  assert.equal(d.reason, '服务器不支持 Range')
+})
+
+test('decide: 点名数字时「文件过小」依然回退 curl（这是能力问题，不是偏好）', () => {
+  const d = decide(probe({ contentLength: SIZE_THRESHOLD - 1 }), true, {}, undefined, 16)
+  assert.equal(d.method, 'curl')
+  assert.equal(d.fellback, true)
+})
+
+test('decide: 点名数字时「aria2 缺失」依然回退 curl', () => {
+  const d = decide(probe({ contentLength: 100 * MB }), false, { platform: 'linux', arch: 'x64' }, undefined, 16)
+  assert.equal(d.method, 'curl')
+  assert.equal(d.fellback, true)
+})
+
+test('decide: 点名数字时「大小未知」依然回退 curl', () => {
+  const d = decide(probe({ contentLength: undefined }), true, {}, undefined, 12)
+  assert.equal(d.method, 'curl')
+  assert.equal(d.fellback, true)
+})
+
+test('decide: 传 auto 与不传的第 5 参行为逐字段相同（1.6.0 兼容）', () => {
+  const p = probe({ contentLength: 2 * MB })
+  assert.deepEqual(decide(p, true, {}, undefined, 'auto'), decide(p, true, {}, undefined, undefined))
+})
+
+test('decide: 传 undefined 的第 5 参与 1.6.0 的 4 参调用逐字段相同', () => {
+  for (const size of [1.5 * MB, 5 * MB, 8 * MB, 64 * MB]) {
+    const p = probe({ contentLength: size })
+    assert.deepEqual(decide(p, true, {}, undefined, undefined), decide(p, true, {}, undefined))
   }
 })

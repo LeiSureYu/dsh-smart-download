@@ -17,6 +17,7 @@ import { startRetry } from '../src/index.js'
 import { readTaskRecord, resolveDownloadProgressDir } from '../src/progress.js'
 import {
   isRunning,
+  parseRetryRequest,
   resetTaskRegistry,
 } from '../src/tasks.js'
 
@@ -214,4 +215,44 @@ test('重试：后台真正重新下载，最终记录变为 completed，且不�
     resetTaskRegistry()
     await server.close()
   }
+})
+
+/* --------------------- 1.7.0：connections 在重试元数据里的取舍 --------------------- */
+
+/**
+ * connections 与 timeoutMs 的失败方向相反，这是本批用例的全部意义：
+ *
+ *   - timeoutMs 越界 → **整条拒绝**。丢掉一个超时等于把「有界等待」变成无限等待；
+ *   - connections 越界 → **只丢字段**。丢掉它只是回到自动分档，下载照样正确完成。
+ *
+ * 因此「非法 connections 不会让重试失败」必须被显式断言，否则日后有人为了
+ * 「统一校验风格」把它改成 return undefined，用户就会白点一次重试。
+ */
+test('parseRetryRequest: 合法的 connections 被保留（数字与字符串都行）', () => {
+  assert.equal(parseRetryRequest({ url: 'https://a/b', connections: 16 })?.connections, 16)
+  assert.equal(parseRetryRequest({ url: 'https://a/b', connections: '9' })?.connections, 9)
+  assert.equal(parseRetryRequest({ url: 'https://a/b', connections: 'auto' })?.connections, 'auto')
+})
+
+test('parseRetryRequest: 非法 connections 只丢字段，**不整条拒绝**', () => {
+  for (const bad of [0, 17, -1, 1.5, 'abc', '16x', true, {}]) {
+    const parsed = parseRetryRequest({ url: 'https://a/b', connections: bad })
+    assert.ok(parsed, `输入 ${JSON.stringify(bad)} 时整条记录必须仍然有效`)
+    assert.equal(parsed.url, 'https://a/b')
+    assert.equal(parsed.connections, undefined, '非法值必须被丢弃，而不是带进下载')
+  }
+})
+
+test('parseRetryRequest: 没有 connections 字段时结果里也不出现它（不能是 undefined 键）', () => {
+  const parsed = parseRetryRequest({ url: 'https://a/b' })
+  assert.ok(parsed)
+  assert.equal('connections' in parsed, false, '缺省字段不该以 undefined 的形式落进对象')
+})
+
+test('parseRetryRequest: timeoutMs 越界仍然整条拒绝（与 connections 的宽松方向相反）', () => {
+  assert.equal(parseRetryRequest({ url: 'https://a/b', timeoutMs: 10 }), undefined)
+  // 同一条记录里 connections 非法、timeoutMs 合法 → 通过，且只丢 connections
+  const parsed = parseRetryRequest({ url: 'https://a/b', timeoutMs: 60_000, connections: 99 })
+  assert.equal(parsed?.timeoutMs, 60_000)
+  assert.equal(parsed?.connections, undefined)
 })

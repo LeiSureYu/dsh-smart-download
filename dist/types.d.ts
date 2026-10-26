@@ -112,6 +112,22 @@ export interface SmartDownloadArgs {
      * `Range` / `Accept-Encoding` / `Host` 等由插件自身管理的头不允许覆盖。
      */
     headers?: Record<string, unknown>;
+    /**
+     * 并发连接数，可选。
+     *
+     * 三态：**省略**表示沿用用户在界面上选的偏好（「下载连接数」选择器），
+     * 用户从未设置过则为 `auto`；`auto` 表示显式的自动分档；`'1'`..`'16'`
+     * 表示这次就要这么多条连接。
+     *
+     * 为什么用字符串枚举而不是整数：`auto` 必须能与「没传」区分开，而 integer
+     * 枚举里塞不进 `'auto'`。三态的语义差异见 src/decision.ts 的 `parseConnections()`。
+     *
+     * 点名一个数字时**只覆盖并发数**：不支持 Range、大小未知、文件过小、aria2
+     * 缺失这些回退条件依然成立 —— 那些是「做不到多线程」，不是「想开几条」。
+     * 上限 16 来自 aria2 自己的 `-x/--max-connection-per-server`（传 32 会让
+     * aria2c 直接以 errorCode=28 退出），给一个注定失败的选项比不给更糟。
+     */
+    connections?: string;
 }
 /** 下载使用的底层方式 */
 export type DownloadMethod = 'aria2' | 'curl';
@@ -328,7 +344,22 @@ export interface DownloadStatusArgs {
     limit?: number;
 }
 /** 并发档位：1（curl）/ 4 / 8（aria2） */
-export type ConcurrencyLevel = 1 | 4 | 8;
+/**
+ * 并发连接数的取值。
+ *
+ * 1.6.0 及其之前是严格的 `1 | 4 | 8` —— 档位只有三档，编译器顺手就能把「哪儿多写了
+ * 一个非法值」挡下来。1.7.0 引入「用户点名的连接数」后，合法值变成 1..16 的**连续区间**，
+ * 字面量联合已经表达不了；保留它为 `number` 的别名而不是删掉，是为了让所有既有签名
+ * 与调用方一处不改。
+ *
+ * 区间校验不在类型层，而在 `parseConnections()`（src/decision.ts）——
+ * 它同时覆盖了「类型系统看不见」的入口：工具入参、磁盘上的重试元数据、手改的偏好文件。
+ */
+export type ConcurrencyLevel = number;
+/** 用户可点名的连接数下界（含）。 */
+export declare const MIN_CONNECTIONS = 1;
+/** 用户可点名的连接数上界（含）。aria2 的 `-x/--max-connection-per-server` 上限即 16。 */
+export declare const MAX_CONNECTIONS = 16;
 /** 决策结果 */
 export interface Decision {
     /** 最终采用的下载方式 */

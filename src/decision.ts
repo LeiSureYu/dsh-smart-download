@@ -7,6 +7,7 @@
  * - 本插件先探测，再按文件大小分档决定并发，条件不满足就回退 curl。
  */
 import type { ConcurrencyLevel, Decision, ProbeResult } from './types.js'
+import { MIN_CONNECTIONS, MAX_CONNECTIONS } from './types.js'
 import { readThroughput } from './throughput-cache.js'
 
 /**
@@ -59,6 +60,70 @@ export const SIZE_THRESHOLD = 1 * 1024 * 1024 // 1MB
  * 分片数与文件太小，多出来的连接只剩建连开销。
  */
 export const LARGE_FILE = 8 * 1024 * 1024 // 8MB
+
+/**
+ * 用户可点名的连接数范围：1..16 的**任意整数**（`connections` 参数与界面偏好共用）。
+ *
+ * 早先的草案只提供 1/4/8/16 四档，理由是相邻整数之间的收益差在实测里被噪声淹没。
+ * 改成连续区间是因为**选择权在用户**：固定几个档位等于替用户决定了「哪些数字值得试」，
+ * 而真正被服务器限并发的主机往往只有特定几个值有意义（常见的就是 2~6 这种小区间），
+ * 四档反而够不着。代价只是多出几个「填了也不会更快」的数 —— 那不是错误，是用户的实验。
+ *
+ * **为什么上限是 16 而不是更大**：aria2 自己的 `-x/--max-connection-per-server`
+ * 取值范围是 1..16（已实测：传 32 时 aria2c 以 errorCode=28 直接退出，
+ * 「must be between 1 and 16」）。`-s` 没有这个限制，但 `-x` 才是「对同一个服务器
+ * 最多开几条」的那一条，越过 16 在 aria2 这一层根本表达不出来。给一个注定失败的
+ * 选项，比不给更糟 —— 用户会以为自己在用 32 连接。
+ *
+ * 注意 `MAX_CONCURRENCY = 8` 仍是 **auto 模式**的上限：自动分档与历史抬档都不会越过它。
+ * 点名的数字由选择它的人承担风险，插件不再二次缩水。
+ */
+export { MIN_CONNECTIONS, MAX_CONNECTIONS }
+
+/** 供界面与 schema 复用的候选值：1..16 全部整数。 */
+export const CONNECTION_CHOICES: readonly string[] = Object.freeze(
+  Array.from(
+    { length: MAX_CONNECTIONS - MIN_CONNECTIONS + 1 },
+    (_, i) => String(MIN_CONNECTIONS + i),
+  ),
+)
+
+/**
+ * `connections` 参数 / 偏好的解析结果。
+ *
+ * 三种状态必须能区分（调用方据此在**发请求之前**拒绝非法值，而不是悄悄回落成 auto）：
+ * - `undefined`：没传 —— 与 1.6.0 的行为逐字段相同；
+ * - `'auto'`：显式要自动分档；
+ * - 数字：用户点名的连接数，一定在 `MIN_CONNECTIONS`..`MAX_CONNECTIONS` 区间内。
+ */
+export type ParsedConnections = number | 'auto' | undefined
+
+/**
+ * 解析 `connections` 参数。
+ *
+ * schema 层已经限定了取值范围，这一层仍独立校验：重试元数据来自磁盘、
+ * 偏好文件可能被手工改过，不能信任它们一定合法。
+ *
+ * @param raw 原始入参（字符串或数字）
+ * @returns 解析结果；非法时返回 `null`（与「没传」的 `undefined` 严格区分）
+ */
+export function parseConnections(raw: unknown): ParsedConnections | null {
+  if (raw === undefined || raw === null) return undefined
+  if (raw === 'auto') return 'auto'
+
+  let value: number
+  if (typeof raw === 'number') {
+    value = raw
+  } else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) {
+    value = Number(raw.trim())
+  } else {
+    return null
+  }
+
+  // 整数 + 闭区间：-1、0、17、1.5 一律拒绝，不做四舍五入（静默改用户的选择比拒绝更糟）
+  if (!Number.isInteger(value) || value < MIN_CONNECTIONS || value > MAX_CONNECTIONS) return null
+  return value
+}
 
 /**
  * 根据文件大小决定并发档位。
@@ -159,20 +224,34 @@ function raiseFromHistory(
  * @param history 可选的历史吞吐入参；**不给就与今天逐字段相同**（不读盘、不抬档）。
  *   注意缓存目前**还没有写入者**：写入点接在下载结束时（src/index.ts / src/downloader.ts），
  *   是紧随本项之后的独立任务。所以现在传了历史也只会命中「手工/测试写入的记录」。
+ * @param requested 调用方点名的连接数（`connections` 解析后的数字）；缺省 / `auto`
+ *   表示按既有规则自动分档。点名时**只覆盖并发数**：其它回退条件（不支持 Range、
+ *   大小未知、文件过小、aria2 缺失）依然成立 —— 那些是「做不到多线程」，
+ *   不是「想开几条」的偏好问题。
  */
 export function decide(
   probe: ProbeResult,
   aria2Available: boolean,
   env: DecideEnv = {},
   history?: ThroughputHistoryInput,
+  requested?: ParsedConnections,
 ): Decision {
-  // 1. 不支持多线程 —— 直接 curl
-  if (!probe.supportsMultiThread) {
+  // 0. 调用方点名要单连接：等价于「这次别用 aria2」，直接走 curl。
+  //    不去调 aria2 的 -x 1 —— 那样仍要多起一个子进程、且 -k 1M 的分片逻辑
+  //    在单连接下毫无意义，curl 更直接也更好排查。
+  const singleThread = requested === 1
+
+  // 1. 不支持多线程（或用户点名单连接）—— 直接 curl
+  if (!probe.supportsMultiThread || singleThread) {
     return {
       method: 'curl',
       concurrency: 1,
-      fellback: true,
-      reason: probe.reason ?? '探测判定不支持多线程',
+      // 点名 1 时这是「用户要的结果」，不是回退：fellback=false 会让面板显示
+      // 「单连接（按设置）」而不是「回退到单连接」，用户不会以为自己设错了。
+      fellback: !singleThread,
+      reason: singleThread
+        ? '按 connections=1 指定单连接下载（curl）'
+        : (probe.reason ?? '探测判定不支持多线程'),
     }
   }
 
@@ -209,7 +288,19 @@ export function decide(
     }
   }
 
-  // 5. 支持多线程且 aria2 可用 —— 走 aria2，按大小分档；有可信历史时只做「抬档」
+  // 5. 调用方点名了连接数 —— 原样用，不再按大小缩水、也不被历史改写。
+  //    用户点名要 16，插件就不该悄悄给 8；这正是「可选的线路数」这个需求的全部意义。
+  if (typeof requested === 'number') {
+    const mb = (probe.contentLength / 1024 / 1024).toFixed(1)
+    return {
+      method: 'aria2',
+      concurrency: requested,
+      fellback: false,
+      reason: `支持 Range，文件 ${mb}MB，按 connections=${requested} 指定使用 ${requested} 连接`,
+    }
+  }
+
+  // 6. 支持多线程且 aria2 可用 —— 走 aria2，按大小分档；有可信历史时只做「抬档」
   const bySize = decideConcurrency(probe.contentLength)
   const raised = raiseFromHistory(probe.contentLength, bySize, history)
   if (raised) {

@@ -36,6 +36,29 @@ window.__ModuleLoader__.load({
 		 */
 		const MANAGE_ENDPOINT = 'smartdl.manage';
 		/**
+		 * Where the "下载连接数" picker reads and writes its value (src/rpc.ts).
+		 *
+		 * The value lives on the **Host**, not in `localStorage`: the number is
+		 * consumed by the Agent's `smart_download` tool, which runs in the Host
+		 * process. A browser-only copy would be invisible to the thing that
+		 * actually opens the connections — i.e. the setting would look saved and
+		 * change nothing.
+		 */
+		const PREFS_ENDPOINT = 'smartdl.prefs';
+		/**
+		 * Legal picker values.
+		 *
+		 * `auto` keeps the size-based rule (1.6.0 behaviour, and what "I never
+		 * touched this" means). 1..16 mirror `MIN_CONNECTIONS`/`MAX_CONNECTIONS`
+		 * in src/types.ts; the ceiling is aria2's own `-x` limit, not a taste
+		 * call — asking for 32 makes aria2c exit with errorCode=28.
+		 */
+		const CONNECTION_OPTIONS = (function () {
+			const out = ['auto'];
+			for (let i = 1; i <= 16; i += 1) out.push(String(i));
+			return out;
+		})();
+		/**
 		 * Sidebar entry + main-panel id.
 		 *
 		 * Deliberately namespaced: `plugins` / `settings` are the Host's own panel
@@ -143,6 +166,14 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			'title': '下载任务',
+			'connLabel': '下载连接数',
+			'connAuto': '自动',
+			'connTitle': '下载连接数',
+			'connHintAuto': '按文件大小自动决定：小于 1MB 单线程，1–8MB 用 4 条，8MB 以上用 8 条。',
+			'connHintFixed': '固定使用 {n} 条并行连接。文件小于 1MB 时仍走单线程（分段开销大于收益）。',
+			'connTitleFull': '{hint}',
+			'connSaved': '已保存',
+			'connFailed': '保存失败',
 			'running': '下载中',
 			'completed': '已完成',
 			'failed': '失败',
@@ -219,6 +250,14 @@ window.__ModuleLoader__.load({
 
 		const en = {
 			'title': 'Downloads',
+			'connLabel': 'Connections',
+			'connAuto': 'Auto',
+			'connTitle': 'Download connections',
+			'connHintAuto': 'Decided by file size: single-threaded under 1MB, 4 connections for 1–8MB, 8 above 8MB.',
+			'connHintFixed': 'Always use {n} parallel connections. Files under 1MB still download single-threaded (splitting costs more than it saves).',
+			'connTitleFull': '{hint}',
+			'connSaved': 'Saved',
+			'connFailed': 'Save failed',
 			'running': 'Downloading',
 			'completed': 'Completed',
 			'failed': 'Failed',
@@ -2477,6 +2516,15 @@ window.__ModuleLoader__.load({
 			const panelStore = createPanelStore({
 				play: (kind) => soundPlayer.play(kind),
 			});
+			/**
+			 * 「下载连接数」的跨组件真相源。
+			 *
+			 * 与 panelStore 一样每个插件实例创建一次：多个会话标签共享同一个值，
+			 * 也共享同一份「Host 说这个数是多少」的答案。
+			 */
+			const prefsStore = createPrefsStore((body) =>
+				ctx.connection.rpc.call(API_PATH, PREFS_ENDPOINT, body),
+			);
 
 			// 首次用户交互时唤醒音频上下文（capture + once）。自动播放策略要求
 			// 必须发生在手势回调里，所以这两个监听是「建上下文」的唯一入口。
@@ -2597,6 +2645,217 @@ window.__ModuleLoader__.load({
 						),
 					),
 				'dsh-smart-dl: sidebar downloads entry',
+			);
+
+			// 输入框右侧（模型选择器左边）的「下载连接数」。
+			//
+			// `conversation.input.right` 是 **list** slot：靠 order 与其它插件并排，
+			// 不占用 `conversation.input.model`（single，那是模型选择器自己的位置）。
+			// order 50 取中段 —— 太靠前会挤到宿主自带控件之前，太靠后又会被
+			// 一串插件推到看不见的地方。
+			ctx.effect(
+				() =>
+					ctx.slots.inject('conversation.input.right', () =>
+						ctx.slots.register(
+							{
+								name: 'conversation.input.right',
+								id: 'smartdl.connections',
+								order: 50,
+								locale: NS,
+								inject: () => ({ prefsStore: prefsStore }),
+							},
+							SmartDlConnectionsPicker,
+						),
+					),
+				'dsh-smart-dl: composer connections picker',
+			);
+		}
+
+		// ────────────────────────────────────────────────────────────────────
+		// 输入框旁的「下载连接数」选择器（1.7.0）
+		//
+		// 挂在 `conversation.input.right`：list slot，order 决定与其它插件并排时
+		// 的先后。用 list 而不是 `input.model`（single）是为了**不占位** ——
+		// 一个插件的性能开关没有资格把模型选择器挤掉。
+		// ────────────────────────────────────────────────────────────────────
+
+		/**
+		 * 偏好值的跨组件真相源。
+		 *
+		 * 用 `useSyncExternalStore` 而不是每个组件各读各的：同一页面可能有多个
+		 * 组件实例（多会话标签），各存一份 state 会出现「这边选了 9、那边还显示 8」。
+		 *
+		 * 写入选定的值之后**以 Host 的返回值回填**，而不是乐观地先改本地：偏好可能
+		 * 写盘失败（权限、磁盘满），乐观更新会让用户以为设好了、下载时却按旧值走。
+		 */
+		function createPrefsStore(callHost) {
+			let snapshot = { loaded: false, connections: 'auto', notice: null };
+			const listeners = new Set();
+
+			function emit(next) {
+				snapshot = Object.assign({}, snapshot, next);
+				listeners.forEach((fn) => {
+					try {
+						fn();
+					} catch (err) {
+						// 一个订阅者抛错不该拖垮其它订阅者（与 panelStore 同一取舍）
+					}
+				});
+			}
+
+			async function load() {
+				try {
+					const envelope = await callHost({ op: 'read' });
+					const prefs = envelope && envelope.ok && envelope.value ? envelope.value.prefs : null;
+					const value = prefs && prefs.connections !== undefined ? String(prefs.connections) : 'auto';
+					emit({ loaded: true, connections: value });
+				} catch (err) {
+					// 读失败不是用户的操作失败：静默保持 auto（与 Host 侧 readPrefs 同一取舍）
+					emit({ loaded: true, connections: 'auto' });
+				}
+			}
+
+			async function set(value) {
+				// 先乐观显示，让下拉的反馈不等一个网络往返；失败再退回真实值。
+				emit({ connections: value, notice: null });
+				try {
+					const envelope = await callHost({ op: 'write', connections: value });
+					if (envelope && envelope.ok && envelope.value && envelope.value.prefs) {
+						const saved = envelope.value.prefs.connections;
+						emit({ connections: saved === undefined ? 'auto' : String(saved), notice: 'saved' });
+						return;
+					}
+					const reason = envelope && envelope.error ? envelope.error.message : 'unknown';
+					emit({ notice: 'failed' + (reason ? ': ' + reason : '') });
+				} catch (err) {
+					emit({ notice: 'failed: ' + (err && err.message ? err.message : String(err)) });
+				}
+			}
+
+			return {
+				subscribe(fn) {
+					listeners.add(fn);
+					return () => listeners.delete(fn);
+				},
+				getSnapshot() {
+					return snapshot;
+				},
+				load,
+				set,
+			};
+		}
+
+		/**
+		 * 原生 `<select>` 的**透明覆盖层**。
+		 *
+		 * 为什么不直接给 select 加样式：宿主这套界面的下拉在失焦后会留下一个
+		 * 焦点框，而 `conversation.input.right` 这一行里它比模型名显眼得多。
+		 * 把 select 变成铺满的透明层、由下面那个 span 显示文字，键盘与无障碍行为
+		 * 仍是浏览器原生的（不自己实现下拉），视觉却完全受控。
+		 */
+		const CONN_SELECT_STYLE = {
+			position: 'absolute',
+			inset: 0,
+			width: '100%',
+			height: '100%',
+			opacity: 0,
+			cursor: 'pointer',
+			outline: 'none',
+			border: 'none',
+			appearance: 'none',
+			WebkitAppearance: 'none',
+		};
+
+		/**
+		 * 输入框右侧的「下载连接数」选择器。
+		 *
+		 * 尺寸与字体都抄自模型选择器（`@deepseek-ai/dsh-client-ui-model-selection`
+		 * 的 `.ofTiQG_trigger`），但字号/行高**走宿主变量**而不是写死 px ——
+		 * 用户在「设置 → 字号大小」里调大，这一行必须跟着变大，否则它会在
+		 * 一排同级元素里显得又细又小。
+		 */
+		function SmartDlConnectionsPicker(props) {
+			const t = props.t;
+			const prefsStore = props.prefsStore;
+			const snapshot = react.useSyncExternalStore(
+				prefsStore.subscribe,
+				prefsStore.getSnapshot,
+				prefsStore.getSnapshot,
+			);
+
+			react.useEffect(() => {
+				prefsStore.load();
+			}, [prefsStore]);
+
+			const value = snapshot.connections;
+			const isAuto = value === 'auto';
+			const hint = isAuto
+				? t('connHintAuto')
+				: t('connHintFixed').replace('{n}', value);
+			const title = t('connTitle') + '\n' + hint;
+
+			return react.createElement(
+				'label',
+				{
+					style: {
+						position: 'relative',
+						display: 'inline-flex',
+						alignItems: 'center',
+						gap: 4,
+						height: 28,
+						padding: '0 4px 0 8px',
+						borderRadius: 'var(--dsw-radius-sm, 6px)',
+						border: 'none',
+						background: 'transparent',
+						color: 'var(--dsw-alias-label-primary, #e5e7eb)',
+						// 字体族与同一行的模型选择器一致（Inter → 宿主正文字体回退）
+						fontFamily: 'Inter, var(--dsw-font-family)',
+						// 跟随宿主「设置 → 字号大小」的会话内容变量，而非固定 px；
+						// 基准值 13px 与模型选择器一致，用户调大/调小时同步变化。
+						fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+						fontWeight: 400,
+						lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))',
+						whiteSpace: 'nowrap',
+						cursor: 'pointer',
+					},
+					// title 放到外层才真的能看到：原生 option 的 title 在多数浏览器里会被丢弃
+					title: snapshot.notice && snapshot.notice !== 'saved' ? title + '\n\n' : title,
+				},
+				// 标签不降透明度：模型选择器整条文字同亮，降低透明度会显得更细更灰。
+				react.createElement('span', null, t('connLabel')),
+				// 数值单独一个 span：`tabular-nums` + 固定宽度，切换 8→16 时
+				// 不会把右边的元素挤得左右抖动。
+				react.createElement(
+					'span',
+					{
+						style: {
+							display: 'inline-block',
+							minWidth: '2ch',
+							textAlign: 'center',
+							fontVariantNumeric: 'tabular-nums',
+						},
+					},
+					isAuto ? t('connAuto') : value,
+				),
+				react.createElement(
+					'select',
+					{
+						style: CONN_SELECT_STYLE,
+						value: value,
+						'aria-label': t('connLabel'),
+						title: title,
+						onChange: (event) => {
+							prefsStore.set(event.target.value);
+						},
+					},
+					CONNECTION_OPTIONS.map((option) =>
+						react.createElement(
+							'option',
+							{ key: option, value: option },
+							option === 'auto' ? t('connAuto') : option,
+						),
+					),
+				),
 			);
 		}
 

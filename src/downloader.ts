@@ -452,9 +452,50 @@ export function runProcess(
     let stderr = ''
     let exited = false
     let aborted = false
+    /**
+     * settle 的唯一出口。
+     *
+     * 为什么需要它：`runProcess` 有两条互斥的结束路径 —— `child.on('error')`
+     * （命令不存在、spawn 失败）与 `child.on('close')`（跑完或被杀）。绝大多数情况
+     * 两者只来一个，但**「调用时 signal 已经 aborted，且命令不存在」**这一种是两个
+     * 都可能不来：我们在 `error` 派发之前就 `child.kill()` 了，libuv 那边既可能吞掉
+     * `error`，也可能不再给 `close`。结果是 promise 永远 pending —— 调用方（以及
+     * `node --test` 的子进程）在「任务已经结束」之后永远等不到结果。
+     *
+     * 加一道闸：谁先到谁 settle，后到的直接忽略。
+     */
+    let settled = false
+    const finish = (err?: Error): void => {
+      if (settled) return
+      settled = true
+      if (err) reject(err)
+      else resolve()
+    }
 
     const outBuffer = new LineBuffer()
     const errBuffer = new LineBuffer()
+
+    /**
+     * 把子进程这一侧的句柄全部放掉。
+     *
+     * 为什么需要显式做：`spawn` 一个**不存在的命令**时，Node 会先建好 stdin/stdout/
+     * stderr 三个管道与一个 Process 包装，再异步派发 `error`(ENOENT)；`close` 在
+     * 这种情形下不保证到来。只 reject 而不管句柄，那几个 PipeWrap 会挂在事件循环里，
+     * 让宿主进程（或测试进程）在「任务已经结束」之后迟迟退不出去 ——
+     * 实测 `process.getActiveResourcesInfo()` 里残留 `PipeWrap × 5 + ProcessWrap × 1`。
+     *
+     * 顺序：先摘掉 abort 监听（避免收尾后再触发 kill），再 destroy 流，
+     * 最后 unref（进程已经不在，不该继续占着退出判定）。
+     */
+    const releaseChild = (): void => {
+      signal?.removeEventListener('abort', onAbort)
+      child.stdout?.removeAllListeners()
+      child.stderr?.removeAllListeners()
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      child.unref?.()
+    }
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
       outBuffer.push(chunk.toString(), (line) => handlers.onStdout?.(line))
@@ -465,23 +506,46 @@ export function runProcess(
       errBuffer.push(text, (line) => handlers.onStderr?.(line))
     })
 
+    /**
+     * 给子进程发信号，**只发一次**，且只在它真的还活着时发。
+     *
+     * 为什么不能直接 `child.kill(...)`：对一个 spawn 失败的子进程（`error` 已派发、
+     * 底层 handle 已经收掉）调用 kill，在 `node --test` 的子进程环境里会**同步挂住**，
+     * 一挂就是整个进程再也不动 —— 实测把日志写到 `d kill returned` 之前就停住了，
+     * 连 `setTimeout` 都不再触发。这不是「kill 抛错」，而是调用本身不返回。
+     *
+     * 触发条件很具体：调用方传入的信号**已经 aborted**（`?edit_image` 之类的取消
+     * 常见形态），而命令又不存在（例如用绝对路径去调一个没装的 aria2c）。
+     * `pid` 为 undefined 就说明底层进程从未真正建立，此时发信号既无意义也有风险，
+     * 直接交给 `error` 分支收敛。
+     */
+    const killOnce = (sig: NodeJS.Signals): void => {
+      if (child.pid === undefined || child.killed) return
+      try {
+        child.kill(sig)
+      } catch {
+        // 忽略 kill 异常：进程可能刚好自己退出了
+      }
+    }
+
     const onAbort = () => {
       if (aborted || exited) return
       aborted = true
-      try {
-        child.kill('SIGTERM')
-      } catch {
-        // 忽略 kill 异常，继续尝试强制结束
-      }
+      killOnce('SIGTERM')
       // SIGTERM 可能不被响应（Windows 原生没有信号语义，POSIX 上进程也可以
       // 忽略它），1 秒后强制结束。所有平台都挂这个兜底，避免取消后永久挂住。
       const timer = setTimeout(() => {
         if (!exited) {
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            // 忽略
-          }
+          killOnce('SIGKILL')
+          // SIGKILL 之后仍可能收不到 close（进程根本没起来）。再给一小段时间，
+          // 还等不到就自己 settle —— 取消是用户要的结果，不能靠子进程配合才生效。
+          const grace = setTimeout(() => {
+            if (exited) return
+            exited = true
+            releaseChild()
+            finish(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`))
+          }, 500)
+          grace.unref?.()
         }
       }, 1000)
       timer.unref?.()
@@ -496,36 +560,38 @@ export function runProcess(
     }
 
     child.on('error', (err) => {
+      if (exited) return
       exited = true
-      signal?.removeEventListener('abort', onAbort)
+      releaseChild()
       if (aborted) {
         // 与退出码分支同一条不变量：用户可见文案里只出现可执行文件名，
         // 绝不出现 node_modules 里的绝对路径（1.3.0 收口，见 executableName）。
-        reject(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`))
+        finish(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`))
       } else {
-        reject(err)
+        finish(err)
       }
     })
 
     child.on('close', (code, closeSignal) => {
       exited = true
-      signal?.removeEventListener('abort', onAbort)
       outBuffer.flush((line) => handlers.onStdout?.(line))
       errBuffer.flush((line) => handlers.onStderr?.(line))
+      // flush 之后再放句柄：缓冲里剩下的最后半行还要交给 handlers
+      releaseChild()
 
       if (aborted) {
-        reject(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`))
+        finish(new Error(`下载已取消：${executableName(command)} 被 AbortSignal 终止`))
         return
       }
       if (code === 0) {
-        resolve()
+        finish()
         return
       }
       const tail = stderr.trim()
       // 退出码翻译与命令名收敛都收在 describeExitCode 里：这里只负责「非零退出
       // 必须有消息」这一条不变量，退出码为 0 的分支在上面已经 resolve 掉了。
       const message = describeExitCode(command, code, closeSignal, tail)
-      reject(new Error(message ?? `${executableName(command)} 退出码 ${code ?? '未知'}`))
+      finish(new Error(message ?? `${executableName(command)} 退出码 ${code ?? '未知'}`))
     })
   })
 }

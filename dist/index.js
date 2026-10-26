@@ -4,7 +4,8 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { probeUrl } from './probe.js';
 import { downloadWithAria2, downloadWithCurl, getAria2Path, } from './downloader.js';
-import { decide, decideConcurrency, LARGE_FILE } from './decision.js';
+import { decide, decideConcurrency, LARGE_FILE, CONNECTION_CHOICES, MIN_CONNECTIONS, MAX_CONNECTIONS, parseConnections, } from './decision.js';
+import { effectiveConnections } from './prefs.js';
 import { isSafeTaskId, ProgressReporter, readTaskRecord } from './progress.js';
 import { applyMirror, isAutoMirror } from './mirror.js';
 import { resolveAutoMirror } from './auto-mirror.js';
@@ -12,7 +13,7 @@ import { buildRequestHeaders } from './headers.js';
 import { CHECKSUM_LABELS, HASH_VERIFIED_MESSAGE, checksumVerifiedMessage, describeHashFailure, hashFile, normalizeChecksum, normalizeSha256, sha256File, verifyChecksum, verifySha256, } from './hash.js';
 import { checkDownloadUrl, deriveFilenameFromUrl, FALLBACK_FILENAME, filenameFromContentDisposition, sanitizeFilename, withConflictSuffix, } from './url.js';
 import { checkDiskSpace, describeInsufficientSpace } from './disk.js';
-import { registerStatusRpc } from './rpc.js';
+import { registerStatusRpc, registerPrefsRpc } from './rpc.js';
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js';
 import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js';
 import { recordThroughput } from './throughput-cache.js';
@@ -134,6 +135,8 @@ function renderBatch(value) {
 export function apply(ctx) {
     // 浏览器端进度面板的数据源；纯 CLI profile 下没有 connection 服务时静默跳过。
     registerStatusRpc(ctx);
+    // 「下载连接数」选择器的读写入口（1.7.0）。与 status 同样的「无 connection 就跳过」。
+    registerPrefsRpc(ctx);
     // manage 端点的 retry 由这里注入：rpc.ts 不 import index.ts（会成环），
     // 因此通过注册表拿实现。重复 apply 覆盖同一个 handler 是幂等的。
     setRetryHandler((taskId, session) => startRetry(taskId, session));
@@ -228,6 +231,14 @@ export function apply(ctx) {
                 additionalProperties: true,
                 description: 'Optional extra request headers as a "Name": "value" map, e.g. {"Authorization": "Bearer …"}. Merged with userAgent / referer, which win on conflicts. Headers the plugin manages itself (Range, Accept-Encoding, Host, …) are rejected.',
             },
+            connections: {
+                type: 'string',
+                // auto 排在第一位：枚举顺序就是模型选择器里的列出顺序，缺省值该在最前。
+                enum: ['auto', ...CONNECTION_CHOICES],
+                // 为什么是字符串枚举而不是 integer：auto 必须能与「没传」区分开，
+                // 而 integer 枚举里塞不进 'auto'。三态的语义差异见 parseConnections。
+                description: 'How many parallel connections to use for this call. Omit it to follow the number the user picked in the "下载连接数" picker next to the model selector (falling back to "auto" when they never touched it). "auto" keeps the size-based rule: under 1MB or without Range support it falls back to single-threaded curl, 1–8MB uses 4, 8MB and above uses 8. Any integer 1–16 demands exactly that count — a named count is used as-is, with no size-based reduction and no history adjustment, but the other fallbacks still apply (no Range support, unknown size, file under 1MB, or aria2 missing still end up on curl). Passing a number here overrides the saved preference for this call only. Higher counts raise the risk of a server throttling or blocking you by IP.',
+            },
         },
         output: {
             schema: {
@@ -316,6 +327,19 @@ export function apply(ctx) {
             //     放到后面等于先下了几百 MB 再告诉调用方参数写错了。
             const maxBandwidthBytes = parseMaxBandwidth(args.maxBandwidth);
             const timeoutMs = parseTimeoutMs(args.timeoutMs);
+            // 0a2. 连接数：`auto` 与「没传」都表示按既有规则自动分档（不改变默认行为），
+            //      其余数字表示「这次就要这么多」。非法值同样在发请求之前拒绝 —— 悄悄
+            //      回落成 auto 会让用户以为自己在用 16 连接，实际只开了 8。
+            //
+            //      没传时**回落到用户在界面上选的偏好**（`smartdl.prefs` 的 connections）：
+            //      这是「选一次，之后发链接就按它下载」的全部实现。显式入参优先于偏好，
+            //      所以对话里说的「这次用 4」能压过界面设置，而不用先去改设置。
+            const explicit = parseConnections(args.connections);
+            if (explicit === null) {
+                throw new Error(`拒绝下载：connections 必须是 auto 或 ${MIN_CONNECTIONS}~${MAX_CONNECTIONS} 之间的整数` +
+                    `（收到 ${JSON.stringify(args.connections)}）`);
+            }
+            const connections = effectiveConnections(explicit);
             // 0b. url / targets 二选一；超批量上限也在这里拒绝（都不发请求）。
             const dispatch = resolveTargets(args);
             const header = exec.agent?.session?.header;
@@ -328,6 +352,7 @@ export function apply(ctx) {
                 referer: args.referer,
                 headers: args.headers,
                 timeoutMs,
+                connections,
             };
             // 1. 单条目：与 1.2.0 完全同一条路径（同一个 downloadOne，抛错照抛）
             if (dispatch.kind === 'single') {
@@ -339,7 +364,12 @@ export function apply(ctx) {
             }
             // 2. 批量：窗口按「批内总连接数有界」反推（推导与「为什么」见 batchWindow）；
             //    失败/取消逐条返回（D4=②）
-            const limit = batchWindow(decideConcurrency(LARGE_FILE));
+            //    点名了连接数时按**该档位**反推窗口：不按它反推就会出现「每条要 16 连接、
+            //    窗口仍是按 8 档算的 2」，峰值冲到 32，把「批内总连接数有界」这条
+            //    保守取舍整个架空。预算基数随档位抬升，所以点名 16 时窗口自然是 2
+            //    （预算 32）。点名 1 时条目本来就是 curl，按 1 参与反推，窗口放开到
+            //    条目数 —— 没有连接需要省。
+            const limit = batchWindow(typeof connections === 'number' ? connections : decideConcurrency(LARGE_FILE));
             // 实际并发位：条目比窗口少时按条目数算 —— 否则 2 条的批次也按窗口份分带宽，
             // 用户给的上限会被白白用掉不到四分之一。
             const workers = Math.min(limit, dispatch.targets.length);
@@ -459,6 +489,10 @@ function buildRetryRequest(item, ctx) {
             ? {}
             : { maxBandwidthBytes: ctx.maxBandwidthBytes }),
         ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
+        // 连接数写进重试元数据：用户点名要 16 连接下到一半失败了，点重试却悄悄回到 8
+        // 是同一类「报告的行为与用户的选择不一致」。它是纯数字 / 字面量 `auto`，
+        // 不含凭据，落盘无风险（与 maxBandwidthBytes 同一个道理）。
+        ...(ctx.connections === undefined ? {} : { connections: ctx.connections }),
         ...(ctx.batchId === undefined ? {} : { batchId: ctx.batchId }),
     };
 }
@@ -837,7 +871,9 @@ async function downloadOneInner(item, ctx) {
     // （对外宣称的 P1「按历史吞吐抬档」随之完全失效）。
     // 键用 `requestedUrl`（镜像已解析后的地址）：缓存按主机 + 端口分桶，而写入侧
     // （recordObservedThroughput）用的也是同一个地址 —— 读写两边必须同键，否则永远命中不了。
-    const decision = decide(probe, aria2Path !== null, {}, { url: requestedUrl });
+    // 第 5 个入参是调用方点名的连接数（`connections`）：给了数字就原样用，
+    // 不给 / `auto` 则完全按既有规则走（大小分档 + 历史抬档）。
+    const decision = decide(probe, aria2Path !== null, {}, { url: requestedUrl }, ctx.connections);
     // 4. aria2 路径
     if (decision.method === 'aria2' && aria2Path) {
         reporter.report(0, `启动 aria2（${decision.concurrency} 连接）…`);
@@ -942,10 +978,19 @@ async function downloadOneInner(item, ctx) {
  * 按最高档保守计算 —— 当前实际窗口恒为 2。单条目内部开 4 还是 8 仍由 decide() 按
  * 实际大小决定，与本窗口互不影响。
  *
- * @param perItemTier 单条目可能占用的连接数（当前传最高档，见上）
+ * 1.7.0 起 `perItemTier` 还可能等于用户点名的连接数（1..16），此时预算必须跟着抬：
+ *
+ *   - 自动模式（perItemTier = 8）→ 预算 16，与 1.6.0 逐字节相同，窗口恒为 2；
+ *   - 点名 1 → 预算仍按 8 档算 16，但 perItemTier=1，窗口自然放开到 16（条目数封顶），
+ *     因为 curl 条目彼此不抢连接，没有省的必要；
+ *   - 点名 16 → 预算随之抬到 32，窗口 2 —— 不抬高基数的话，窗口会被算成 1
+ *     而白白牺牲批量吞吐，同时峰值仍是「窗口 × 档位」受控（16×2=32）。
+ *
+ * @param perItemTier 单条目可能占用的连接数（自动模式传最高档；点名时传点名的那个数 ——
+ *   预算与档位必须来自同一处，否则「批内总连接数有界」不再成立）
  */
 function batchWindow(perItemTier) {
-    const budget = decideConcurrency(LARGE_FILE) * 2;
+    const budget = Math.max(decideConcurrency(LARGE_FILE), perItemTier) * 2;
     return Math.max(1, Math.floor(budget / perItemTier));
 }
 /** 批量上限：与进度读取端的 MAX_STATUS_LIMIT 对齐，理由见 resolveTargets。 */
@@ -1299,6 +1344,7 @@ export function startRetry(taskId, session) {
         mirror: request.mirror,
         maxBandwidthBytes: request.maxBandwidthBytes,
         timeoutMs: request.timeoutMs,
+        connections: request.connections,
         taskIdOverride: taskId,
         controller,
         request,

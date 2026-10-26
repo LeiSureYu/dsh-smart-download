@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { registerStatusRpc } from '../src/rpc.js'
+import { registerPrefsRpc, registerStatusRpc } from '../src/rpc.js'
 import { DEFAULT_STATUS_LIMIT } from '../src/status.js'
 import {
   registerRunningTask,
@@ -1618,4 +1618,163 @@ test('manage/cancel / retry：非法 taskId 被白名单拒绝', async () => {
       }
     }),
   )
+})
+
+/* ------------------------- smartdl.prefs（1.7.0） ------------------------- */
+
+/**
+ * 造一个发往 `smartdl.prefs` 的 client-request 信封。
+ *
+ * 必须走完整信封（type / rpcId / method / payload）：端点层的校验就是照这份形状
+ * 写的，直接发裸 payload 会得到 `invalid-request` 而不是用例想测的那个分支。
+ */
+function prefsRequest(payload: unknown, rpcId = 'p1'): Request {
+  return new Request('http://localhost/api/smartdl.prefs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId,
+      method: 'smartdl.prefs',
+      payload,
+    }),
+  })
+}
+
+
+/**
+ * 偏好端点的关键契约，与 status 那批不同：
+ *   - 它**不需要会话**（偏好是全局设置，不按 session 分桶）；
+ *   - 读失败不在端点层发生（Host 侧 readPrefs 已经吞掉所有异常）；
+ *   - 写失败必须回 `ok:false` 并带可显示的原因，**不能**静默回落。
+ *
+ * 因此每条用例都断言到「具体值」，而不是「没抛错」。
+ */
+function registerPrefs(connection: unknown): StubResult {
+  const out: StubResult = { routes: [], effectLabel: undefined, injectCalled: false }
+  const wrapped = wrapConnection(connection, out.routes)
+  const ctx = {
+    inject(names: readonly string[], callback: (child: unknown) => void) {
+      const missing = names.filter((n) => !['connection'].includes(n))
+      if (missing.length > 0) return
+      out.injectCalled = true
+      const child = {
+        get(name: string) {
+          return name === 'connection' ? wrapped : undefined
+        },
+        effect(add: () => () => Promise<void>, label?: string) {
+          out.effectLabel = label
+          void add()
+        },
+      }
+      callback(child)
+    },
+  }
+  registerPrefsRpc(ctx as never)
+  return out
+}
+
+/** 在临时 DSH_HOME 下跑一段用例，结束时还原环境变量 */
+function withPrefsHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(path.join(tmpdir(), 'dsh-prefs-rpc-'))
+  const prev = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  return fn(home).finally(() => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    rmSync(home, { recursive: true, force: true })
+  })
+}
+
+function prefsHandler(): (r: Request) => Promise<Response> {
+  const out = registerPrefs(stubConnection())
+  const route = out.routes.find((r) => r.path === '/api/smartdl.prefs')
+  assert.ok(route, `应注册出 /api/smartdl.prefs 路由（实际：${out.routes.map((r) => r.path).join(', ')}）`)
+  return route.fetch
+}
+
+test('prefs: 没有 connection 服务时静默跳过（与 status 同一取舍）', () => {
+  const out = registerPrefs(undefined)
+  // 桩 ctx.inject 不模拟 cordis 的依赖门控，所以这里不断言 injectCalled；
+  // 真正的保护是 connectionOf 返回 undefined 后立刻 return，一条路由都不挂。
+  assert.deepEqual(
+    out.routes.map((r) => r.path),
+    [],
+    '没有 connection 时不能注册任何路由',
+  )
+})
+
+test('prefs/read: 偏好文件不存在 -> connections 为 auto', async () => {
+  await withPrefsHome(async () => {
+    const env = await readEnvelope(await prefsHandler()(prefsRequest({ op: 'read' })))
+    assert.equal(env.body.result?.ok, true)
+    assert.deepEqual((env.body.result?.value as { prefs: unknown }).prefs, { connections: 'auto' })
+  })
+})
+
+test('prefs/read: 省略 op 时默认读（GET 式调用不该要求 op）', async () => {
+  await withPrefsHome(async () => {
+    const env = await readEnvelope(await prefsHandler()(prefsRequest({})))
+    assert.equal(env.body.result?.ok, true)
+  })
+})
+
+test('prefs/write: 合法值写入后 read 能读回同一个值', async () => {
+  await withPrefsHome(async () => {
+    const handler = prefsHandler()
+    const w = await readEnvelope(await handler(prefsRequest({ op: 'write', connections: '9' })))
+    assert.equal(w.body.result?.ok, true)
+    assert.deepEqual((w.body.result?.value as { prefs: unknown }).prefs, { connections: 9 })
+
+    const r = await readEnvelope(await handler(prefsRequest({ op: 'read' })))
+    assert.deepEqual((r.body.result?.value as { prefs: unknown }).prefs, { connections: 9 })
+  })
+})
+
+test('prefs/write: auto 能写入并读回（显式回落自动档）', async () => {
+  await withPrefsHome(async () => {
+    const handler = prefsHandler()
+    await handler(prefsRequest({ op: 'write', connections: '4' }))
+    const w = await readEnvelope(await handler(prefsRequest({ op: 'write', connections: 'auto' })))
+    assert.equal(w.body.result?.ok, true)
+    assert.deepEqual((w.body.result?.value as { prefs: unknown }).prefs, { connections: 'auto' })
+  })
+})
+
+test('prefs/write: 非法值 -> ok:false，带可显示的 message，且不污染原值', async () => {
+  await withPrefsHome(async () => {
+    const handler = prefsHandler()
+    await handler(prefsRequest({ op: 'write', connections: '9' }))
+    for (const bad of ['0', '17', '-1', '1.5', 'abc']) {
+      const env = await readEnvelope(await handler(prefsRequest({ op: 'write', connections: bad })))
+      assert.equal(env.body.result?.ok, false, `应拒绝 ${bad}`)
+      assert.ok((env.body.result?.error?.message ?? '').length > 0, '失败必须带原因')
+    }
+    const r = await readEnvelope(await handler(prefsRequest({ op: 'read' })))
+    assert.deepEqual((r.body.result?.value as { prefs: unknown }).prefs, { connections: 9 })
+  })
+})
+
+test('prefs: 未知 op -> ok:false 且提示只支持 read/write', async () => {
+  await withPrefsHome(async () => {
+    const env = await readEnvelope(await prefsHandler()(prefsRequest({ op: 'nuke' })))
+    assert.equal(env.body.result?.ok, false)
+    assert.match(env.body.result?.error?.message ?? '', /read.*write|read \/ write/)
+  })
+})
+
+test('prefs: 请求体不是对象（null）时按 read 处理，不炸', async () => {
+  await withPrefsHome(async () => {
+    const env = await readEnvelope(await prefsHandler()(prefsRequest(null)))
+    assert.equal(env.body.result?.ok, true)
+  })
+})
+
+test('prefs: 不需要 session 字段（全局设置，不按会话分桶）', async () => {
+  await withPrefsHome(async () => {
+    // 请求体里刻意不带 session：若实现偷偷依赖它，会回 ok:false 或抛错
+    const env = await readEnvelope(await prefsHandler()(prefsRequest({ op: 'write', connections: '6' })))
+    assert.equal(env.body.result?.ok, true)
+    assert.deepEqual((env.body.result?.value as { prefs: unknown }).prefs, { connections: 6 })
+  })
 })

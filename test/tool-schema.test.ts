@@ -41,7 +41,7 @@ test('apply(): 工具 schema 通过 dsh-tools 校验并注册两个工具', () =
   )
 })
 
-test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都不再是必填）', () => {
+test('smart_download 的 parameters 含 13 项（1.7.0 新增 connections），url 与 targets 二选一', () => {
   const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
   const ctx = stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
     registered.push(tool)
@@ -71,6 +71,7 @@ test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都
     Object.keys(params.properties).sort(),
     [
       'checksum',
+      'connections',
       'headers',
       'ifExists',
       'maxBandwidth',
@@ -600,4 +601,41 @@ test('文档契约：curl 33 的解释在代码与 README 里都对齐官方定�
     /忽略.*Range|Range.*忽略/,
     'README 必须给出「33 也可能意味着服务器忽略了你发的 Range」这层实测含义',
   )
+})
+
+/* ------------------------------ 1.7.0：connections ------------------------------ */
+
+test('connections 入参：type=string，枚举是 auto + 1..16 的整数', () => {
+  const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
+  apply(stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
+    registered.push(tool)
+  }) as never)
+  const tool = registered.find((t) => t.name === 'smart_download')!
+  const params = tool.parameters as {
+    properties: Record<string, { type?: string; enum?: string[]; description?: string }>
+  }
+  const connections = params.properties.connections
+  assert.ok(connections, 'connections 必须声明在 schema 里（否则模型根本看不到这个能力）')
+  assert.equal(connections.type, 'string')
+  assert.deepEqual(connections.enum, [
+    'auto',
+    '1', '2', '3', '4', '5', '6', '7', '8',
+    '9', '10', '11', '12', '13', '14', '15', '16',
+  ])
+})
+
+test('connections 入参的描述必须说明「不传会用界面里保存的值」', () => {
+  const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
+  apply(stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
+    registered.push(tool)
+  }) as never)
+  const tool = registered.find((t) => t.name === 'smart_download')!
+  const params = tool.parameters as {
+    properties: Record<string, { description?: string }>
+  }
+  const description = params.properties.connections?.description ?? ''
+  // 这是最容易踩空的一处：模型不知道自己「不说」时会发生什么，就会每次都显式传值，
+  // 把用户在界面里设好的偏好架空。
+  assert.match(description, /自动|auto/)
+  assert.ok(description.length > 20, '描述要足够具体，不能是占位符')
 })

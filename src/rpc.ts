@@ -27,6 +27,7 @@ import {
 } from './progress.js'
 import type { ProgressSession } from './progress.js'
 import { cancelRunningTask, getRetryHandler, isKnownTask } from './tasks.js'
+import { readPrefs, writePrefs } from './prefs.js'
 import type { RetryStartResult } from './tasks.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
@@ -61,6 +62,18 @@ const CLEANUP_ENDPOINT = 'smartdl.cleanup'
  * 请求头 —— 重试所需的信息只能来自本插件自己写下的进度记录。
  */
 const MANAGE_ENDPOINT = 'smartdl.manage'
+
+/**
+ * 偏好端点名（1.7.0）：输入框旁「下载连接数」选择器的读写入口。
+ *
+ * 为什么要经过宿主、而不是让浏览器自己 localStorage：**真正需要这个数字的是 Agent 的
+ * 下载工具**，它跑在 Host 进程里。前端存一份只能给前端看，下载时读不到等于没设。
+ * 因此偏好必须落在 Host 能读到的位置上（见 prefs.ts），端点只是它的读写窗口。
+ *
+ * 读写同挂一条端点、按 `payload.op` 分派（`read` / `write`）：两者共享同一套信封
+ * 校验与错误语义，拆两条只会让「什么算非法请求」出现第二个答案。
+ */
+const PREFS_ENDPOINT = 'smartdl.prefs'
 
 /** `connection.fetch.register` 接受的精确路由（结构化子集，避免依赖 dsh-client-connection 类型）。 */
 interface ConnectionFetchRoute {
@@ -904,6 +917,36 @@ export function registerStatusRpc(ctx: Context): void {
       // （要只删记录，客户端用 op:'forget'：语义显式，返回形状也不同。）
       if (!confirm) return fail(MANAGE_CONFIRM_REQUIRED)
       return ok(deleteManagedTask(taskId, session))
+    })
+  })
+}
+
+/**
+ * 把偏好端点挂上共享 `/api` 载体。
+ *
+ * 与 status / cleanup / manage 不同，这条端点在**没有会话**时同样可用 ——
+ * 偏好是全局设置，不按会话隔离（见 prefs.ts 文件头）。因此 payload 里不读 session。
+ *
+ * @param ctx 插件上下文
+ */
+export function registerPrefsRpc(ctx: Context): void {
+  ctx.inject(['connection'], (child) => {
+    if (!connectionOf(child)) return
+    registerApiRoute(child, PREFS_ENDPOINT, (payload) => {
+      const body = payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+      const op = body.op ?? 'read'
+
+      if (op === 'read') return ok({ prefs: readPrefs() })
+
+      if (op === 'write') {
+        const result = writePrefs({ connections: body.connections as never })
+        // 校验失败如实返回 ok:false：界面点选是用户明确表达的动作，
+        // 静默回落会让面板显示 16、下载时却按 8 —— 正是「看起来设好了」的假象。
+        if (!result.ok) return fail(result.error)
+        return ok({ prefs: result.prefs })
+      }
+
+      return fail(`未知的偏好操作 ${JSON.stringify(op)}：只支持 read / write`)
     })
   })
 }

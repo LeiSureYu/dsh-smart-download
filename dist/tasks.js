@@ -16,6 +16,9 @@
  * 携带原请求的自定义头，这一点必须在文档与 UI 里说清楚。
  */
 import * as path from 'node:path';
+// 连接数校验只在这里用一次（重试元数据），不引入依赖环：decision.js 只依赖
+// throughput-cache.js，而那只依赖 node:fs —— 与 index.js → tasks.js 这条链无关。
+import { parseConnections } from './decision.js';
 /**
  * 同时跟踪的运行数上限。
  *
@@ -138,6 +141,16 @@ export function parseRetryRequest(raw, outPath) {
     if (body.timeoutMs !== undefined && (timeoutMs === undefined || timeoutMs < 1_000)) {
         return undefined;
     }
+    // connections 与 timeoutMs 反着来：越界时**只丢掉字段**、不整条拒绝。
+    // 理由是失败方向不同 —— 丢掉一个超时等于把「有界等待」变成「无限等待」，与用户
+    // 意图相反；而丢掉连接数只是回到 1.6.0 的自动分档，下载照样正确完成，只是可能
+    // 慢一点。为一个纯性能偏好放弃整次重试，是让用户白点一次。
+    //
+    // 走同一套白名单：非法值（被手改成 0 / 17 / "16x" / 1.5）一律视为未指定。
+    // 用 parseConnections 而不是就地写区间判断：重试元数据来自磁盘，它的合法性与
+    // 工具入参的合法性必须是**同一个答案**，两份独立实现迟早漂移。
+    const parsed = parseConnections(body.connections);
+    const connections = parsed === null ? undefined : parsed;
     return {
         url,
         ...(output === undefined ? {} : { output }),
@@ -149,6 +162,7 @@ export function parseRetryRequest(raw, outPath) {
             ? {}
             : { maxBandwidthBytes: positive(body.maxBandwidthBytes, Number.MAX_SAFE_INTEGER) }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(connections === undefined ? {} : { connections }),
         ...(text(body.batchId) === undefined ? {} : { batchId: text(body.batchId) }),
     };
 }

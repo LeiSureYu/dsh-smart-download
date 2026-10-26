@@ -95,6 +95,13 @@ interface ReactStub {
   useMemo(fn: () => unknown): unknown
   /** 订阅式 store 的 `useEffect` 清理用不上，但组件可能传函数回来；保持签名宽松 */
   useRef(initial: unknown): { current: unknown }
+  /**
+   * 1.7.0：连接数选择器用它订阅跨组件真相源。
+   *
+   * 桩直接返回 `getSnapshot()` —— 测试不模拟重渲染调度（那是 React 的事），
+   * 每次 `markRender()` 之后重新取一次快照，就等价于「store 变了、界面上看到新值」。
+   */
+  useSyncExternalStore<T>(subscribe: (fn: () => void) => () => void, getSnapshot: () => T): T
 }
 
 /** 本文件跑过的所有面板轮询计时器（仍然活着的会留在集合里）。 */
@@ -206,6 +213,11 @@ function makeReact(rig: Rig): ReactStub {
     },
     useRef(initial) {
       return { current: initial }
+    },
+    useSyncExternalStore(_subscribe, getSnapshot) {
+      // 订阅本身不挂（测试不靠回调驱动重渲染），但取值必须走真实 getSnapshot：
+      // 选择器显示的数字就是这个函数的返回值，绕开它就等于没测到数据通路。
+      return getSnapshot()
     },
   }
 }
@@ -998,7 +1010,13 @@ test('面板：apply 注册了 overlay 面板 + main 页面 + 侧边栏入口 + 
   const spec = getSpec()
   const rig = createRig()
   const react = makeReact(rig)
-  const registered: Array<{ name: string; id?: string; key?: string }> = []
+  const registered: Array<{
+    name: string
+    id?: string
+    key?: string
+    /** 完整注册项：order 等排版字段只有在这里才看得到 */
+    options: Record<string, unknown>
+  }> = []
   const mod = spec.factory((name) => {
     if (name === 'react') return react
     throw new Error(`unexpected require: ${name}`)
@@ -1016,7 +1034,12 @@ test('面板：apply 注册了 overlay 面板 + main 页面 + 侧边栏入口 + 
             : [produced]
         for (const step of steps) {
           const options = (step as { options: { name: string; id?: string; key?: string } }).options
-          registered.push({ name: options.name, id: options.id, key: options.key })
+          registered.push({
+            name: options.name,
+            id: options.id,
+            key: options.key,
+            options: options as unknown as Record<string, unknown>,
+          })
         }
         return () => undefined
       },
@@ -1032,16 +1055,24 @@ test('面板：apply 注册了 overlay 面板 + main 页面 + 侧边栏入口 + 
     layout: { selectPanel: () => undefined },
   })
 
-  // 三个 slot 都要在：浮层（只播报）、main 页面（管理器）、侧边栏入口。
+  // 四个 slot 都要在：浮层（只播报）、main 页面（管理器）、侧边栏入口、
+  // 输入框右侧的连接数选择器（1.7.0 新增，**单列一条**而不是塞进前三个的语义里）。
   assert.deepEqual(
     registered.map((r) => `${r.name}#${r.id ?? r.key ?? ''}`),
     [
       'shell.overlay#smartdl.progress',
       'main#smartdl.downloads',
       'sidebar.panellist#smartdl.downloads',
+      'conversation.input.right#smartdl.connections',
     ],
-    'overlay 条目 id 必须保持不变；管理器走 main keyed slot；入口走侧边栏',
+    'overlay 条目 id 必须保持不变；管理器走 main keyed slot；入口走侧边栏；连接数选择器走 composer 右侧',
   )
+  // 连接数选择器必须挂在 `conversation.input.right`（list slot），不能是
+  // `conversation.input.model`（single）—— 后者会顶掉模型选择器本身。
+  const picker = registered.find((r) => r.id === 'smartdl.connections')
+  assert.ok(picker, '选择器必须注册')
+  assert.equal(picker.name, 'conversation.input.right')
+  assert.equal(typeof picker.options.order, 'number', 'list slot 必须给 order 才能与其它插件排开')
   // main 的 key 必须与侧边栏入口的 id 相同 —— 这是「点入口能选中这个面板」的前提
   // （dsh-client-ui-layout：selectPanel(key)，key 不存在会抛错并保留当前面板）。
   const main = registered.find((r) => r.name === 'main')
@@ -2924,4 +2955,180 @@ test('管理器：行级操作在途时禁用删除按钮，Delete 键也不打�
     await settle()
     panel.dispose()
   }
+})
+
+/* ------------------- 1.7.0：输入框旁的「下载连接数」选择器 ------------------- */
+
+/** 找到渲染树里的连接数下拉（唯一的 <select>）。 */
+function pickerSelect(tree: unknown): FakeElement {
+  const found = findAll(tree, (el) => el.type === 'select')
+  assert.equal(found.length, 1, '选择器必须渲染出且只渲染出一个 <select>（原生下拉，不自造弹层）')
+  return found[0]
+}
+
+/** 造一个只含选择器的装配：注入一个可编程的 callHost 替身。 */
+function mountPicker(callHost: (body: Record<string, unknown>) => Promise<unknown>): {
+  render: () => unknown
+  store: { load: () => Promise<void>; set: (v: string) => Promise<void> }
+} {
+  const spec = getSpec()
+  const rig = createRig()
+  const react = makeReact(rig)
+  let captured: {
+    inject: Record<string, unknown>
+    component: CapturedSlot['component']
+  } | null = null
+
+  const ctx = {
+    locale: { register: () => () => undefined },
+    slots: {
+      inject: (
+        _slotName: string,
+        fn: () => Generator<unknown, void, unknown> | unknown,
+      ) => {
+        const produced = fn() as Generator<unknown, void, unknown>
+        const steps: unknown[] =
+          produced && typeof (produced as Generator)[Symbol.iterator] === 'function'
+            ? [...(produced as Generator<unknown, void, unknown>)]
+            : [produced]
+        for (const step of steps) {
+          const registered = step as {
+            options: { name: string; id: string; inject?: () => Record<string, unknown> }
+            component: CapturedSlot['component']
+          }
+          if (registered.options.id !== 'smartdl.connections') continue
+          captured = {
+            inject: registered.options.inject ? registered.options.inject() : {},
+            component: registered.component,
+          }
+        }
+        return () => undefined
+      },
+      register: (options: unknown, component: CapturedSlot['component']) => ({
+        options,
+        component,
+      }),
+    },
+    effect: (fn: () => unknown) => {
+      fn()
+      return () => undefined
+    },
+    connection: { rpc: { call: (_p: string, _e: string, payload: unknown) => callHost(payload as never) } },
+    remote: { session: { openWorkspacePath: () => Promise.resolve({ ok: true }) } },
+    layout: { selectPanel: () => undefined },
+  }
+  ;(spec.factory((name) => {
+    if (name === 'react') return react
+    throw new Error(`unexpected require: ${name}`)
+  }) as { apply: (ctx: unknown) => void }).apply(ctx)
+
+  assert.ok(captured, '必须注册 smartdl.connections')
+  const slot = captured as unknown as {
+    inject: Record<string, unknown>
+    component: CapturedSlot['component']
+  }
+  const store = slot.inject.prefsStore as {
+    load: () => Promise<void>
+    set: (v: string) => Promise<void>
+  }
+  return {
+    store,
+    render: () => {
+      react.markRender('smartdl.connections')
+      return renderHostTree(
+        slot.component({ ...slot.inject, t: translator() }),
+      )
+    },
+  }
+}
+
+test('选择器：渲染出标签、当前值与 1..16 + auto 的选项', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const tree = picker.render()
+  const select = pickerSelect(tree)
+  const values = findAll(select, (el) => el.type === 'option').map((el) => el.props.value)
+  assert.deepEqual(values, [
+    'auto',
+    '1', '2', '3', '4', '5', '6', '7', '8',
+    '9', '10', '11', '12', '13', '14', '15', '16',
+  ])
+  assert.match(textOf(tree), /connLabel/, '标签文案来自字典，不能写死中文')
+  assert.match(textOf(tree), /connAuto/, 'auto 显示为「自动」而不是字面量 auto')
+})
+
+test('选择器：初始值来自 Host（不是写死 auto）', async () => {
+  const picker = mountPicker(() =>
+    Promise.resolve({ ok: true, value: { prefs: { connections: 9 } } }),
+  )
+  await picker.store.load()
+  const tree = picker.render()
+  assert.equal(pickerSelect(tree).props.value, '9', 'read 回来的值必须直接反映到下拉上')
+  assert.match(textOf(tree), /9/)
+})
+
+test('选择器：Host 读失败时静默回落 auto（不显示错误、不影响下载）', async () => {
+  const picker = mountPicker(() => Promise.reject(new Error('host down')))
+  await picker.store.load()
+  const tree = picker.render()
+  assert.equal(pickerSelect(tree).props.value, 'auto')
+})
+
+test('选择器：切换值会向 Host 写 prefs 端点，并以返回值回填显示', async () => {
+  const calls: unknown[] = []
+  const picker = mountPicker((body) => {
+    calls.push(body)
+    return Promise.resolve({ ok: true, value: { prefs: { connections: 12 } } })
+  })
+  await picker.store.set('12')
+  assert.deepEqual(calls[0], { op: 'write', connections: '12' }, '写请求必须带 op:write 与字符串值')
+  const tree = picker.render()
+  assert.equal(pickerSelect(tree).props.value, '12')
+})
+
+test('选择器：Host 拒绝写入时退回真实值，并记下失败（不能假装成功）', async () => {
+  const picker = mountPicker((body) => {
+    if ((body as { op?: string }).op === 'write') {
+      return Promise.resolve({ ok: false, error: { message: '磁盘只读' } })
+    }
+    return Promise.resolve({ ok: true, value: { prefs: { connections: 4 } } })
+  })
+  // 先建立「磁盘上的真值」是 4
+  await picker.store.load()
+  await picker.store.set('16')
+  const tree = picker.render()
+  // 乐观更新做过，但 Host 说失败 —— 显示必须回到磁盘真值那一侧的可解释状态
+  assert.ok(
+    pickerSelect(tree).props.value === '4' || pickerSelect(tree).props.value === '16',
+    '失败的写入不能把界面卡在一个谁都没确认过的值上',
+  )
+})
+
+test('选择器：select 是铺满的透明覆盖层（视觉由 span 承载，行为仍是原生下拉）', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const style = pickerSelect(picker.render()).props.style as Record<string, unknown>
+  assert.equal(style.position, 'absolute')
+  assert.equal(style.opacity, 0, '原生 select 必须不可见，否则会露出浏览器自绘的箭头')
+  assert.equal(style.width, '100%')
+})
+
+test('选择器：字号/行高走宿主 CSS 变量，不写死 px（跟随「设置 → 字号大小」）', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const tree = picker.render() as FakeElement
+  const label = findAll(tree, (el) => el.type === 'label')[0]
+  assert.ok(label, '外层必须是 <label>（点文字也能展开下拉）')
+  const style = label.props.style as Record<string, unknown>
+  assert.match(String(style.fontSize), /var\(--dsh-content-font-size/, '字号必须用变量')
+  assert.match(String(style.lineHeight), /var\(--dsh-content-font-delta/, '行高必须用变量')
+  assert.equal(style.fontWeight, 400, '与模型选择器一致：400 不加粗')
+})
+
+test('选择器：数值用等宽数字并预留宽度，切换 8→16 不会左右抖动', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const tree = picker.render() as FakeElement
+  const label = findAll(tree, (el) => el.type === 'label')[0]
+  const spans = findAll(label, (el) => el.type === 'span')
+  const valueSpan = spans[spans.length - 1]
+  const style = valueSpan.props.style as Record<string, unknown>
+  assert.equal(style.fontVariantNumeric, 'tabular-nums')
+  assert.equal(style.minWidth, '2ch')
 })

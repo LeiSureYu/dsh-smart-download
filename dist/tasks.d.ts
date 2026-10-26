@@ -15,6 +15,14 @@ export interface RetryRequest {
     /** 该条目当时的带宽上限（批量里是均分后的份额） */
     maxBandwidthBytes?: number;
     timeoutMs?: number;
+    /**
+     * 该条目点名的连接数（`connections` 解析后的值）。
+     *
+     * 写进元数据是为了让「重试」尊重原选择：用户点名要 16 连接下到一半失败了，
+     * 点重试却悄悄回到 8，是同一类「报告的行为与用户的选择不一致」。
+     * 纯数字或字面量 `auto`，不含凭据，落盘无风险（与 maxBandwidthBytes 同理）。
+     */
+    connections?: number | 'auto';
     /** 原批次 ID，仅作分组标签 */
     batchId?: string;
 }

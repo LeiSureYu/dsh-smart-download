@@ -7,6 +7,7 @@
  * 通过把 Node 自身作为子进程来验证，不依赖 aria2 / curl / 网络。
  */
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import {
   chmodSync,
@@ -279,6 +280,17 @@ test('findAria2OnPath：空 PATH 返回 null；PATH 上有可执行的 aria2c �
     if (process.platform !== 'win32') {
       chmodSync(target, 0o755)
     }
+    // findAria2OnPath 判定「可用」的标准是 `aria2c --version` 退出码为 0，所以
+    // 先确认这份副本自己跑得起来，再断言能被找到 —— 否则在**动态链接**的 aria2c 上
+    // （macOS 的 @rpath/libaria2.0.dylib 依赖、部分 Linux 发行版同样如此）会假红：
+    // 复制走的是主程序，动态库还留在原目录，副本 `--version` 直接非零退出。
+    // 这不是插件缺陷，是测试对「二进制是静态的」这个前提的隐含假设。
+    const runnable = spawnSync(target, ['--version'], { encoding: 'utf-8' }).status === 0
+    if (!runnable) {
+      // 环境提供的 aria2c 是动态链接且依赖不在同一目录：跳过「能找到」这半条，
+      // 但空 PATH 分支已经在上面断言过了，用例不会因此变成空转。
+      return
+    }
     const found = findAria2OnPath(dir)
     assert.equal(found, target, 'PATH 上的可执行 aria2c 必须被找到')
   } finally {
@@ -339,10 +351,13 @@ test('取消文案（aria2 路径）：随包 aria2 的绝对路径收敛成 ari
     t.skip('本机无 aria2 子包，跳过 aria2 取消文案用例')
     return
   }
-  // 前提断言：随包 aria2 确实是带分隔符的绝对路径、且真的落在 node_modules 下 ——
-  // 否则「文案里不出现 node_modules」这条断言会因为命令本身干净而空转
-  assert.match(aria2Path, /[\\/]/, '前提：随包 aria2 的路径是带分隔符的绝对路径')
-  assert.match(aria2Path, /node_modules/i, '前提：该路径确实在 node_modules 下（否则测不到泄漏）')
+  // 前提断言：拿到的是一条带分隔符的绝对路径。
+  //
+  // 最初这里还要求「必须落在 node_modules 下」，依据是「只有随包子包才有 aria2」。
+  // 1.5.0 之后 macOS 走 PATH 查找（darwin 没有子包），路径变成 ~/.local/bin 之类，
+  // 于是那条断言在 mac 上必然失败。而它想守的东西（取消文案不泄漏绝对路径）
+  // 与路径在哪无关 —— 真正的断言是下面那条 assertNoAbsolutePath。
+  assert.match(aria2Path, /[\\/]/, '前提：aria2 的路径是带分隔符的绝对路径')
 
   const server = await startThrottledServer(4 * 1024 * 1024, { chunk: 32 * 1024, delayMs: 50 })
   const out = path.join(os.tmpdir(), `dsh-cancel-aria2-${Date.now()}.bin`)

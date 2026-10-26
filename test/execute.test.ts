@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -1651,12 +1652,19 @@ test('Content-Disposition：未传 output 时采用真实文件名，路径穿�
     try {
       const named = await run({ url: `${base}/download` })
       assert.equal(path.basename(named.path), 'real-name.zip')
-      assert.equal(path.dirname(named.path), workDir)
+      // 用 realpath 比较，而不是字符串相等：macOS 上 os.tmpdir() 给出 /var/...，
+      // 而产品侧会把路径 realpath 成 /private/var/...。两者指向同一个目录，
+      // 断言意图是「落在当前工作目录里」，不是「字符串一模一样」。
+      assert.equal(path.dirname(realpathSync(named.path)), realpathSync(workDir))
       assert.equal(existsSync(path.join(workDir, 'real-name.zip')), true)
 
       const evil = await run({ url: `${base}/evil` })
       assert.equal(path.basename(evil.path), 'evil.zip')
-      assert.equal(path.dirname(evil.path), workDir, '不得写到当前目录之外')
+      assert.equal(
+        path.dirname(realpathSync(evil.path)),
+        realpathSync(workDir),
+        '不得写到当前目录之外',
+      )
       assert.equal(existsSync(path.join(workDir, 'evil.zip')), true)
     } finally {
       process.chdir(cwdBefore)
@@ -1758,7 +1766,11 @@ test('批量：未传 output 时逐条 output 指向 Content-Disposition 的真�
     try {
       const result = await runBatch([{ url: `${base}/download` }])
       assert.equal(result.succeeded, 1)
-      assert.equal(result.results[0]!.output, path.join(workDir, 'batch-real-name.zip'))
+      // realpath 归一：macOS 的 os.tmpdir() 是 /var/...，产品侧会 realpath 成 /private/var/...
+      assert.equal(
+        realpathSync(result.results[0]!.output),
+        realpathSync(path.join(workDir, 'batch-real-name.zip')),
+      )
       assert.equal(result.results[0]!.path, result.results[0]!.output)
       assert.equal(existsSync(result.results[0]!.output), true)
     } finally {
@@ -1864,14 +1876,19 @@ test('1.4.0：调用方给相对 output 时，记录里仍是绝对路径（spaw
       const beforeJson = dlDir.length > 0 && existsSync(dlDir) ? filesIn(dlDir, '.json') : new Set<string>()
       const result = await run({ url: `${base}/relative-record.bin`, output: 'relative-record.bin' })
       assert.equal(result.success, true)
-      assert.equal(result.path, path.join(tmpRoot, 'relative-record.bin'), '返回的路径也必须是绝对路径')
+      // 同上的 realpath 归一：只关心「绝对且指向预期位置」，不关心 /var 与 /private/var
+      assert.equal(
+        realpathSync(result.path),
+        realpathSync(path.join(tmpRoot, 'relative-record.bin')),
+        '返回的路径也必须是绝对路径',
+      )
       const newJson = newFiles(beforeJson, filesIn(dlDir, '.json'))
       const task = JSON.parse(readFileSync(path.join(dlDir, newJson[0]!), 'utf-8')) as {
         outPath?: string
       }
       assert.equal(
-        task.outPath,
-        path.join(tmpRoot, 'relative-record.bin'),
+        realpathSync(task.outPath!),
+        realpathSync(path.join(tmpRoot, 'relative-record.bin')),
         '记录必须是绝对路径（否则删除时会按另一个 cwd 去猜）',
       )
       assert.equal(existsSync(path.join(tmpRoot, 'relative-record.bin')), true)

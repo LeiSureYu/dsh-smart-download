@@ -11,6 +11,7 @@ import { mkdir } from 'node:fs/promises';
 import { basename, delimiter as pathDelimiter, dirname, isAbsolute, join as joinPath, resolve as resolvePath, } from 'node:path';
 import { parseAria2Summary, parseCurlProgress, splitIntoLines, } from './progress-parse.js';
 import { headersToAria2Args, headersToCurlArgs } from './headers.js';
+import { MIN_CONNECTIONS, MAX_CONNECTIONS } from './types.js';
 const require = createRequire(import.meta.url);
 /**
  * 平台 → 子包映射表。
@@ -126,9 +127,18 @@ export function findAria2OnPath(envPath = process.env.PATH) {
 export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, headers, maxDownloadLimitBytes) {
     const dir = dirname(outputPath);
     const base = basename(outputPath);
+    // 最后一道保险：aria2 的 `-x` 只接受 1~16，超出直接以退出码 28 失败
+    // （实测 `-x 32` 报 "must be between 1 and 16"）。上游三条路径都已经用
+    // `parseConnections()` 校验过（工具入参、界面偏好、磁盘上的重试元数据），
+    // 所以这里正常永远不会触发；但只要有人新增一条调用而漏了校验，越界值就会
+    // 变成一次「下载直接失败」。夹一次的范围是 MIN~MAX，**不做四舍五入之外的
+    // 猜测**（2.5 这种交给 Math.round 反而会悄悄改用户的意图，故先取整再夹）。
+    // 为什么夹而不是抛错：这是兜底，不是校验点 —— 抛错会让一个本可以正常下载的
+    // 请求彻底失败，而夹到合法值至少还能下完。
+    const safeConcurrency = Math.min(MAX_CONNECTIONS, Math.max(MIN_CONNECTIONS, Math.round(concurrency)));
     const args = [
-        '-x', String(concurrency), // 单服务器最大连接数
-        '-s', String(concurrency), // 同时使用的连接数
+        '-x', String(safeConcurrency), // 单服务器最大连接数
+        '-s', String(safeConcurrency), // 同时使用的连接数
         // 最小分片大小：决定并发上限，删掉会让 -x/-s 失效，详见函数上方注释
         '-k', '1M',
         // 断点续传：仅在确认安全时开启（见 src/resume.ts）

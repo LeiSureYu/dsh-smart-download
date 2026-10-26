@@ -19,6 +19,15 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 		const react = require('react');
 
+		/**
+		 * 宿主菜单原语的引用（`Menu` 等），没有就 `null`。
+		 *
+		 * 在入口处求值一次即可：原语包是宿主自带的，运行期不会再变；每次渲染都
+		 * 去 require 一遍只会白白增加一次模块解析。取不到时选择器自动降级成
+		 * 原生 select，所以这里失败是**安全**的。
+		 */
+		var PRIMITIVES = null; // 在工厂函数末尾（定义 loadPrimitives 之后）赋值
+
 		/** Dictionary namespace owned by this plugin. */
 		const NS = 'smartdl';
 		/** Shared API carrier path; must match `API_PATH` in src/rpc.ts. */
@@ -2662,7 +2671,7 @@ window.__ModuleLoader__.load({
 								id: 'smartdl.connections',
 								order: 50,
 								locale: NS,
-								inject: () => ({ prefsStore: prefsStore }),
+								inject: () => ({ prefsStore: prefsStore, primitives: PRIMITIVES }),
 							},
 							SmartDlConnectionsPicker,
 						),
@@ -2746,12 +2755,33 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 原生 `<select>` 的**透明覆盖层**。
+		 * 打出宿主菜单原语的引用。
 		 *
-		 * 为什么不直接给 select 加样式：宿主这套界面的下拉在失焦后会留下一个
-		 * 焦点框，而 `conversation.input.right` 这一行里它比模型名显眼得多。
-		 * 把 select 变成铺满的透明层、由下面那个 span 显示文字，键盘与无障碍行为
-		 * 仍是浏览器原生的（不自己实现下拉），视觉却完全受控。
+		 * 为什么要用原语而不是自绘：模型选择器、思考等级、权限选择用的都是宿主这套
+		 * `Menu`（`MenuSurface` 的磨砂玻璃 + 圆角 + 高亮 + 打勾）。自绘一个 `<select>`
+		 * 会弹出**系统原生菜单**（灰白灰边、无主题、无圆角），在一排深色小控件里非常突兀。
+		 * 用原语之后，这个下拉与模型选择器在视觉上是同一个东西，宿主换主题/改圆角时
+		 * 也自动跟着变。
+		 *
+		 * 取不到原语时（宿主版本太老）退回 `null`，组件会降级成原来的原生 select ——
+		 * 功能不能因为装饰失败而消失。
+		 */
+		function loadPrimitives(requireFn) {
+			try {
+				const primitives = requireFn('@deepseek-ai/dsh-client-ui-primitives');
+				if (primitives && typeof primitives.Menu === 'function') return primitives;
+			} catch (err) {
+				// 忽略：下面统一按「没有原语」处理
+			}
+			return null;
+		}
+
+		/**
+		 * 原生 `<select>` 的透明覆盖层。
+		 *
+		 * 只在拿不到宿主菜单原语时用（老版本宿主的降级路径）。把 select 变成铺满的
+		 * 透明层、由下面的 span 显示文字：键盘与无障碍行为仍是浏览器原生的，
+		 * 视觉至少不出现系统默认的下拉箭头。
 		 */
 		const CONN_SELECT_STYLE = {
 			position: 'absolute',
@@ -2767,16 +2797,46 @@ window.__ModuleLoader__.load({
 		};
 
 		/**
+		 * 触发器（那一小行「下载连接数 9 v」）的样式。
+		 *
+		 * 数值与模型选择器的 `.ofTiQG_trigger` 逐项对齐：28px 高、13px 字、
+		 * `padding: 0 4px 0 8px`、`gap: 4`、`radius-sm`，hover 用同一个
+		 * `--dsw-alias-interactive-bg-hover`。字号/行高**走宿主变量**而不是写死 px ——
+		 * 用户在「设置 → 字号大小」里调大时这一行必须跟着变大。
+		 */
+		function connTriggerStyle(hover) {
+			return {
+				position: 'relative',
+				display: 'inline-flex',
+				alignItems: 'center',
+				gap: 4,
+				height: 28,
+				padding: '0 4px 0 8px',
+				borderRadius: 'var(--dsw-radius-sm, 6px)',
+				border: 'none',
+				background: hover ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+				color: 'var(--dsw-alias-label-secondary, #9ca3af)',
+				fontFamily: 'Inter, var(--dsw-font-family)',
+				fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+				fontWeight: 400,
+				lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))',
+				whiteSpace: 'nowrap',
+				cursor: 'pointer',
+				outline: 'none',
+			};
+		}
+
+		/**
 		 * 输入框右侧的「下载连接数」选择器。
 		 *
-		 * 尺寸与字体都抄自模型选择器（`@deepseek-ai/dsh-client-ui-model-selection`
-		 * 的 `.ofTiQG_trigger`），但字号/行高**走宿主变量**而不是写死 px ——
-		 * 用户在「设置 → 字号大小」里调大，这一行必须跟着变大，否则它会在
-		 * 一排同级元素里显得又细又小。
+		 * 两种渲染路径，外观一致优先：
+		 *   1. 有宿主菜单原语 → `Menu`（与模型选择器同一个组件、同一套主题变量）；
+		 *   2. 没有 → 原生 `<select>` 透明覆盖层（功能完整，外观是系统默认）。
 		 */
 		function SmartDlConnectionsPicker(props) {
 			const t = props.t;
 			const prefsStore = props.prefsStore;
+			const primitives = props.primitives || null;
 			const snapshot = react.useSyncExternalStore(
 				prefsStore.subscribe,
 				prefsStore.getSnapshot,
@@ -2789,45 +2849,33 @@ window.__ModuleLoader__.load({
 
 			const value = snapshot.connections;
 			const isAuto = value === 'auto';
-			const hint = isAuto
-				? t('connHintAuto')
-				: t('connHintFixed').replace('{n}', value);
+			const hint = isAuto ? t('connHintAuto') : t('connHintFixed').replace('{n}', value);
 			const title = t('connTitle') + '\n' + hint;
+			const [hover, setHover] = react.useState(false);
+			const [open, setOpen] = react.useState(false);
 
-			return react.createElement(
-				'label',
-				{
-					style: {
-						position: 'relative',
-						display: 'inline-flex',
-						alignItems: 'center',
-						gap: 4,
-						height: 28,
-						padding: '0 4px 0 8px',
-						borderRadius: 'var(--dsw-radius-sm, 6px)',
-						border: 'none',
-						background: 'transparent',
-						color: 'var(--dsw-alias-label-primary, #e5e7eb)',
-						// 字体族与同一行的模型选择器一致（Inter → 宿主正文字体回退）
-						fontFamily: 'Inter, var(--dsw-font-family)',
-						// 跟随宿主「设置 → 字号大小」的会话内容变量，而非固定 px；
-						// 基准值 13px 与模型选择器一致，用户调大/调小时同步变化。
-						fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
-						fontWeight: 400,
-						lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))',
-						whiteSpace: 'nowrap',
-						cursor: 'pointer',
-					},
-					// title 放到外层才真的能看到：原生 option 的 title 在多数浏览器里会被丢弃
-					title: snapshot.notice && snapshot.notice !== 'saved' ? title + '\n\n' : title,
-				},
-				// 标签不降透明度：模型选择器整条文字同亮，降低透明度会显得更细更灰。
-				react.createElement('span', null, t('connLabel')),
-				// 数值单独一个 span：`tabular-nums` + 固定宽度，切换 8→16 时
-				// 不会把右边的元素挤得左右抖动。
+			const items = react.useMemo(
+				() =>
+					CONNECTION_OPTIONS.map((option) => ({
+						id: option,
+						label: option === 'auto' ? t('connAuto') : option,
+						value: option,
+					})),
+				[t],
+			);
+
+			const onSelect = (option) => {
+				setOpen(false);
+				prefsStore.set(typeof option === 'string' ? option : String(option));
+			};
+
+			// 触发器内容：标签 + 当前值，两条路径共用。
+			const triggerChildren = [
+				react.createElement('span', { key: 'label' }, t('connLabel')),
 				react.createElement(
 					'span',
 					{
+						key: 'value',
 						style: {
 							display: 'inline-block',
 							minWidth: '2ch',
@@ -2837,27 +2885,84 @@ window.__ModuleLoader__.load({
 					},
 					isAuto ? t('connAuto') : value,
 				),
+			];
+
+			// 路径 1：宿主菜单原语 —— 外观与模型选择器同源。
+			//
+			// 关键：`Menu` 把 `anchor` 放进自己的根 span 里，并**用那个 span 的
+			// 包围盒做定位**（`rootRef.getBoundingClientRect()`）。所以按钮必须作为
+			// `anchor` 传进去、不能再自己套一层 div，否则定位锚点会变成外层容器。
+			if (primitives) {
+				const Menu = primitives.Menu;
+				const Chevron = primitives.IconChevronDownOutlineRegular;
+				const trigger = react.createElement(
+					'button',
+					{
+						type: 'button',
+						'aria-haspopup': 'menu',
+						'aria-expanded': open,
+						'aria-label': t('connLabel'),
+						title,
+						style: connTriggerStyle(hover || open),
+						onMouseEnter: () => setHover(true),
+						onMouseLeave: () => setHover(false),
+						onClick: () => setOpen((prev) => !prev),
+					},
+					...triggerChildren,
+					Chevron
+						? react.createElement(Chevron, {
+								size: 12,
+								style: {
+									flex: 'none',
+									opacity: 0.7,
+									// 展开时转 180°，与模型选择器的 `.chevronOpen` 一致
+									transition: 'transform .12s',
+									transform: open ? 'rotate(180deg)' : 'none',
+								},
+						  })
+						: null,
+				);
+
+				return react.createElement(Menu, {
+					open,
+					anchor: trigger,
+					items,
+					selectedId: value,
+					selection: 'check',
+					// 菜单向上展开：这一行贴在输入框底部，向下会挡住输入框
+					side: 'top',
+					// 右对齐：触发器靠近窗口右边，左对齐会让菜单冲出屏幕
+					align: 'end',
+					portal: true,
+					dense: false,
+					onSelect,
+					onClose: () => setOpen(false),
+				});
+			}
+
+			// 路径 2：降级 —— 原生 select 覆盖层。
+			return react.createElement(
+				'label',
+				{ style: connTriggerStyle(false), title },
+				...triggerChildren,
 				react.createElement(
 					'select',
 					{
 						style: CONN_SELECT_STYLE,
-						value: value,
+						value,
 						'aria-label': t('connLabel'),
-						title: title,
 						onChange: (event) => {
 							prefsStore.set(event.target.value);
 						},
 					},
-					CONNECTION_OPTIONS.map((option) =>
-						react.createElement(
-							'option',
-							{ key: option, value: option },
-							option === 'auto' ? t('connAuto') : option,
-						),
+					items.map((option) =>
+						react.createElement('option', { key: option.id, value: option.value }, option.label),
 					),
 				),
 			);
 		}
+
+		PRIMITIVES = loadPrimitives(require);
 
 		exports.apply = apply;
 		exports.inject = inject;

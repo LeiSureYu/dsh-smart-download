@@ -72,6 +72,45 @@ test('buildAria2Args concurrency 参数 -> -x/-s 跟随', () => {
   assert.equal(args[args.indexOf('-s') + 1], '4')
 })
 
+test('buildAria2Args 越界并发数被夹到 1~16（aria2 的 -x 只接受该区间）', () => {
+  // 最后一道保险：上游三条路径都校验过，但漏一条就会把越界值变成
+  // 「aria2 退出码 28，下载直接失败」。实测 -x 32 报 must be between 1 and 16。
+  const x = (n: number): { x: string; s: string } => {
+    const args = buildAria2Args('https://example.com/a.zip', 'a.zip', n)
+    return { x: args[args.indexOf('-x') + 1]!, s: args[args.indexOf('-s') + 1]! }
+  }
+
+  // 上界与下界
+  assert.deepEqual(x(16), { x: '16', s: '16' }, '合法上界原样保留')
+  assert.deepEqual(x(1), { x: '1', s: '1' }, '合法下界原样保留')
+  assert.deepEqual(x(8), { x: '8', s: '8' }, '合法中间值原样保留')
+
+  // 越界：夹住，而不是透传（透传会让 aria2 直接失败）
+  assert.deepEqual(x(32), { x: '16', s: '16' }, '超过上限夹到 16')
+  assert.deepEqual(x(999), { x: '16', s: '16' }, '远超上限也夹到 16')
+  assert.deepEqual(x(0), { x: '1', s: '1' }, '0 夹到 1')
+  assert.deepEqual(x(-5), { x: '1', s: '1' }, '负数夹到 1')
+
+  // 小数先取整再夹：不能让 `-x 2.5` 传下去（aria2 不认）
+  assert.deepEqual(x(2.5), { x: '3', s: '3' }, '2.5 取整为 3')
+  assert.deepEqual(x(16.4), { x: '16', s: '16' }, '16.4 取整为 16')
+  assert.deepEqual(x(0.4), { x: '1', s: '1' }, '0.4 取整为 0 再夹到 1')
+
+  // -x 与 -s 必须同值：两者不一致时 aria2 的 -s 会被 -x 实际限制，
+  // 面板显示的连接数和真实并发会对不上。
+  for (const n of [0, 1, 8, 16, 32, -5, 2.5]) {
+    const got = x(n)
+    assert.equal(got.x, got.s, `-x 与 -s 必须一致（输入 ${n}）`)
+  }
+
+  // 夹完的值一定是整数且落在区间内 —— 这才是 aria2 真正接受的命令行
+  for (const n of [0, 1, 8, 16, 32, -5, 2.5, 1e9]) {
+    const v = Number(x(n).x)
+    assert.equal(Number.isInteger(v), true, `必须是整数（输入 ${n}）`)
+    assert.equal(v >= 1 && v <= 16, true, `必须落在 1~16（输入 ${n}）`)
+  }
+})
+
 test('buildAria2Args resume=false -> 不含 -c，其余开关与 -o 位置不变', () => {
   // 0.6.0 起 aria2 路径默认 resume=true，但 downloadWithAria2 显式传 false 时
   // 必须真的不带 -c：全量重下（例如续传指纹对不上）走的正是这条路。

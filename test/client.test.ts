@@ -2959,15 +2959,59 @@ test('管理器：行级操作在途时禁用删除按钮，Delete 键也不打�
 
 /* ------------------- 1.7.0：输入框旁的「下载连接数」选择器 ------------------- */
 
-/** 找到渲染树里的连接数下拉（唯一的 <select>）。 */
+/**
+ * 找到原语路径下的触发器按钮。
+ *
+ * 它不在 `children` 里 —— `Menu` 是把它当作 `anchor` **prop** 收进去的
+ * （再渲染到自己的根 span 内，见 lib/Menu 的 `return jsxs("span", {children: [anchor, list]})`）。
+ * `findAll` 只沿 children 走，所以这里单独从 prop 上取。
+ */
+function pickerTrigger(tree: unknown): FakeElement {
+  const menu = findAll(tree, (el) => el.type === 'primitive-menu')[0]
+  assert.ok(menu, '有原语时必须渲染出宿主 Menu')
+  const anchor = menu.props.anchor as FakeElement | undefined
+  assert.ok(anchor, 'Menu 的 anchor 必须是触发器按钮（定位靠它的包围盒）')
+  return anchor
+}
+
+/** 找到渲染树里的连接数下拉（唯一的 <select>，只在降级路径下存在）。 */
 function pickerSelect(tree: unknown): FakeElement {
   const found = findAll(tree, (el) => el.type === 'select')
-  assert.equal(found.length, 1, '选择器必须渲染出且只渲染出一个 <select>（原生下拉，不自造弹层）')
+  assert.equal(found.length, 1, '降级路径必须渲染出且只渲染出一个 <select>')
   return found[0]
 }
 
-/** 造一个只含选择器的装配：注入一个可编程的 callHost 替身。 */
-function mountPicker(callHost: (body: Record<string, unknown>) => Promise<unknown>): {
+/**
+ * 宿主菜单原语的替身。
+ *
+ * 真身在浏览器里是一整套带 CSS 模块的组件，node 下 require 不了（`.module.css`
+ * 没有 loader）。替身只保留**我们真正依赖的契约**：`Menu` 接收
+ * `{open, anchor, items, selectedId, selection, side, align, portal, onSelect, onClose}`，
+ * `IconChevronDownOutlineRegular` 接收 `{size, style}`。
+ *
+ * 注意替身必须产出**字符串 type** 的节点：测试的 `renderHostTree` 会把
+ * `typeof type === 'function'` 的节点当组件展开，展开后 'primitive-menu'
+ * 这个标记就不在树上了，断言会扑空（最初的假红就是踩了这个）。
+ */
+function makePrimitives(): Record<string, unknown> {
+  return {
+    Menu: (props: Record<string, unknown>) => ({ type: 'primitive-menu', props }),
+    IconChevronDownOutlineRegular: (props: Record<string, unknown>) => ({
+      type: 'primitive-chevron',
+      props,
+    }),
+  }
+}
+
+/**
+ * 造一个只含选择器的装配：注入一个可编程的 callHost 替身。
+ *
+ * @param options.primitives - 传 `false` 模拟「老版本宿主没有原语包」，用来测降级路径。
+ */
+function mountPicker(
+  callHost: (body: Record<string, unknown>) => Promise<unknown>,
+  options: { primitives?: boolean } = {},
+): {
   render: () => unknown
   store: { load: () => Promise<void>; set: (v: string) => Promise<void> }
 } {
@@ -3017,8 +3061,10 @@ function mountPicker(callHost: (body: Record<string, unknown>) => Promise<unknow
     remote: { session: { openWorkspacePath: () => Promise.resolve({ ok: true }) } },
     layout: { selectPanel: () => undefined },
   }
+  const withPrimitives = options.primitives !== false
   ;(spec.factory((name) => {
     if (name === 'react') return react
+    if (name === '@deepseek-ai/dsh-client-ui-primitives' && withPrimitives) return makePrimitives()
     throw new Error(`unexpected require: ${name}`)
   }) as { apply: (ctx: unknown) => void }).apply(ctx)
 
@@ -3042,18 +3088,40 @@ function mountPicker(callHost: (body: Record<string, unknown>) => Promise<unknow
   }
 }
 
-test('选择器：渲染出标签、当前值与 1..16 + auto 的选项', () => {
+test('选择器：有宿主原语时走 Menu，且渲染出 auto + 1..16 全部选项', () => {
   const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
   const tree = picker.render()
-  const select = pickerSelect(tree)
-  const values = findAll(select, (el) => el.type === 'option').map((el) => el.props.value)
-  assert.deepEqual(values, [
+  const menu = findAll(tree, (el) => el.type === 'primitive-menu')[0]
+  assert.ok(menu, '有原语时必须走宿主 Menu（原生 select 会弹系统菜单，与模型选择器画风割裂）')
+  const items = menu.props.items as Array<{ id: string; label: string }>
+  assert.deepEqual(items.map((it) => it.id), [
     'auto',
     '1', '2', '3', '4', '5', '6', '7', '8',
     '9', '10', '11', '12', '13', '14', '15', '16',
   ])
-  assert.match(textOf(tree), /connLabel/, '标签文案来自字典，不能写死中文')
-  assert.match(textOf(tree), /connAuto/, 'auto 显示为「自动」而不是字面量 auto')
+  // Menu 靠 entry.id === selectedId 打勾，所以 items 的 id 必须就是存盘的那个值
+  assert.equal(menu.props.selectedId, 'auto')
+  assert.equal(menu.props.selection, 'check', '打勾式选中，与模型选择器一致')
+  assert.equal(findAll(tree, (el) => el.type === 'select').length, 0, '有原语时不该再渲染原生 select')
+  const triggerText = textOf(menu.props.anchor)
+  assert.match(triggerText, /connLabel/, '标签文案来自字典，不能写死中文')
+  assert.match(triggerText, /connAuto/, 'auto 显示为「自动」而不是字面量 auto')
+})
+
+test('选择器：菜单向上展开、右对齐，不会盖住输入框也不会冲出屏幕', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const menu = findAll(picker.render(), (el) => el.type === 'primitive-menu')[0]
+  assert.equal(menu.props.side, 'top', '这一行贴在输入框底部，向下展开会挡住输入框')
+  assert.equal(menu.props.align, 'end', '触发器靠近窗口右边，左对齐会让菜单冲出屏幕')
+  assert.equal(menu.props.portal, true, '弹层必须 portal 到 body，否则会被输入框的 overflow 裁掉')
+})
+
+test('选择器：触发器是按钮而不是 select，且带 aria 状态', () => {
+  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
+  const btn = pickerTrigger(picker.render())
+  assert.equal(btn.type, 'button', '触发器必须是 <button>（与模型选择器同构）')
+  assert.equal(btn.props['aria-haspopup'], 'menu')
+  assert.equal(btn.props['aria-expanded'], false, '未展开时 aria-expanded 必须是 false')
 })
 
 test('选择器：初始值来自 Host（不是写死 auto）', async () => {
@@ -3062,15 +3130,16 @@ test('选择器：初始值来自 Host（不是写死 auto）', async () => {
   )
   await picker.store.load()
   const tree = picker.render()
-  assert.equal(pickerSelect(tree).props.value, '9', 'read 回来的值必须直接反映到下拉上')
-  assert.match(textOf(tree), /9/)
+  const menu = findAll(tree, (el) => el.type === 'primitive-menu')[0]
+  assert.equal(menu.props.selectedId, '9', 'read 回来的值必须直接反映到菜单选中项')
+  assert.match(textOf(menu.props.anchor), /9/, '触发器上也要显示 9')
 })
 
 test('选择器：Host 读失败时静默回落 auto（不显示错误、不影响下载）', async () => {
   const picker = mountPicker(() => Promise.reject(new Error('host down')))
   await picker.store.load()
   const tree = picker.render()
-  assert.equal(pickerSelect(tree).props.value, 'auto')
+  assert.equal(findAll(tree, (el) => el.type === 'primitive-menu')[0].props.selectedId, 'auto')
 })
 
 test('选择器：切换值会向 Host 写 prefs 端点，并以返回值回填显示', async () => {
@@ -3082,7 +3151,7 @@ test('选择器：切换值会向 Host 写 prefs 端点，并以返回值回填�
   await picker.store.set('12')
   assert.deepEqual(calls[0], { op: 'write', connections: '12' }, '写请求必须带 op:write 与字符串值')
   const tree = picker.render()
-  assert.equal(pickerSelect(tree).props.value, '12')
+  assert.equal(findAll(tree, (el) => el.type === 'primitive-menu')[0].props.selectedId, '12')
 })
 
 test('选择器：Host 拒绝写入时退回真实值，并记下失败（不能假装成功）', async () => {
@@ -3092,43 +3161,84 @@ test('选择器：Host 拒绝写入时退回真实值，并记下失败（不能
     }
     return Promise.resolve({ ok: true, value: { prefs: { connections: 4 } } })
   })
-  // 先建立「磁盘上的真值」是 4
   await picker.store.load()
   await picker.store.set('16')
-  const tree = picker.render()
-  // 乐观更新做过，但 Host 说失败 —— 显示必须回到磁盘真值那一侧的可解释状态
+  const selected = findAll(picker.render(), (el) => el.type === 'primitive-menu')[0].props.selectedId
   assert.ok(
-    pickerSelect(tree).props.value === '4' || pickerSelect(tree).props.value === '16',
+    selected === '4' || selected === '16',
     '失败的写入不能把界面卡在一个谁都没确认过的值上',
   )
 })
 
-test('选择器：select 是铺满的透明覆盖层（视觉由 span 承载，行为仍是原生下拉）', () => {
-  const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
-  const style = pickerSelect(picker.render()).props.style as Record<string, unknown>
-  assert.equal(style.position, 'absolute')
-  assert.equal(style.opacity, 0, '原生 select 必须不可见，否则会露出浏览器自绘的箭头')
-  assert.equal(style.width, '100%')
-})
-
 test('选择器：字号/行高走宿主 CSS 变量，不写死 px（跟随「设置 → 字号大小」）', () => {
   const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
-  const tree = picker.render() as FakeElement
-  const label = findAll(tree, (el) => el.type === 'label')[0]
-  assert.ok(label, '外层必须是 <label>（点文字也能展开下拉）')
-  const style = label.props.style as Record<string, unknown>
+  const btn = pickerTrigger(picker.render())
+  const style = btn.props.style as Record<string, unknown>
   assert.match(String(style.fontSize), /var\(--dsh-content-font-size/, '字号必须用变量')
   assert.match(String(style.lineHeight), /var\(--dsh-content-font-delta/, '行高必须用变量')
   assert.equal(style.fontWeight, 400, '与模型选择器一致：400 不加粗')
+  assert.equal(style.height, 28, '与模型选择器的 .trigger 同高')
 })
 
 test('选择器：数值用等宽数字并预留宽度，切换 8→16 不会左右抖动', () => {
   const picker = mountPicker(() => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }))
   const tree = picker.render() as FakeElement
-  const label = findAll(tree, (el) => el.type === 'label')[0]
-  const spans = findAll(label, (el) => el.type === 'span')
+  const btn = pickerTrigger(tree)
+  const spans = findAll(btn, (el) => el.type === 'span')
   const valueSpan = spans[spans.length - 1]
   const style = valueSpan.props.style as Record<string, unknown>
   assert.equal(style.fontVariantNumeric, 'tabular-nums')
   assert.equal(style.minWidth, '2ch')
+})
+
+test('选择器（降级）：宿主没有原语包时退回原生 select，功能仍完整', () => {
+  const picker = mountPicker(
+    () => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }),
+    { primitives: false },
+  )
+  const tree = picker.render()
+  assert.equal(
+    findAll(tree, (el) => el.type === 'primitive-menu').length,
+    0,
+    '取不到原语时不能假装有菜单',
+  )
+  const select = pickerSelect(tree)
+  const values = findAll(select, (el) => el.type === 'option').map((el) => el.props.value)
+  assert.deepEqual(values, [
+    'auto',
+    '1', '2', '3', '4', '5', '6', '7', '8',
+    '9', '10', '11', '12', '13', '14', '15', '16',
+  ])
+  assert.match(textOf(tree), /connLabel/)
+})
+
+test('选择器（降级）：原生 select 仍是透明覆盖层，不露出浏览器自绘箭头', () => {
+  const picker = mountPicker(
+    () => Promise.resolve({ ok: true, value: { prefs: { connections: 'auto' } } }),
+    { primitives: false },
+  )
+  const style = pickerSelect(picker.render()).props.style as Record<string, unknown>
+  assert.equal(style.position, 'absolute')
+  assert.equal(style.opacity, 0, '原生 select 必须不可见，否则会露出浏览器自绘的箭头')
+  assert.equal(style.width, '100%')
+
+  const label = findAll(picker.render(), (el) => el.type === 'label')[0]
+  assert.ok(label, '降级路径外层必须是 <label>（点文字也能展开下拉）')
+  const labelStyle = label.props.style as Record<string, unknown>
+  assert.match(String(labelStyle.fontSize), /var\(--dsh-content-font-size/)
+  assert.match(String(labelStyle.lineHeight), /var\(--dsh-content-font-delta/)
+})
+
+test('选择器（降级）：切换值同样写 prefs 端点', async () => {
+  const calls: unknown[] = []
+  const picker = mountPicker(
+    (body) => {
+      calls.push(body)
+      return Promise.resolve({ ok: true, value: { prefs: { connections: 7 } } })
+    },
+    { primitives: false },
+  )
+  await picker.store.set('7')
+  assert.deepEqual(calls[0], { op: 'write', connections: '7' })
+  assert.equal(pickerSelect(picker.render()).props.value, '7')
 })

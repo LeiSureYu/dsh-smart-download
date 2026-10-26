@@ -19,15 +19,17 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: use the app's own CLI, or the **Plugins** page in the sidebar.
 
-> **What's new in 1.6.0** — the download manager can now **cancel** running tasks and
-> **retry** failed or cancelled ones in place (same `taskId`; headers and credentials are
-> never persisted or replayed). 1.5.0 added generic checksum verification, the `ifExists`
-> policy, disk-space preflight and server-supplied filenames.
+> **What's new in 1.7.0** — the connection count is now **yours to choose**: pick `auto` or
+> any number from **1 to 16** in the dropdown next to the composer, and it sticks for every
+> later download. 1.6.0 added cancelling and retrying tasks in place from the download manager;
+> 1.5.0 added generic checksum verification, the `ifExists` policy, disk-space preflight and
+> server-supplied filenames.
 > See [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 
 - **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
 - **Zero configuration** — the aria2 binaries ship with the plugin via npm `optionalDependencies`; no manual download and no PATH setup.
 - **Visible progress** — on profiles with the web UI (`web`, or the desktop app) a live panel sits in the bottom-right corner (file name / percentage / speed / ETA) and clears itself when the download finishes.
+- **Connection count is yours to pick** — a dropdown next to the composer selects `auto` or 1–16, and the choice sticks.
 - **Resumable downloads** — call again with the same `url` + `output` to resume an interrupted download.
 - **Queryable progress** — the `download_status` tool reads back percentage / speed / ETA of recent tasks.
 - **Manage it after it starts** — the download manager can cancel running tasks and retry failed / cancelled ones in place, reusing the same `taskId`; headers and credentials are never persisted or replayed. See [Download manager](#download-manager-140).
@@ -68,6 +70,10 @@ for why no macOS build is shipped (the blocker is provenance, not availability).
   - [Rather not pick a prefix by hand: `mirror: "auto"`](#rather-not-pick-a-prefix-by-hand-mirror-auto)
   - [Use your own mirrors: `DSH_SMARTDL_MIRRORS`](#use-your-own-mirrors-dsh_smartdl_mirrors)
 - [Resumable downloads](#resumable-downloads)
+- [Choosing the connection count by hand](#choosing-the-connection-count-by-hand)
+  - [Priority](#priority)
+  - [Tiering in `auto` mode](#tiering-in-auto-mode)
+  - [Why the cap is 16](#why-the-cap-is-16)
 - [Downloading several files: `targets` / `maxBandwidth` / `timeoutMs`](#downloading-several-files-targets--maxbandwidth--timeoutms)
   - [Exactly one of `url` / `targets`, and the batch cap](#exactly-one-of-url--targets-and-the-batch-cap)
   - [Per-entry results and "partial success"](#per-entry-results-and-partial-success)
@@ -435,6 +441,42 @@ Why curl's resume is conditional (measured, do not make it unconditional):
 > Measured locally (curl 8.13.0): when the server **ignores** the `Range` we sent and a partial file already exists, `curl -C -` **fails outright with exit code 33** — a 1000-byte resource with an existing 400-byte partial → `exit 33`, file left intact at 400 bytes, while the **same scenario without** `-C -` re-downloads the full file successfully. In other words 33 can also mean "the server ignored your Range request", which is another phrasing of the official definition (range error) — but it does **not** license the inference that the server permanently cannot resume (that is what 36 would mean).
 > With Range support, all three cases are measured correct: resuming a partial file, re-running after completion, and starting from scratch with no file present.
 
+## Choosing the connection count by hand
+
+To the right of the composer (left of the model selector) there is a **connection-count** dropdown: `auto` or **any integer from 1 to 16**. The choice takes effect immediately and is kept across sessions — after that you just send a link and the agent downloads with that count.
+
+The value lives in `$DSH_HOME/smart-dl-prefs.json`:
+
+```json
+{
+  "connections": 9
+}
+```
+
+If reading it fails, the plugin falls back to `auto`; a broken preferences file never fails a download.
+
+### Priority
+
+```
+Explicit parameter (use 4 for this one call)
+      ↓ not given
+The value saved in the UI
+      ↓ never set
+auto (tier picked by file size)
+```
+
+### Tiering in `auto` mode
+
+| File size | Behaviour |
+| --- | --- |
+| < 1MB | curl, single connection |
+| 1MB – 8MB | aria2, 4 connections |
+| ≥ 8MB | aria2, 8 connections |
+
+### Why the cap is 16
+
+aria2's `-x/--max-connection-per-server` accepts **1–16**; passing 32 fails outright.
+
 ## Downloading several files: `targets` / `maxBandwidth` / `timeoutMs`
 
 `url` downloads one file; `targets` downloads a batch **inside a single call** (the core P0 deliverable):
@@ -514,6 +556,7 @@ What happens after a timeout (these are definitions, not implementation details)
 | `headers` | object | no | Extra request headers, e.g. `{"Authorization": "Bearer …"}`. Headers the plugin manages itself (`Range` / `Accept-Encoding` / `Host`, …) are rejected, as are values containing newlines or control characters. |
 | `maxBandwidth` | string | no | A bandwidth cap **shared by every task in this call**, e.g. `"2M"`, `"500K"` or a plain byte count like `"1500000"` (K/M/G are 1024-based). With a batch the cap is split across the entries running concurrently, so the whole batch stays under it. Becomes aria2's `--max-overall-download-limit` / curl's `--limit-rate`. |
 | `timeoutMs` | integer | no | **Per-entry** timeout in milliseconds, `1000`–`1800000` (30 minutes is the cap — this is a synchronous call). A timed-out entry is terminated and reported as failed; in a batch the other entries keep running and **entries that already succeeded are never re-labelled**. Omit it to wait indefinitely. |
+| `connections` | string | no | Connection count: `"auto"` or `"1"`–`"16"`. When omitted, the value saved in the UI is used. |
 
 ### `download_status`
 

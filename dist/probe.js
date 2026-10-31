@@ -1,3 +1,21 @@
+/**
+ * URL 探测逻辑：
+ * 1. 优先发 HEAD 请求；
+ * 2. 若 HEAD 返回 405 或缺少 Content-Length，改用 GET + Range: bytes=0-0；
+ * 3. 根据 Accept-Ranges / 206 状态码与文件大小判定是否值得多线程；
+ * 4. 任何探测失败都返回“不支持多线程”，触发 curl 回退。
+ *
+ * ⚠️ Accept-Encoding（0.7.0 实测，改动前务必先读）：
+ * Node 的 `fetch` 默认带 `accept-encoding: gzip, deflate`，于是探测拿到的
+ * `Content-Length` 可能是**压缩后**的长度。而真正负责下载的工具
+ * —— curl（默认）与 aria2（默认）—— 不声明 / 声明空的 Accept-Encoding，
+ * 服务器返回**未压缩**的字节流。实测（真实 body 5000 B、gzip 后 41 B）：
+ *   fetch 默认 HEAD -> 41；fetch `identity` -> 5000；curl 默认 -I -> 5000；
+ *   curl --compressed -> 41；aria2 默认落盘 -> 5000 B。
+ * 因此探测**必须**强制 `accept-encoding: identity`，否则任何支持 gzip 的
+ * 服务器都会让 0.7.0 的大小校验 100% 误报（把正确的下载判成损坏）。
+ */
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { normalizeContentEncoding } from './verify.js';
 import { headersToFetchInit } from './headers.js';
 /** 单次请求默认超时 5 秒 */
@@ -109,20 +127,47 @@ function toProbeResult(decision, contentType, acceptRanges, etag, lastModified, 
  * 由 Range GET 的响应（206 + Content-Range）给出真实结论。
  */
 export async function probeUrl(url, externalSignal, options = {}) {
+    const dispatcher = options.proxy === undefined
+        ? undefined
+        : (options.dispatcherFactory ?? ((proxy) => new ProxyAgent(proxy)))(options.proxy);
+    // 无代理时不构造 dispatcher，走全局 fetch —— 与 1.6.0 的请求形态逐字段相同
+    if (dispatcher === undefined) {
+        return probeUrlWithDispatcher(url, externalSignal, options, undefined);
+    }
+    try {
+        return await probeUrlWithDispatcher(url, externalSignal, options, dispatcher);
+    }
+    finally {
+        // 探测结束即关闭 dispatcher（1.7.0 收口）：每次探测都 new 一个 ProxyAgent，
+        // 不关闭的话 keepalive 连接会一直引用它，批量场景（50 条 = 50 次探测）会积压
+        // 几十个空闲连接。close() 等在途请求排空后关闭空闲连接；清理失败不影响
+        // 已得出的探测结论，静默即可。
+        void dispatcher.close().catch(() => { });
+    }
+}
+async function probeUrlWithDispatcher(url, externalSignal, options, dispatcher) {
     const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
     const threshold = options.threshold ?? DEFAULT_THRESHOLD;
     // 调用方的头与探测强制的 identity 合并；identity 最后合并，覆盖不掉
     // （见 src/headers.ts：`accept-encoding` 同时在保留名单里，两头都堵）。
     const baseHeaders = headersToFetchInit(options.headers, PROBE_ACCEPT_ENCODING);
+    // 代理（1.7.0）：给了 proxy 时探测也必须走它 —— 探测决定「要不要多线程」与
+    // 「期望字节数」，走的是与真实下载不同的网络路径时，结论就建立在一个下载时
+    // 根本不成立的响应上（与 src/headers.ts 的「探测与下载同一套头」是同一类错位，
+    // 只是发生在网络层）。
+    const doFetch = dispatcher === undefined
+        ? fetch
+        : undiciFetch;
     // 1. 先尝试 HEAD
     let head = null;
     let headError;
     try {
-        head = await fetch(url, {
+        head = await doFetch(url, {
             method: 'HEAD',
             headers: baseHeaders,
             redirect: 'follow',
             signal: mergeSignal(externalSignal, timeout),
+            ...(dispatcher === undefined ? {} : { dispatcher }),
         });
     }
     catch (err) {
@@ -145,11 +190,12 @@ export async function probeUrl(url, externalSignal, options = {}) {
     if (!head || head.status === 405 || headLength === undefined) {
         let get;
         try {
-            get = await fetch(url, {
+            get = await doFetch(url, {
                 method: 'GET',
                 headers: { ...baseHeaders, Range: 'bytes=0-0' },
                 redirect: 'follow',
                 signal: mergeSignal(externalSignal, timeout),
+                ...(dispatcher === undefined ? {} : { dispatcher }),
             });
         }
         catch (err) {

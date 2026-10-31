@@ -166,6 +166,66 @@ export function headersToAria2Args(headers) {
     return args;
 }
 /**
+ * 是否携带了调用方自定义的头。
+ *
+ * 判定收口成一个函数：`downloader.ts` 靠它决定「头走 argv（旧行为）还是
+ * stdin（1.7.0 起）」。没有自定义头时两条链路的命令行必须与 1.6.0 **逐字节
+ * 相同**（既有回归项），因此「没有头」的分支必须精确到「头表为空对象也算没有」。
+ */
+export function hasCustomHeaders(headers) {
+    return headers !== undefined && Object.keys(headers).length > 0;
+}
+/**
+ * 转成 curl `-K -`（从 stdin 读配置）的配置文本。
+ *
+ * 为什么存在（1.7.0）：`-H 'Authorization: …'` 会把头值放进**进程命令行**，
+ * 同一台机器上的任何进程（任务管理器 / `wmic process get commandline` /
+ * `ps -ef`）都能读走。改走 stdin 后，凭证只经过管道，不落盘、不进 argv ——
+ * README 里「不要把长期凭证写进 headers」的告警由此解除。
+ *
+ * 格式与转义规则（curl 配置文件语法）：
+ *   - 每条头一行：`header = "Name: value"`（等价于命令行的 `-H 'Name: value'`）；
+ *   - 双引号内的 `\` 与 `"` 必须转义；头名受 TOKEN_RE 约束不可能含这两类字符，
+ *     因此对整段 `Name: value` 统一转义即可；
+ *   - CR / LF / NUL 已在 `buildRequestHeaders()` 拒绝，值必然是单行的 ——
+ *     这是「一行一头」结构成立的前提，两边必须一起守住。
+ */
+export function headersToCurlConfig(headers) {
+    if (!headers)
+        return '';
+    const lines = [];
+    for (const [name, value] of Object.entries(headers)) {
+        const escaped = `${name}: ${value}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        lines.push(`header = "${escaped}"`);
+    }
+    return lines.join('\n') + '\n';
+}
+/**
+ * 转成 aria2 `--input-file=-`（从 stdin 读下载列表与 per-download 选项）的文本。
+ *
+ * 与 curl 同一个动机：`--header` 的值会出现在进程命令行里。aria2 的头是
+ * **per-download** 选项，只能挂在 input file 的 URI 条目下 —— 因此 URI 本身
+ * 也要搬进 stdin（argv 里不再有 URL，也不再有 `-o`：`out` 作为 input file
+ * 的选项与 URI 写在一起，避免「argv 的 -o 与 input file 条目是否配对」这类
+ * 由实现细节决定的语义）。
+ *
+ * 格式（aria2 input file 语法）：
+ *   - 第一行：URI，**顶格**（带缩进的行会被当成上一行的选项）；
+ *   - 之后每行一个选项，**必须以空白开头**：`out=<文件名>`、`header=<Name>: <value>`。
+ *
+ * 头值里不能出现换行 —— 与 curl 一样由 `buildRequestHeaders()` 的注入拒绝保证；
+ * 头值里出现 `=` 没有问题（aria2 按第一个 `=` 切分名字与值）。
+ */
+export function headersToAria2InputFile(url, headers, outputName) {
+    const lines = [url, `  out=${outputName}`];
+    if (headers) {
+        for (const [name, value] of Object.entries(headers)) {
+            lines.push(`  header=${name}: ${value}`);
+        }
+    }
+    return lines.join('\n') + '\n';
+}
+/**
  * 转成 `fetch` 的 headers 入参（探测用）。
  * 探测强制 `accept-encoding: identity`，这里最后合并，确保调用方覆盖不了。
  */

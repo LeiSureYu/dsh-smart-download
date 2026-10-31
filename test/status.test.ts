@@ -721,3 +721,68 @@ test('无 DSH_PROGRESS_DIR 且无 session 时 taskDir 为空串，轨道二仍�
     rmSync(downloadDir, { recursive: true, force: true })
   }
 })
+
+/* ===================== 1.7.0：batchId 过滤 ===================== */
+
+test('batchId 过滤：只返回该批的任务，total 是过滤后的未截断总数', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-a', [
+      { v: 1, task: 'dl-a', pct: 10, msg: '下载中', batch: 'b-one' },
+    ])
+    writeJsonl(taskDir, 'dl-b', [
+      { v: 1, task: 'dl-b', pct: 20, msg: '下载中', batch: 'b-one' },
+    ])
+    writeJsonl(taskDir, 'dl-c', [
+      { v: 1, task: 'dl-c', pct: 30, msg: '下载中', batch: 'b-two' },
+    ])
+    const snap = readDownloadStatus(DEFAULT_STATUS_LIMIT, undefined, undefined, 'b-one')
+    assert.deepEqual(
+      snap.tasks.map((t) => t.id).sort(),
+      ['dl-a', 'dl-b'],
+      '只应返回 b-one 这一批',
+    )
+    assert.equal(snap.total, 2, 'total 是过滤后的未截断总数')
+    assert.equal(snap.ok, true)
+  })
+})
+
+test('batchId 过滤：无匹配批次时空列表且 ok 仍为 true（与「读不到」区分）', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-a', [
+      { v: 1, task: 'dl-a', pct: 10, msg: '下载中', batch: 'b-one' },
+    ])
+    const snap = readDownloadStatus(DEFAULT_STATUS_LIMIT, undefined, undefined, 'b-none')
+    assert.deepEqual(snap.tasks, [])
+    assert.equal(snap.total, 0)
+    assert.equal(snap.ok, true, '目录可读时过滤不命中不是故障')
+    assert.equal(snap.scanFailedDirs, undefined)
+  })
+})
+
+test('batchId 与 taskId 同时给：两个条件都要满足（AND）', () => {
+  withDirs(({ taskDir }) => {
+    writeJsonl(taskDir, 'dl-a', [
+      { v: 1, task: 'dl-a', pct: 10, msg: '下载中', batch: 'b-one' },
+    ])
+    writeJsonl(taskDir, 'dl-b', [
+      { v: 1, task: 'dl-b', pct: 20, msg: '下载中', batch: 'b-two' },
+    ])
+    const hit = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-b', undefined, 'b-two')
+    assert.deepEqual(hit.tasks.map((t) => t.id), ['dl-b'])
+    const miss = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-a', undefined, 'b-two')
+    assert.deepEqual(miss.tasks, [], '批次对不上时同 taskId 也查不到')
+  })
+})
+
+test('batchId 过滤：老记录没有 batch 字段时收敛成空串，不参与任何批次', () => {
+  withDirs(({ taskDir }) => {
+    // 0.5.0 之前的老记录：没有 batch（读取端收敛成 ''）
+    writeJsonl(taskDir, 'dl-old', [
+      { v: 1, task: 'dl-old', pct: 99, msg: '下载中（aria2）' },
+    ])
+    const snap = readDownloadStatus(DEFAULT_STATUS_LIMIT, undefined, undefined, 'b-one')
+    assert.deepEqual(snap.tasks, [], 'batch 为空串的老记录不匹配任何批次 ID')
+    const all = readDownloadStatus()
+    assert.equal(all.tasks[0]?.batch, '')
+  })
+})

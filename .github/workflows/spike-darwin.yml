@@ -1,0 +1,81 @@
+name: Spike - build aria2 for macOS
+
+# SPIKE：单独验证「从官方源码在 macOS runner 上自构建 aria2」这条链路，
+# 不发布任何东西、不依赖 tag。用途：
+#   1. 首次接入时跑通构建（静态链接参数可能需要按真实日志迭代）；
+#   2. 升级 aria2 版本 / 修改构建脚本时的前置验证 —— 不必为此打一个正式 tag。
+# 构建脚本与 publish.yml 的 binaries-darwin job 共用同一份
+# scripts/build-aria2-darwin.sh，这里多跑一步「装回子包目录后本地集成冒烟」。
+
+on:
+  workflow_dispatch:
+  # push 也触发(仅当相关文件变更):分支一推就开始验证,不必先建 PR。
+  # 本 workflow 不发布任何东西,跑空的代价只是两次 macOS 构建。
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'scripts/build-aria2-darwin.sh'
+      - 'packages/aria2-darwin-*/**'
+      - '.github/workflows/spike-darwin.yml'
+  pull_request:
+    paths:
+      - 'scripts/build-aria2-darwin.sh'
+      - 'packages/aria2-darwin-*/**'
+      - '.github/workflows/spike-darwin.yml'
+
+jobs:
+  build:
+    name: Build (darwin ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            outdir: packages/aria2-darwin-arm64
+          - arch: x64
+            runner: macos-15-intel
+            outdir: packages/aria2-darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build aria2 from pinned official source
+        run: bash scripts/build-aria2-darwin.sh ${{ matrix.outdir }}
+
+      - name: Integration smoke - real aria2 download through the plugin's own arg builder
+        # 比脚本内的冒烟更进一步：用本仓库 dist/ 里的 buildAria2Invocation
+        # 拼命令行（与真实下载路径完全一致，含「头走 stdin」的 1.7.0 形态）
+        # 再下一次文件，证明「构建出的二进制 + 本插件的调用方式」整条链路可用。
+        # dist/ 已随仓库提交（纯 ESM），不需要任何安装步骤。
+        run: |
+          set -euo pipefail
+          node --version
+          node --input-type=module -e "
+          import { spawn } from 'node:child_process'
+          import { createServer } from 'node:http'
+          import { readFileSync, statSync } from 'node:fs'
+          import { pathToFileURL } from 'node:url'
+          const { buildAria2Invocation } = await import(pathToFileURL('./dist/downloader.js').href)
+          const body = Buffer.alloc(1024 * 1024, 0x41)
+          const server = createServer((req, res) => {
+            res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
+            res.end(body)
+          })
+          await new Promise((r) => server.listen(0, '127.0.0.1', r))
+          const port = server.address().port
+          const out = 'smoke-bin/aria2c-smoke.bin'
+          const { args, stdin } = buildAria2Invocation(
+            'http://127.0.0.1:' + port + '/smoke.bin', out, 4, false,
+            { 'User-Agent': 'spike-darwin/1.0' },
+          )
+          const child = spawn('${{ matrix.outdir }}/bin/aria2c', args, { stdio: ['pipe', 'inherit', 'inherit'] })
+          if (stdin !== undefined) child.stdin.end(stdin)
+          const code = await new Promise((resolve) => child.on('close', resolve))
+          const ok = code === 0 && statSync(out).size === body.length && readFileSync(out).equals(body)
+          server.close()
+          if (!ok) { console.error('exit:', code); process.exit(1) }
+          console.log('integration smoke OK: 1MiB downloaded via stdin-args path, bytes verified')
+          "

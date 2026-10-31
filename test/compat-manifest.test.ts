@@ -227,7 +227,13 @@ test('compat: bundle patch 仍然指向仓库里的 cordis.patch.yml', () => {
 test('发布包内容：只带面向用户的文件，内部规划/评审文档不随包发出', () => {
   // 用 npm **自己的**打包结果做断言，而不是只检查 `files` 字段：
   // 到底会发出哪些文件由 npm 的匹配规则决定，只有真 pack 一次才知道。
-  const out = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+  //
+  // 为什么是单串命令而不是 `spawnSync('npm', [args], { shell })`（1.7.0 收口）：
+  // Node 24 起「args 数组 + shell: true」触发 DEP0190 弃用告警（参数不被转义、
+  // 只做拼接）。这里改传**单个命令字符串** —— 参数全是本测试写死的字面量、
+  // 没有任何用户输入，拼接没有注入面；POSIX 走 /bin/sh、Windows 走 cmd.exe，
+  // npm（.cmd）两者都能找到。
+  const out = spawnSync('npm pack --dry-run --json', {
     cwd: root,
     encoding: 'utf8',
     // Windows 上 npm 是 npm.cmd，需要 shell 才能找到

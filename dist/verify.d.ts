@@ -107,4 +107,6 @@ export declare const VERIFY_MISMATCH_NEXT_STEP = "\u4E0B\u4E00\u6B65\uFF1A\u4EA7
 /** 把校验失败翻译成给人看的错误信息 */
 export declare function describeMismatch(outcome: Extract<VerifyOutcome, {
     kind: 'mismatch';
-}>): string;
+}>, 
+/** 期望值的来源（1.7.0 起）：`remote`（默认，与 1.6.0 逐字节相同）或 `caller`（expectedSize） */
+source?: 'remote' | 'caller'): string;

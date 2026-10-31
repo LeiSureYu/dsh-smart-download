@@ -53,33 +53,32 @@ export declare function getAria2Path(): string | null;
  */
 export declare function findAria2OnPath(envPath?: string | undefined): string | null;
 /**
- * 拼接 aria2 命令行参数。
- * -x/-s 使用决策得到的并发数；
- * -c 开启断点续传（同名文件已存在时从断点继续，而不是重头再来）；
- * --allow-overwrite=true 允许覆盖已存在的同名文件；
- * --summary-interval=1 每秒输出摘要，--show-console-readout=false 关闭原地刷新，
- * 便于以“每行一条”的方式解析进度。
- * 注意：aria2 的 -o 只接受相对文件名，目录必须通过 -d 指定。
- *
- * 为什么必须显式 `--allow-overwrite=true`（0.6.0 实测）：
- * aria2 默认遇到同名文件不会覆盖，而是**另存为 `f.1.bin`**（实测：目录里同时
- * 出现 `f.bin` 400 字节旧内容与 `f.1.bin` 1000 字节新内容）。这时下载「成功」
- * 了，但调用方拿到的 `output` 路径指向的仍是那个旧文件 —— 一次静默的路径错位。
- * 加上该开关后实测落盘正确覆盖为 1000 字节。
- * 注意它与 `-c` 并不冲突：`-c` 只在能续传时生效，不能续传时该开关接管覆盖语义。
- *
- * ⚠️ 为什么 `-k 1M` 绝对不能删（0.7.0 实测）：
- * aria2 默认 `min-split-size=20M`。文件小于 20MB 时它**完全不分片** ——
- * 实测 8MB 文件在默认参数下只发出 1 个不带 Range 的 GET，`-x 16 -s 16`
- * 形同虚设，吞吐和单连接一样。带上 `-k 1M` 后同一文件立刻分成 8 片，
- * 吞吐从 1.61 MB/s 涨到 11.99 MB/s。删掉这一行会让 `decideConcurrency()`
- * 的所有档位**静默退化成单连接**，且没有任何报错。
- * 另外实测 `--min-split-size=512K` 会让 aria2 以退出码 28 直接失败，
- * 说明该值有下限，1M 是当前验证过的安全取值。
+ * 拼接 aria2 的 argv 形态（头随命令行、URI 与 `-o` 在 argv 末尾）。
+ * 各开关的实测依据见 `aria2CommonArgs` 的注释；有自定义头时调用方应当改用
+ * `buildAria2Invocation`（头走 stdin，凭证不进命令行）。
  */
-export declare function buildAria2Args(url: string, outputPath: string, concurrency?: number, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number): string[];
+export declare function buildAria2Args(url: string, outputPath: string, concurrency?: number, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): string[];
+/** 一次子进程调用的完整形态：argv + 可选的 stdin 文本（头配置等）。 */
+export interface ProcessInvocation {
+    args: string[];
+    /** 提供给子进程 stdin 的文本；缺省表示不写 stdin（行为与 1.6.0 相同） */
+    stdin?: string;
+}
 /**
- * 拼接 curl 回退命令行参数。
+ * 一次 aria2 调用的完整形态（1.7.0）。
+ *
+ * 分两条路径，切换条件是「有没有调用方自定义的头」：
+ * - **无自定义头**：与 `buildAria2Args` 完全同一份 argv —— 没有需要藏的东西，
+ *   就不引入新的命令行形态（既有回归项：无头时命令行逐字节不变）；
+ * - **有自定义头**：头值改走 stdin（`--input-file=-`），凭证不再出现在进程
+ *   命令行里（任务管理器 / `ps -ef` 可读走 argv 上的 `Authorization`）。
+ *   aria2 的头是 **per-download** 选项，只能挂在 input file 的 URI 条目下，
+ *   因此 URI 与 `-o` 也一起搬进 stdin（`out=` 写在条目下），argv 只留全局开关、
+ *   `-d` 与 `--input-file=-`。
+ */
+export declare function buildAria2Invocation(url: string, outputPath: string, concurrency?: number, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): ProcessInvocation;
+/**
+ * 拼接 curl 回退命令行参数（argv 形态，头随命令行）。
  * --progress-bar 强制输出百分比进度（即使 stderr 不是终端）；
  * resume=true 时追加 -C - 开启断点续传；
  * 不使用 --silent，避免把进度条一并抑制，错误信息由 --show-error 输出。
@@ -99,7 +98,16 @@ export declare function buildAria2Args(url: string, outputPath: string, concurre
  * 因此**不能**拿 33 推断「这台服务器永久不支持续传」（那要按 **36 = bad download resume** 判）；
  * 上面那句「服务器不支持 Range」只是对那次实测场景的描述，不是对 33 的定义。
  */
-export declare function buildCurlArgs(url: string, outputPath: string, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number): string[];
+export declare function buildCurlArgs(url: string, outputPath: string, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): string[];
+/**
+ * 一次 curl 调用的完整形态（1.7.0）。
+ *
+ * 分两条路径，切换条件与 aria2 相同 —— 有没有调用方自定义的头：
+ * - **无自定义头**：与 `buildCurlArgs` 完全同一份 argv（无头时命令行逐字节不变）；
+ * - **有自定义头**：头配置改走 stdin（`-K -`，从标准输入读 curl 配置），凭证
+ *   不再出现在进程命令行里。URL 不含机密，保留在 argv；`-o` 与其余开关不变。
+ */
+export declare function buildCurlInvocation(url: string, outputPath: string, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): ProcessInvocation;
 /** 累积流式数据并按行（兼容 \r / \n）吐出完整片段，保留半截内容 */
 export declare class LineBuffer {
     private pending;
@@ -158,7 +166,7 @@ export declare function describeExitCode(command: string, code: number | null, s
  * 一旦如此，取消下载就永远等不到 close 事件，`smart_download` 会挂在那里不返回，
  * 用户按了取消却看不出任何变化。兜底必须对所有平台生效。
  */
-export declare function runProcess(command: string, args: string[], signal?: AbortSignal, handlers?: ProcessLineHandlers): Promise<void>;
+export declare function runProcess(command: string, args: string[], signal?: AbortSignal, handlers?: ProcessLineHandlers, stdin?: string): Promise<void>;
 /**
  * 一次 aria2 下载观测到的吞吐（P1-2 的原始数据）。
  *
@@ -196,6 +204,6 @@ export declare function summarySpeedBytes(spd: string): number | undefined;
  *
  * @returns 观测到的吞吐；一次摘要都没解析出来（下载太快 / 输出被改）时返回 `undefined`
  */
-export declare function downloadWithAria2(aria2Path: string, url: string, outputPath: string, concurrency: number, signal?: AbortSignal, reporter?: ProgressReporter, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number): Promise<Aria2Observation | undefined>;
+export declare function downloadWithAria2(aria2Path: string, url: string, outputPath: string, concurrency: number, signal?: AbortSignal, reporter?: ProgressReporter, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): Promise<Aria2Observation | undefined>;
 /** 使用 curl 单线程下载（回退方案），解析进度条百分比透传给 reporter */
-export declare function downloadWithCurl(url: string, outputPath: string, signal?: AbortSignal, reporter?: ProgressReporter, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number): Promise<void>;
+export declare function downloadWithCurl(url: string, outputPath: string, signal?: AbortSignal, reporter?: ProgressReporter, resume?: boolean, headers?: RequestHeaders, maxDownloadLimitBytes?: number, proxy?: string): Promise<void>;

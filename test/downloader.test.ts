@@ -211,6 +211,8 @@ test('buildAria2Args 不带请求头 -> 一条 --header 都不产出', () => {
 
 test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正确', () => {
   assert.deepEqual(Object.keys(ARIA2_TARGETS).sort(), [
+    'darwin-arm64',
+    'darwin-x64',
     'linux-arm64',
     'linux-x64',
     'win32-arm64',
@@ -224,18 +226,26 @@ test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正
   assert.equal(ARIA2_TARGETS['linux-x64']?.bin, 'bin/aria2c')
   assert.equal(ARIA2_TARGETS['linux-arm64']?.pkg, '@leisureyu/dsh-aria2-linux-arm64')
   assert.equal(ARIA2_TARGETS['linux-arm64']?.bin, 'bin/aria2c')
+  // darwin（1.7.0）：由本仓库 CI 从官方源码构建，子包声明 os:["darwin"]
+  assert.equal(ARIA2_TARGETS['darwin-x64']?.pkg, '@leisureyu/dsh-aria2-darwin-x64')
+  assert.equal(ARIA2_TARGETS['darwin-x64']?.bin, 'bin/aria2c')
+  assert.equal(ARIA2_TARGETS['darwin-arm64']?.pkg, '@leisureyu/dsh-aria2-darwin-arm64')
+  assert.equal(ARIA2_TARGETS['darwin-arm64']?.bin, 'bin/aria2c')
 })
 
-test('aria2TargetFor：Windows 用 .exe，Linux 用无后缀二进制', () => {
+test('aria2TargetFor：Windows 用 .exe，Linux / macOS 用无后缀二进制', () => {
   assert.equal(aria2TargetFor('win32', 'x64')?.bin, 'bin/aria2c.exe')
   assert.equal(aria2TargetFor('win32', 'arm64')?.bin, 'bin/aria2c.exe')
   assert.equal(aria2TargetFor('linux', 'x64')?.bin, 'bin/aria2c')
   assert.equal(aria2TargetFor('linux', 'arm64')?.bin, 'bin/aria2c')
+  assert.equal(aria2TargetFor('darwin', 'x64')?.bin, 'bin/aria2c')
+  assert.equal(aria2TargetFor('darwin', 'arm64')?.bin, 'bin/aria2c')
 })
 
 test('aria2TargetFor：未支持平台返回 null（回退 curl）', () => {
-  assert.equal(aria2TargetFor('darwin', 'x64'), null)
-  assert.equal(aria2TargetFor('darwin', 'arm64'), null)
+  // darwin 自 1.7.0 起受支持（CI 自构建子包），从「未支持」名单移除；
+  // 这里换用同样不被支持的平台守住「未列入 -> null」这条规则。
+  assert.equal(aria2TargetFor('sunos', 'x64'), null)
   assert.equal(aria2TargetFor('linux', 'ia32'), null)
   assert.equal(aria2TargetFor('freebsd', 'x64'), null)
 })

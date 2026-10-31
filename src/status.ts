@@ -294,11 +294,15 @@ function collectFromDir(
  * @param limit 最多返回多少个任务，默认 10
  * @param taskId 指定任务 ID 时只返回该任务
  * @param session 当前会话；用于定位轨道一的目录（缺省时轨道一目录为 null）
+ * @param batchId 按批次 ID 过滤（1.7.0 新增）。与 `taskId` 同时给时两个条件
+ *   都要满足（AND）。`total` 是**过滤后**的未截断总数 —— 它的既有语义是
+ *   「本次查询能看到的真实总数」，过滤也是查询的一部分。
  */
 export function readDownloadStatus(
   limit: number = DEFAULT_STATUS_LIMIT,
   taskId?: string,
   session?: ProgressSession,
+  batchId?: string,
 ): DownloadStatusSnapshot {
   const taskDir = resolveTaskProgressDir(session)
   const downloadDir = resolveDownloadProgressDir()
@@ -340,6 +344,7 @@ export function readDownloadStatus(
 
   let tasks = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt)
   if (taskId) tasks = tasks.filter((t) => t.id === taskId)
+  if (batchId) tasks = tasks.filter((t) => t.batch === batchId)
 
   const total = tasks.length
   const cap =

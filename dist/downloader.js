@@ -10,7 +10,7 @@ import { statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { basename, delimiter as pathDelimiter, dirname, isAbsolute, join as joinPath, resolve as resolvePath, } from 'node:path';
 import { parseAria2Summary, parseCurlProgress, splitIntoLines, } from './progress-parse.js';
-import { headersToAria2Args, headersToCurlArgs } from './headers.js';
+import { hasCustomHeaders, headersToAria2Args, headersToAria2InputFile, headersToCurlArgs, headersToCurlConfig, } from './headers.js';
 const require = createRequire(import.meta.url);
 /**
  * 平台 → 子包映射表。
@@ -99,13 +99,17 @@ export function findAria2OnPath(envPath = process.env.PATH) {
     return null;
 }
 /**
- * 拼接 aria2 命令行参数。
+ * aria2 各形态共用的开关。
  * -x/-s 使用决策得到的并发数；
  * -c 开启断点续传（同名文件已存在时从断点继续，而不是重头再来）；
  * --allow-overwrite=true 允许覆盖已存在的同名文件；
  * --summary-interval=1 每秒输出摘要，--show-console-readout=false 关闭原地刷新，
  * 便于以“每行一条”的方式解析进度。
  * 注意：aria2 的 -o 只接受相对文件名，目录必须通过 -d 指定。
+ *
+ * 为什么抽出来：argv 形态（`buildAria2Args`）与 stdin 形态（`buildAria2Invocation`）
+ * 都必须带上同一组开关 —— aria2 对未知或缺失的参数是**静默忽略**的，任何一处漏写
+ * 都不会报错，只能靠「字面量只有一份」保证两形态不漂移。
  *
  * 为什么必须显式 `--allow-overwrite=true`（0.6.0 实测）：
  * aria2 默认遇到同名文件不会覆盖，而是**另存为 `f.1.bin`**（实测：目录里同时
@@ -122,14 +126,17 @@ export function findAria2OnPath(envPath = process.env.PATH) {
  * 的所有档位**静默退化成单连接**，且没有任何报错。
  * 另外实测 `--min-split-size=512K` 会让 aria2 以退出码 28 直接失败，
  * 说明该值有下限，1M 是当前验证过的安全取值。
+ *
+ * `--all-proxy`（1.7.0）：本条目生效的代理地址（http(s)），与探测共用同一解析
+ * 结果（src/proxy.ts），三层（探测 / aria2 / curl）才不会各走各的网络路径。
+ * aria2 **不读**代理环境变量（官方手册明示），因此环境变量里配的代理必须在这里
+ * 显式落到命令行上；未启用代理时这一项整个不出现。
  */
-export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, headers, maxDownloadLimitBytes) {
-    const dir = dirname(outputPath);
-    const base = basename(outputPath);
-    const args = [
+function aria2CommonArgs(concurrency, resume, maxDownloadLimitBytes, proxy) {
+    return [
         '-x', String(concurrency), // 单服务器最大连接数
         '-s', String(concurrency), // 同时使用的连接数
-        // 最小分片大小：决定并发上限，删掉会让 -x/-s 失效，详见函数上方注释
+        // 最小分片大小：决定并发上限，删掉会让 -x/-s 失效，详见 buildAria2Args 上方注释
         '-k', '1M',
         // 断点续传：仅在确认安全时开启（见 src/resume.ts）
         ...(resume ? ['-c'] : []),
@@ -149,6 +156,20 @@ export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, 
         ...(maxDownloadLimitBytes === undefined
             ? []
             : [`--max-overall-download-limit=${String(maxDownloadLimitBytes)}`]),
+        // 代理（可选）：缺省时同样整个不出现，命令行与无代理时逐字节相同。
+        ...(proxy === undefined ? [] : [`--all-proxy=${proxy}`]),
+    ];
+}
+/**
+ * 拼接 aria2 的 argv 形态（头随命令行、URI 与 `-o` 在 argv 末尾）。
+ * 各开关的实测依据见 `aria2CommonArgs` 的注释；有自定义头时调用方应当改用
+ * `buildAria2Invocation`（头走 stdin，凭证不进命令行）。
+ */
+export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, headers, maxDownloadLimitBytes, proxy) {
+    const dir = dirname(outputPath);
+    const base = basename(outputPath);
+    const args = [
+        ...aria2CommonArgs(concurrency, resume, maxDownloadLimitBytes, proxy),
         // 自定义头（UA / Referer / …）与探测用的是同一份，见 src/headers.ts
         ...headersToAria2Args(headers),
     ];
@@ -159,30 +180,48 @@ export function buildAria2Args(url, outputPath, concurrency = 8, resume = true, 
     return args;
 }
 /**
- * 拼接 curl 回退命令行参数。
- * --progress-bar 强制输出百分比进度（即使 stderr 不是终端）；
- * resume=true 时追加 -C - 开启断点续传；
- * 不使用 --silent，避免把进度条一并抑制，错误信息由 --show-error 输出。
+ * 一次 aria2 调用的完整形态（1.7.0）。
  *
- * 为什么续传是条件式的（实测结论，勿改成无条件）：
- * curl -C - 在服务器**不支持** Range 且本地已有半截文件时，会以退出码 33 直接失败
- * （实测：1000 字节资源、已有 400 字节半包 -> exit 33，文件保持 400 字节不损坏）。
- * 而不带 -C - 时同一个场景能正常全量重新下载成功。
- * 因此只在探测确认支持 Range（或文件尚不存在）时才加 -C -。
- * 支持 Range 的场景实测三种情况均正确：半包续传、已完成后重跑、无文件从头下。
- *
- * 退出码 33 的含义要按官方定义读（1.3.0 收口）：**33 = HTTP range error**，即「我们发出去的
- * Range 请求没被接受」。它既可能是服务器真的不支持 Range，也可能只是**忽略了这一次**请求带上的
- * Range —— t8 复现时 curl 自己的 stderr 就是
- * `HTTP server does not seem to support byte ranges. Cannot resume.`，
- * 注意是 does not *seem*：那是 curl 的推测，不是服务器给出的声明。
- * 因此**不能**拿 33 推断「这台服务器永久不支持续传」（那要按 **36 = bad download resume** 判）；
- * 上面那句「服务器不支持 Range」只是对那次实测场景的描述，不是对 33 的定义。
+ * 分两条路径，切换条件是「有没有调用方自定义的头」：
+ * - **无自定义头**：与 `buildAria2Args` 完全同一份 argv —— 没有需要藏的东西，
+ *   就不引入新的命令行形态（既有回归项：无头时命令行逐字节不变）；
+ * - **有自定义头**：头值改走 stdin（`--input-file=-`），凭证不再出现在进程
+ *   命令行里（任务管理器 / `ps -ef` 可读走 argv 上的 `Authorization`）。
+ *   aria2 的头是 **per-download** 选项，只能挂在 input file 的 URI 条目下，
+ *   因此 URI 与 `-o` 也一起搬进 stdin（`out=` 写在条目下），argv 只留全局开关、
+ *   `-d` 与 `--input-file=-`。
  */
-export function buildCurlArgs(url, outputPath, resume = false, headers, maxDownloadLimitBytes) {
-    // 用条件展开代替 `splice(2, 0, ...)`：位置魔法意味着「在数组字面量中间插入
-    // 一个元素」，一旦前面插入/删除任何开关，续传开关就会插错位置（曾经一次
-    // 误插让 `-o` 与输出路径分离）。条件展开让顺序由字面量本身表达。
+export function buildAria2Invocation(url, outputPath, concurrency = 8, resume = true, headers, maxDownloadLimitBytes, proxy) {
+    if (!hasCustomHeaders(headers)) {
+        return {
+            args: buildAria2Args(url, outputPath, concurrency, resume, headers, maxDownloadLimitBytes, proxy),
+        };
+    }
+    const dir = dirname(outputPath);
+    const args = [
+        ...aria2CommonArgs(concurrency, resume, maxDownloadLimitBytes, proxy),
+        '--input-file=-',
+    ];
+    if (dir && dir !== '.') {
+        args.push('-d', isAbsolute(dir) ? dir : resolvePath(dir));
+    }
+    return {
+        args,
+        stdin: headersToAria2InputFile(url, headers, basename(outputPath)),
+    };
+}
+/**
+ * curl 各形态共用的开关（argv 形态与 stdin 形态都必须带上；`-o` 两种形态都在）。
+ *
+ * 为什么抽出来：与 aria2 同一条理由 —— curl 对未知或缺失的参数是**静默忽略**的，
+ * 字面量只有一份才保证两形态不漂移。续传与退出码 33 的实测依据见下方
+ * `buildCurlArgs` 的注释。
+ *
+ * `-x`（1.7.0）：本条目生效的代理地址（http(s)）。curl 自己会读代理环境变量，
+ * 但探测（undici）与 aria2 不会 —— 显式落参数、三层共用同一解析结果
+ * （src/proxy.ts）才能保证一致；未启用代理时这一项整个不出现。
+ */
+function curlCommonArgs(outputPath, resume, maxDownloadLimitBytes, proxy) {
     return [
         '--progress-bar',
         '-L', // 跟随重定向
@@ -205,10 +244,60 @@ export function buildCurlArgs(url, outputPath, resume = false, headers, maxDownl
         ...(maxDownloadLimitBytes === undefined
             ? []
             : ['--limit-rate', String(maxDownloadLimitBytes)]),
+        // 代理（可选）：缺省时整个不出现，命令行与无代理时逐字节相同。
+        ...(proxy === undefined ? [] : ['-x', proxy]),
+    ];
+}
+/**
+ * 拼接 curl 回退命令行参数（argv 形态，头随命令行）。
+ * --progress-bar 强制输出百分比进度（即使 stderr 不是终端）；
+ * resume=true 时追加 -C - 开启断点续传；
+ * 不使用 --silent，避免把进度条一并抑制，错误信息由 --show-error 输出。
+ *
+ * 为什么续传是条件式的（实测结论，勿改成无条件）：
+ * curl -C - 在服务器**不支持** Range 且本地已有半截文件时，会以退出码 33 直接失败
+ * （实测：1000 字节资源、已有 400 字节半包 -> exit 33，文件保持 400 字节不损坏）。
+ * 而不带 -C - 时同一个场景能正常全量重新下载成功。
+ * 因此只在探测确认支持 Range（或文件尚不存在）时才加 -C -。
+ * 支持 Range 的场景实测三种情况均正确：半包续传、已完成后重跑、无文件从头下。
+ *
+ * 退出码 33 的含义要按官方定义读（1.3.0 收口）：**33 = HTTP range error**，即「我们发出去的
+ * Range 请求没被接受」。它既可能是服务器真的不支持 Range，也可能只是**忽略了这一次**请求带上的
+ * Range —— t8 复现时 curl 自己的 stderr 就是
+ * `HTTP server does not seem to support byte ranges. Cannot resume.`，
+ * 注意是 does not *seem*：那是 curl 的推测，不是服务器给出的声明。
+ * 因此**不能**拿 33 推断「这台服务器永久不支持续传」（那要按 **36 = bad download resume** 判）；
+ * 上面那句「服务器不支持 Range」只是对那次实测场景的描述，不是对 33 的定义。
+ */
+export function buildCurlArgs(url, outputPath, resume = false, headers, maxDownloadLimitBytes, proxy) {
+    // 用条件展开代替 `splice(2, 0, ...)`：位置魔法意味着「在数组字面量中间插入
+    // 一个元素」，一旦前面插入/删除任何开关，续传开关就会插错位置（曾经一次
+    // 误插让 `-o` 与输出路径分离）。条件展开让顺序由字面量本身表达。
+    return [
+        ...curlCommonArgs(outputPath, resume, maxDownloadLimitBytes, proxy),
         // 自定义头（UA / Referer / …）与探测用的是同一份，见 src/headers.ts
         ...headersToCurlArgs(headers),
         url,
     ];
+}
+/**
+ * 一次 curl 调用的完整形态（1.7.0）。
+ *
+ * 分两条路径，切换条件与 aria2 相同 —— 有没有调用方自定义的头：
+ * - **无自定义头**：与 `buildCurlArgs` 完全同一份 argv（无头时命令行逐字节不变）；
+ * - **有自定义头**：头配置改走 stdin（`-K -`，从标准输入读 curl 配置），凭证
+ *   不再出现在进程命令行里。URL 不含机密，保留在 argv；`-o` 与其余开关不变。
+ */
+export function buildCurlInvocation(url, outputPath, resume = false, headers, maxDownloadLimitBytes, proxy) {
+    if (!hasCustomHeaders(headers)) {
+        return {
+            args: buildCurlArgs(url, outputPath, resume, headers, maxDownloadLimitBytes, proxy),
+        };
+    }
+    return {
+        args: [...curlCommonArgs(outputPath, resume, maxDownloadLimitBytes, proxy), '-K', '-', url],
+        stdin: headersToCurlConfig(headers),
+    };
 }
 /** 确保输出文件所在目录存在 */
 async function ensureOutputDir(outputPath) {
@@ -254,6 +343,16 @@ export const EXIT_CODE_DESCRIPTIONS = Object.freeze({
         33: {
             reason: 'HTTP Range 请求未被服务器接受',
             next: '本地半包已删除，重跑一次会全量重新下载',
+        },
+        // 36 的官方定义（man page，2026-10-30 从 man.archlinux.org 镜像核对原文）：
+        // "Bad download resume. Could not continue an earlier aborted download."
+        // 它与 33 不是一回事：33 是「这次发的 Range 没被接受」（可能只是服务器忽略），
+        // 36 是「续传本身就续不下去」。本插件只有在 planResume() 证实同源后才会带上
+        // `-C -`，因此出现 36 说明服务器在核对通过之后仍拒绝继续 —— 半包保留，
+        // 删掉它全量重下是唯一确定可行的下一步。
+        36: {
+            reason: '无法从断点续传（bad download resume）：服务器拒绝了继续上一次中断下载的请求',
+            next: '删除本地半包后重跑一次，会全量重新下载；也可在下载管理器里删除该文件后重试',
         },
         56: {
             reason: '接收数据失败：连接被重置或对端中途关闭',
@@ -337,12 +436,20 @@ export function describeExitCode(command, code, signal, stderrTail) {
  * 一旦如此，取消下载就永远等不到 close 事件，`smart_download` 会挂在那里不返回，
  * 用户按了取消却看不出任何变化。兜底必须对所有平台生效。
  */
-export function runProcess(command, args, signal, handlers = {}) {
+export function runProcess(command, args, signal, handlers = {}, stdin) {
     return new Promise((resolve, reject) => {
         let child;
         try {
             const options = { windowsHide: true };
             child = spawn(command, args, options);
+            if (stdin !== undefined) {
+                // 1.7.0：自定义请求头经 stdin 喂给子进程（curl `-K -` / aria2
+                // `--input-file=-`），凭证不再出现在进程命令行里。子进程若因参数错误
+                // 立即退出，write / end 会触发 stdin 的 'error'（EPIPE）—— 这里挂空
+                // 监听防未处理异常，真正的失败由 close 分支的非零退出码如实上报。
+                child.stdin?.on('error', () => { });
+                child.stdin?.end(stdin);
+            }
         }
         catch (err) {
             reject(err);
@@ -457,9 +564,10 @@ export function summarySpeedBytes(spd) {
  *
  * @returns 观测到的吞吐；一次摘要都没解析出来（下载太快 / 输出被改）时返回 `undefined`
  */
-export async function downloadWithAria2(aria2Path, url, outputPath, concurrency, signal, reporter, resume = true, headers, maxDownloadLimitBytes) {
+export async function downloadWithAria2(aria2Path, url, outputPath, concurrency, signal, reporter, resume = true, headers, maxDownloadLimitBytes, proxy) {
     await ensureOutputDir(outputPath);
-    const args = buildAria2Args(url, outputPath, concurrency, resume, headers, maxDownloadLimitBytes);
+    // 有自定义头时头走 stdin（凭证不进命令行），无头时 argv 与 1.6.0 逐字节相同
+    const { args, stdin } = buildAria2Invocation(url, outputPath, concurrency, resume, headers, maxDownloadLimitBytes, proxy);
     let observed;
     await runProcess(aria2Path, args, signal, {
         onStdout: (line) => {
@@ -484,13 +592,14 @@ export async function downloadWithAria2(aria2Path, url, outputPath, concurrency,
                 };
             }
         },
-    });
+    }, stdin);
     return observed;
 }
 /** 使用 curl 单线程下载（回退方案），解析进度条百分比透传给 reporter */
-export async function downloadWithCurl(url, outputPath, signal, reporter, resume = false, headers, maxDownloadLimitBytes) {
+export async function downloadWithCurl(url, outputPath, signal, reporter, resume = false, headers, maxDownloadLimitBytes, proxy) {
     await ensureOutputDir(outputPath);
-    const args = buildCurlArgs(url, outputPath, resume, headers, maxDownloadLimitBytes);
+    // 有自定义头时头走 stdin（`-K -`，凭证不进命令行），无头时 argv 与 1.6.0 逐字节相同
+    const { args, stdin } = buildCurlInvocation(url, outputPath, resume, headers, maxDownloadLimitBytes, proxy);
     await runProcess('curl', args, signal, {
         onStderr: (line) => {
             const pct = parseCurlProgress(line);
@@ -498,5 +607,5 @@ export async function downloadWithCurl(url, outputPath, signal, reporter, resume
                 reporter.report(pct, '下载中（curl）');
             }
         },
-    });
+    }, stdin);
 }

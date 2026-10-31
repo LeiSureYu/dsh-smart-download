@@ -11,9 +11,12 @@ on:
 
 # 结构说明：
 #   check job 做类型检查 / 构建 / 测试，但不发布 —— 它跑在 PR、main push 与手动触发上。
-#   binaries-windows / binaries-linux 两个 job 只负责「取二进制 + 校验哈希」；
+#   binaries-windows / binaries-linux 两个 job 只负责「取第三方二进制 + 校验哈希」；
+#   binaries-darwin job 负责「从官方源码自构建」—— aria2 官方不发 macOS 二进制，
+#   第三方候选过不了可信门槛（docs/COMPATIBILITY.md），信任模型是「信本仓库的 CI」：
+#   源码 pin SHA256、otool 断言只链系统库、构建产物附 SLSA provenance。
 #   publish job 统一在 Linux 上构建、测试、打包、发布。
-#   二进制与发布只在 tag push 或手动触发时执行：PR 上跑一次要下 4 份二进制，
+#   二进制与发布只在 tag push 或手动触发时执行：PR 上跑一次要下/构建 6 份二进制，
 #   既慢又和这次的改动无关。
 #   为什么发布必须在 Linux：npm 打包会记录文件的执行位，Windows 上打包
 #   会把 Linux 二进制记成 0644（不可执行），装完直接调用会失败。
@@ -168,9 +171,58 @@ jobs:
           path: staging
           if-no-files-found: error
 
+  binaries-darwin:
+    name: Build aria2 from official source (darwin ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # attest-build-provenance 签发 provenance 必需
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # runner 标签与 2026-10 的 runner-images README 对齐：
+          # macos-15 = Apple Silicon（arm64），macos-15-intel = Intel（x64）。
+          # macos-13/14 已退役；脚本会核对 uname -m 与子包声明的 cpu 一致。
+          - arch: arm64
+            runner: macos-15
+            outdir: packages/aria2-darwin-arm64
+          - arch: x64
+            runner: macos-15-intel
+            outdir: packages/aria2-darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build aria2 from pinned official source
+        # 脚本内部完成：源码 SHA256 核对 -> 静态链接构建 -> otool 断言
+        # （动态依赖只有系统库）-> ad-hoc 签名 -> --version 与真实 HTTPS 下载冒烟
+        run: bash scripts/build-aria2-darwin.sh ${{ matrix.outdir }}
+
+      - name: Stage binaries for artifact upload
+        run: |
+          set -euo pipefail
+          mkdir -p "staging/${{ matrix.outdir }}/bin"
+          cp "${{ matrix.outdir }}/bin/aria2c" "staging/${{ matrix.outdir }}/bin/aria2c"
+          chmod 755 "staging/${{ matrix.outdir }}/bin/aria2c"
+          find staging -type f -exec ls -l {} +
+
+      # 给构建产物签发可验证的 provenance：把「这个二进制由本仓库这次提交的
+      # 这段 workflow 构建」变成密码学事实，补齐第三方候选缺的「构建证明」一角。
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ matrix.outdir }}/bin/aria2c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-darwin-${{ matrix.arch }}
+          path: staging
+          if-no-files-found: error
   publish:
     name: Build, test and publish
-    needs: [binaries-windows, binaries-linux]
+    needs: [binaries-windows, binaries-linux, binaries-darwin]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
@@ -181,7 +233,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore binaries from both runners
+      - name: Restore binaries from all runners
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -200,12 +252,13 @@ jobs:
           echo "--- merged ---"
           find packages -type f -name 'aria2c*' | sort
 
-      - name: Re-apply exec bit on Linux binaries
+      - name: Re-apply exec bit on Linux / macOS binaries
         # upload-artifact 不保留文件权限，必须在这里重新 chmod
         shell: bash
         run: |
           set -euo pipefail
           chmod 755 packages/aria2-linux-x64/bin/aria2c packages/aria2-linux-arm64/bin/aria2c
+          chmod 755 packages/aria2-darwin-x64/bin/aria2c packages/aria2-darwin-arm64/bin/aria2c
           ls -l packages/aria2-*/bin/*
 
       - name: Setup pnpm
@@ -241,7 +294,7 @@ jobs:
       #      （npm/cli#8544 仍未修复），必须用 token。
       # npm 网页侧前置条件（每个包单独配置 Trusted Publisher，且必须勾选允许直接 npm publish）：
       #   @leisureyu/dsh-smart-dl / -aria2-win32-x64 / -aria2-win32-arm64 /
-      #   -aria2-linux-x64 / -aria2-linux-arm64
+      #   -aria2-linux-x64 / -aria2-linux-arm64 / -aria2-darwin-x64 / -aria2-darwin-arm64
       #   Organization or user: LeiSureYu ；Repository: dsh-smart-download ；Workflow: publish.yml
       - name: Publish binary subpackages
         shell: bash
@@ -296,9 +349,9 @@ jobs:
             listing=$(tar -tvzf "$PACK_DIR/$tgz")
             echo "$listing"
 
-            # 正向断言：Linux 子包里的 bin/aria2c 必须带可执行位，
+            # 正向断言：Linux / macOS 子包里的 bin/aria2c 必须带可执行位，
             # 否则装完无法调用（这是「在 Windows 上打包」的静默失败形态）
-            if [[ "$name" == *linux* ]]; then
+            if [[ "$name" == *linux* || "$name" == *darwin* ]]; then
               if ! grep -qE '^-rwxr-xr-x .*bin/aria2c$' <<<"$listing"; then
                 echo "::error::$name 的 tarball 中 bin/aria2c 缺少可执行位（0755）"
                 return 1
@@ -318,7 +371,9 @@ jobs:
             packages/aria2-win32-x64 \
             packages/aria2-win32-arm64 \
             packages/aria2-linux-x64 \
-            packages/aria2-linux-arm64
+            packages/aria2-linux-arm64 \
+            packages/aria2-darwin-x64 \
+            packages/aria2-darwin-arm64
           do
             publish_pkg_dir "$dir" || exit 1
           done

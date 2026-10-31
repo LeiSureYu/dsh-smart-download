@@ -11,6 +11,168 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-31
+
+**四件事：下载不再必须等（后台模式）、代理三层终于一致（proxy）、凭证离开命令行
+（headers 走 stdin）、macOS 正式支持（CI 自构建子包）。** 三者的共同主题是同一类旧问题的三个切面 ——
+「行为在某一层与其它层不一致」：同步调用让长下载占住整个会话；代理环境变量
+只被三层中的一层（curl）读取，净效果是代理用户静默降级单线程；请求头放在
+argv 上等于把凭证写给同机所有进程。1.7.0 把三处都收口。
+
+**Four changes with one theme: background mode (downloads no longer hold the
+session), a `proxy` parameter honored identically by all three layers, request
+headers moved off the command line into stdin, and official macOS support
+(CI-built subpackages).** The first three fix the same class of old problem —
+behavior that is consistent within one layer but not across layers.
+
+### 新增 / Added
+
+- **后台模式：`background: true`。** 所有入参校验（协议白名单、摘要格式、头表、
+  `expectedSize`、`ifExists`…）先在调用处**同步**完成 —— 非法参数照旧让工具调用
+  直接失败，不会启动一个「看似提交、实际没跑」的后台任务；随后调用立即返回
+  `{ success, background, taskId }`（单条目）或 `{ success, background, batch, count }`
+  （批量），下载在宿主进程里继续。进度与终态用 `download_status` 查询（批量可用
+  新增的 `batchId` 参数过滤），面板照常显示，管理器的取消 / 重试照常可用。
+  返回前会等**第一条进度记录落盘**（新增 `onStarted` 钩子），保证
+  `download_status(taskId)` 立即可查。三个设计点：
+  - **exec 用独立 controller**（与 1.6.0 重试同一做法）：工具调用的 signal 在调用
+    结束后的语义由宿主决定，后台下载必须活过这次调用；
+  - **全局闸门**（新模块 `src/gate.ts`）：后台任务可以与前台调用并存，「单文件 8
+    连接」与「批内窗口」两道既有约束都是调用内的，并存即被击穿（2 × 16 = 32）。
+    所有条目（前台 / 后台 / 重试）开工前先拿进程级闸门槽位；容量与批内窗口由
+    **同一个公式**推导（预算 16 ÷ 单条目最高档 8 = 2），因此没有后台任务时行为
+    与 1.6.0 完全相同。1.3.0 时「不做后台」的三个卡点（无宿主动作 API、无
+    taskId→AbortController 映射、进度文件无请求元数据）已被 1.6.0 的 cancel/retry
+    全部解决，本版把最后一段路走完；
+  - **`timeoutMs` 范围不变**（1s–30 分钟）：后台超时的条目照旧记 `failed`，
+    可从管理器重试。
+- **代理：`proxy` 参数（新模块 `src/proxy.ts`）。** 此前本插件对代理完全没有处理，
+  而三个环节各说各话：探测（Node fetch）不读代理环境变量、aria2 从不读、curl
+  会读 —— 代理用户的净效果是「探测失败 → aria2 失败 → curl 侥幸成功」，**静默
+  降级单线程**，且探测结论建立在下载根本不成立的网络路径上。现在：
+  - 取值优先级：显式 `proxy` 参数 > `HTTPS_PROXY`/`https_proxy`（https 目标）/
+    `HTTP_PROXY`/`http_proxy`（http 目标）> `ALL_PROXY`/`all_proxy` > 直连；
+  - `NO_PROXY`/`no_proxy` 始终生效（对显式参数也是，与 curl 的 `-x` + `no_proxy`
+    语义一致）：支持精确主机、`.suffix` 后缀、`*` 通配、`host:port` 精确端口
+    （裸 IPv6 不会被误判成 host:port）；
+  - **探测、镜像候选探测与下载共用同一个解析结果**；落地为 undici `ProxyAgent`
+    （探测）、aria2 `--all-proxy`、curl `-x`；
+  - 只支持 http(s) 代理：SOCKS 对三者的支持参差，放行等于重新打破三层一致。
+    参数里的非法值在发请求前拒绝；环境变量里的非法值**忽略**（一个写错的全局
+    变量不该打断所有下载）；
+  - 成功结果新增 `proxy` 字段（仅确实走了代理时出现）。
+- **macOS 子包：`@leisureyu/dsh-aria2-darwin-x64` / `-darwin-arm64`（1.7.0 起随包分发）。**
+  六个平台组合自此全部完整支持（随包 aria2 多线程）。为什么由本仓库 CI 自构建：
+  aria2 官方不发布 macOS 二进制（最后一次是 1.35.0，2019 年），唯一带哈希的第三方候选
+  在发布方可信度、构建证明、可复现性三条上全不满足（`PLAN-P2-PLATFORM.md` §A.2⑤，
+  2026-10-12 逐条实测）。1.7.0 把信任模型从「信第三方发布者」换成「信本仓库的 CI」，
+  并把三条否决理由逐条变成工程约束：
+  - **源码锚定**：aria2 1.37.0 官方 release tarball，SHA256
+    `a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8b20efa`
+    （2026-10-31 从官方 release 取回自算），构建前核对；
+  - **构建**：GitHub macOS runner 原生构建（`macos-15` = arm64、`macos-15-intel` =
+    x64；`macos-13/14` 已退役，2026-10-31 核对 runner-images README）；openssl
+    **静态归档**链入（TLS 后端与 win/linux 平台一致），metalink / SFTP / SQLite /
+    libz 等本插件用不到的组件全部关闭 —— 依赖面越小，静态链与审计越容易；
+  - **正向断言**（`scripts/build-aria2-darwin.sh`）：`otool -L` 动态依赖**只有
+    `/usr/lib/` 系统库**（链进 brew 路径的二进制在用户机器上无法运行）、
+    `HAVE_OPENSSL` 必须在 `config.h`（防「无 TLS 后端也编得过」的静默退化）、
+    `--version` 与一次**真实 HTTPS 下载**必须成功；
+  - **可验证性**：`actions/attest-build-provenance` 给产物签发 SLSA provenance；
+    发布方就是本仓库 CI。1.3 时代的三条否决理由（发布方不可信 / 构建证明 404 /
+    产物形态不利）由此逐条收口，完整对照见 `COMPATIBILITY.md`；
+  - **安装侧零改动**：子包照常声明 `os: ["darwin"]`，npm / pnpm 在其它平台上
+    自动跳过；`PATH` 兜底（1.5.0）保留。子包 README 写明来源与复现方式。
+
+  局限如实记录：macOS 无法完全静态链接（动态依赖系统库），runner 标签有生命周期
+  （`macos-13/14` 已退役），这两条是该子包比 win/linux 多出来的长期维护面；
+  升级 aria2 版本时先跑 `.github/workflows/spike-darwin.yml`（手动触发，不发布）。
+
+- **`expectedSize` 参数（单条目与批量条目均可）。** 官方文档常印文件大小，而远端
+  没声明 Content-Length 时字节数校验只能「跳过」。调用方给出的大小是「不依赖任何
+  远端信息」的校验来源（与 `sha256` 同构）：远端声明了长度且与它不等 → **发请求
+  之前**拒绝（两种「应该多大」打架说明地址或文档至少一个过期）；远端没声明长度
+  → 下载完成后用它做字节数校验，不再报 `verifySkipped`（校验真的做过了）。校验
+  失败文案明确写「调用方声明的 expectedSize」（`describeMismatch` 新增来源参数，
+  缺省值不变 —— 既有文案逐字节相同）。重试元数据同步携带该字段。
+- **`download_status` 新增 `batchId` 参数**：按批次过滤任务；`total` 是过滤后的
+  未截断总数。与后台批量配套 —— 批量的逐条 `taskId` 在各条目开工时才生成，
+  批次 ID 是开工前就确定的稳定句柄。
+- **curl 退出码 36 的翻译**：`bad download resume`（man page 原文核对，
+  2026-10-31）：「无法从断点续传」，下一步写明删除半包全量重下。与 33
+  （HTTP range error，本次 Range 未被接受）不是一回事。
+
+### 变更 / Changed
+
+- **自定义请求头走 stdin，不再进命令行。** 有自定义头（`userAgent` / `referer` /
+  `headers` 任一）时：curl 改用 `-K -`（配置经 stdin），aria2 改用
+  `--input-file=-`（URI + `out=` + 每条 `header=` 经 stdin，URI 与 `-o` 一并搬进
+  input file —— 头是 per-download 选项，只能挂在条目下）。**没有自定义头时两条
+  链路的命令行与 1.6.0 逐字节相同**（既有回归项，新增 8 条断言锁定）。
+  README「不要把长期凭证写进 headers」的告警由此解除：`Authorization` 不再出现在
+  任务管理器 / `ps -ef` 能读到的 argv 上。真机实测（Windows，随包 aria2 1.37.0 与
+  系统 curl）：两条 stdin 链路的头都到达服务器、产物逐字节正确。
+- **探测与镜像解析的异常也写终态记录**（1.7.0 收口）：此前这两条路径只 throw，
+  前台调用方看得到错误，但进度轨道永远停在「探测中」—— 批量里这一行的面板会
+  一直转圈，直到 10 分钟陈旧阈值把它忽略。现在先写 `failed` 记录再抛。
+- 批量窗口与全局闸门同源：1.3.0 的 `batchWindow()` 推导移入 `src/gate.ts`
+  （`GATE_CAPACITY`），批量编排改用同一个常量 —— 两处各写一份必然漂移。
+- 重试元数据（`RetryRequest`）新增 `expectedSize` 与 `proxy`：都不是凭证，与
+  `mirror` 同级落盘 —— 不带上它们，重试会静默丢掉大小核对与显式代理。管理器的
+  retry 对记录里的非法 `proxy` 值返回 `not-retryable`（与摘要预校验同一条纪律）。
+- 新增运行时依赖 `undici`（^7，engines `>=20.18.1`，与插件声明的 Node `>=22.0.0`
+  兼容）：探测走显式代理需要 `ProxyAgent`，Node 未把它暴露在内置模块里。
+
+### 修复 / Fixed
+
+- **批量里探测失败的条目，进度轨道卡在「探测中」**（见上「变更」第二条 ——
+  它同时是一个真实缺陷的修复）：`runBatch` 把它标成 failed，但两条轨道没有终态
+  记录，「下过了但查不到状态」从此不再出现。
+- **`ifExists: "skip"` 只传 `expectedSize` 时不校验已有文件**：skip 分支此前只在
+  「给了摘要」时校验已有文件，同类校验两种待遇 —— 现在摘要与 `expectedSize`
+  任一给出都校验，不符判失败并保留原文件（与「不能把坏文件报成 skipped 成功」
+  的既有约定对齐）。
+- **探测用的 `ProxyAgent` 从不关闭**：每次带代理的探测都 new 一个 dispatcher，
+  keepalive 连接会让它一直存活，批量 50 条 = 50 个空闲连接。现在探测返回前关闭
+  （`finally` + 静默吞掉清理失败），并经 `ProbeOptions.dispatcherFactory` 测试
+  接缝给了正向断言（close 恰好一次，探测失败时同样清理）。
+- **`background` 非布尔值静默落回前台**：宿主的 schema 校验是第一道防线；直达
+  execute 的调用方（测试 / 未来宿主变更）由插件自己的守卫拦第二道 —— 显式拒绝
+  而不是 `=== true` 判否后把「立即返回」降级成同步等待。
+
+### 测试 / Tests
+
+- 新增 `test/gate.test.ts`（5 例：容量、FIFO、槽位转交、reset 幂等）、
+  `test/proxy.test.ts`（10 例：取值优先级、NO_PROXY 匹配、非法值忽略、
+  undici CONNECT 隧道集成 —— 本地代理实测「探测真的走了代理」）、
+  `test/stdin-args.test.ts`（8 例：无头时 argv 与 1.6.0 逐字节相同的回归锁定、
+  有头时 argv 干净、配置转义、input file 结构）、`test/background.test.ts`
+  （7 例：立即返回 + 首条记录可查、非法参数同步拒绝且不留痕迹、进程内取消、
+  批量归组、不合格条目落轨、render 文案、batchId 走通工具层）、
+  `test/expected-size.test.ts`（6 例：声明冲突下载前拒绝、chunked 下兜底校验、
+  失败文案来源标注、非法值、批量逐条）。
+- 自检轮（1.7.0 发布前）：全量测试输出逐行审查 —— 修掉 `test/compat-manifest.test.ts`
+  触发的 Node 24 `DEP0190` 弃用告警（`spawnSync` 的「args 数组 + shell」改为单串命令，
+  参数全是测试内写死的字面量）；3 个跳过用例逐个核对均为既有平台限制（Windows
+  符号链接权限 ×1、Linux 专属信号语义 ×2），非本轮引入；全量套件连续两轮运行
+  结果逐字段一致（无波动用例）。
+- macOS 接入的测试与验证：`ARIA2_TARGETS` 断言扩为六平台（darwin 两个子包的名字
+  与二进制路径）；`aria2TargetFor` 的「未支持平台」用例换用 `sunos` 守住
+  「未列入 -> null」规则；构建脚本过 `bash -n` 语法检查，configure 开关
+  （`--without-*` / `ARIA2_STATIC` / `OPENSSL_LIBS` 覆盖）从 1.37.0 源码实地
+  核对，源码 tarball SHA256 下载自算 —— macOS 上的真实构建结果以
+  `spike-darwin.yml` 的 CI 运行为准（本仓库无 macOS 开发机，不假装测过）。
+- 真机实测（Windows，`node` 直接跑）：aria2 `--input-file=-` 携带
+  Authorization 下载 1MB 文件逐字节正确；curl `-K -` 的 argv 不含任何头文本而
+  服务器收到全部头；aria2 `--all-proxy` 的请求确实经过本地代理。
+- 基线：**671 例（668 通过 / 3 跳过 / 0 失败）**；行覆盖 **99.27%** / 分支
+  **91.85%** / 函数 **96.63%**（`node --test --import tsx --experimental-test-coverage`，
+  LF 工作区实测）。新增模块覆盖：`gate.ts` 100% / `headers.ts` 100% /
+  `probe.ts` 100% 行 / `proxy.ts` 98.5%。函数覆盖的 0.3pt 波动来自
+  `catch(() => {})` 一类单行箭头回调的 V8 计数（行覆盖 100% —— 每条语句都有
+  用例执行）；未覆盖行逐条核对为注释与多行续行（tsx 源码映射的已知归属
+  问题，与 1.4.x / 1.6.0 的核对结论同源）。
+
 ## [1.6.0] - 2026-10-23
 
 **下载管理器从「看得见」补到「管得动」。** 这一版给进行中的任务加上取消、给失败 / 已取消的

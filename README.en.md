@@ -19,10 +19,12 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: use the app's own CLI, or the **Plugins** page in the sidebar.
 
-> **What's new in 1.6.0** — the download manager can now **cancel** running tasks and
-> **retry** failed or cancelled ones in place (same `taskId`; headers and credentials are
-> never persisted or replayed). 1.5.0 added generic checksum verification, the `ifExists`
-> policy, disk-space preflight and server-supplied filenames.
+> **What's new in 1.7.0** — **macOS is now officially supported** (x64 / arm64 subpackages built from the official source in this repo's CI; all six platforms get multi-connection); new `background: true` **background mode** (validation still
+> completes synchronously before the call returns; you get a `taskId` / batch id immediately
+> while the download continues in the host process), a `proxy` **parameter honored
+> identically by the probe, mirror probing and the download** (with `NO_PROXY` support),
+> and custom request headers now travel over **stdin** so `Authorization` no longer
+> appears in the process command line.
 > See [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 
 - **Automatic multi-connection acceleration** — the target server is probed first; if it supports multiple connections the bundled `aria2c` downloads concurrently, otherwise it falls back to the system `curl`, so the download completes either way.
@@ -38,17 +40,23 @@ The desktop app (DeepSeek Harness 0.2.0 and newer) installs the same package: us
 - **The real filename from the server** — when the URL ends in something like `…/download`, the name in `Content-Disposition` is sanitised and used instead of saving everything as `download`.
 - **Send the headers the docs' link needs** — `userAgent` / `referer` / `headers`. The probe and the download share **one** header set, so the two can never disagree.
 - **Pick a mirror automatically** — with `mirror: "auto"` the plugin chooses a GitHub mirror that is *proven* to serve the same file, so the model does not have to know domains like gh-proxy.
+- **Background downloads** — `background: true`: validation still completes synchronously before the call returns, then you get a `taskId` (or a batch id for `targets`) immediately while the download continues in the host process. Poll `download_status`; the panel, cancel and retry all work as usual. The 30-minute timeout no longer forces long downloads to hold the session. See [Background mode](#background-mode-background-true).
+- **One proxy for all three layers** — the `proxy` parameter (or `HTTPS_PROXY`) is used by the probe, mirror probing and the download alike; hosts in `NO_PROXY` connect directly. Before 1.7.0 only curl read the proxy environment variables, silently degrading proxy users to single-threaded downloads. See [Proxy](#proxy-proxy).
+- **Credentials off the command line** — with custom headers the configuration travels over stdin (curl `-K -` / aria2 `--input-file=-`), so `Authorization` no longer appears in the argv that Task Manager / `ps -ef` can read; without headers the command line is byte-identical to 1.6.0.
+- **Verify the size the docs print** — `expectedSize`: pass the size printed in the official docs; a server-declared length that differs is rejected before downloading, and when the server declares no length the downloaded bytes are verified against it instead of skipping verification.
 
-All four of **Windows x64 / arm64** and **Linux x64 / arm64** are fully supported (bundled aria2,
-multi-connection). macOS has no bundled binary, but an `aria2c` on `PATH` (for example from
-Homebrew) is used for multi-connection downloads; without one it falls back to single-threaded
-`curl`. See [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)
-for why no macOS build is shipped (the blocker is provenance, not availability).
+All six of **Windows / Linux / macOS x64 / arm64** are fully supported (bundled aria2,
+multi-connection). The macOS subpackages (x64 / arm64) are **built from the official source
+in this repository's own CI** (since 1.7.0 — aria2 officially ships no macOS binaries; why
+self-building instead of using a third-party binary is documented in
+[COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)).
+Additionally, an `aria2c` on `PATH` (for example from Homebrew) is used for
+multi-connection downloads when the subpackage is unavailable.
 
 `dsh-smart-dl` registers two tools with DSH:
 
-- **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` (or an `aria2c` on `PATH`) for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Optional: `mirror` (a prefix, or `auto`), `checksum` / `sha256` content verification, `ifExists`, `userAgent` / `referer` / `headers`, and resume. Pass `targets` instead of `url` to download a batch in one call (`maxBandwidth` caps the whole batch, `timeoutMs` bounds each entry).
-- **`download_status`** — query download progress. Returns a read-only snapshot of recent tasks (percentage, speed, ETA), useful for answering "how far along is that download?".
+- **`smart_download`** — download a file. It first probes whether the target server supports multi-threading; if it does it calls the bundled `aria2c` (or an `aria2c` on `PATH`) for accelerated multi-connection download, otherwise it falls back to the system `curl` single-threaded download, so the download completes either way. Optional: `mirror` (a prefix, or `auto`), `checksum` / `sha256` content verification, `expectedSize`, `ifExists`, `userAgent` / `referer` / `headers` (over stdin since 1.7.0 — credentials never appear in the command line), `proxy` (shared by probe and download), and resume. Pass `targets` instead of `url` to download a batch in one call (`maxBandwidth` caps the whole batch, `timeoutMs` bounds each entry); pass `background: true` to return a task id immediately and keep downloading in the background.
+- **`download_status`** — query download progress. Returns a read-only snapshot of recent tasks (percentage, speed, ETA), useful for answering "how far along is that download?"; filter by `taskId` or `batchId` (1.7.0).
 
 ## Table of contents
 
@@ -74,6 +82,8 @@ for why no macOS build is shipped (the blocker is provenance, not availability).
   - [In-batch concurrency: derived from "bounded total connections"](#in-batch-concurrency-derived-from-bounded-total-connections)
   - [`maxBandwidth`: a cap shared by the whole batch](#maxbandwidth-a-cap-shared-by-the-whole-batch)
   - [`timeoutMs`: per-entry timeout (route A is a synchronous call)](#timeoutms-per-entry-timeout-route-a-is-a-synchronous-call)
+- [Background mode: `background: true`](#background-mode-background-true)
+- [Proxy: `proxy`](#proxy-proxy)
 - [Parameter reference](#parameter-reference)
   - [`smart_download`](#smart_download)
   - [`download_status`](#download_status)
@@ -154,9 +164,9 @@ Requirements and caveats:
 >
 > **1.0.0 was the first stable release.** Compared with 0.9.x, this version stops hiding the places where the plugin silently degrades: "verification skipped" is no longer the same value as "verification passed" (new `verifySkipped` field), a cancelled download reports `cancelled` instead of masquerading as a failure, and two real 0.9.0 problems are fixed — the `mirror` argument could bypass the protocol allow-list (a `file://` prefix would copy a local file out), and the `awaitFlush` timeout timer was not `unref`ed, so the CLI stayed alive about 2 seconds longer after every download. Every item is backed by a reproduction in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md).
 >
-> **Use `1.6.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
+> **Use `1.7.0` or newer.** The history from 0.7.0 through 0.9.0 (integrity verification, the resume fingerprint, the progress-track `state` field, the panel, the cross-platform binaries) is not repeated here — see [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md).
 >
-> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.6.0`.
+> The older `0.1.x` / `0.2.1` releases have install-time defects (manifest validation, `peerDependencies` ranges that could not resolve to any prerelease). Do not use them; upgrade to `1.7.0`.
 
 ## Downloading from official documentation
 
@@ -486,7 +496,7 @@ Accepts a plain byte count or a K/M/G suffix (1024-based), e.g. `"4M"`, `"500K"`
 
 ### `timeoutMs`: per-entry timeout (route A is a synchronous call)
 
-`timeoutMs` is **each entry's** timeout in milliseconds (`1000`..`1800000`, i.e. 1 second to 30 minutes). Why it is needed: this tool is a synchronous call, and one stuck entry keeps the whole batch from returning. 30 minutes is a conservative cap (1GB @ 1MB/s ≈ 17 minutes); a longer wait means the caller should switch to a "return first, continue in the background" shape — that shape is explicitly out of scope, so it is better to fail here than to hang the whole session.
+`timeoutMs` is **each entry's** timeout in milliseconds (`1000`..`1800000`, i.e. 1 second to 30 minutes). Why it is needed: this tool is a synchronous call, and one stuck entry keeps the whole batch from returning. 30 minutes is a conservative cap (1GB @ 1MB/s ≈ 17 minutes); since 1.7.0 there is [background mode](#background-mode-background-true) for longer downloads — the foreground shape keeps this cap on purpose, so a too-long wait still fails at the call site instead of hanging the session.
 
 What happens after a timeout (these are definitions, not implementation details):
 
@@ -496,6 +506,38 @@ What happens after a timeout (these are definitions, not implementation details)
 - A timeout does **not** fall back to curl — that would spend the same wait a second time.
 - Omitting it means no timeout; an invalid value (out of range, fractional, non-numeric) throws before any request is made.
 
+## Background mode: `background: true`
+
+Pass `background: true` and the download no longer holds the session:
+
+```
+smart_download(url: "https://example.com/big.iso", background: true)
+# returns immediately: { "success": true, "background": true, "taskId": "dl-xxx" }
+# poll download_status(taskId: "dl-xxx"); a batch returns a batch id (filter with batchId)
+```
+
+- **Validation still runs synchronously first**: the protocol allow-list, checksum formats, request headers, `expectedSize`, `ifExists`, and the validity of `maxBandwidth` / `timeoutMs` are all checked **before the call returns** — an invalid argument still fails the tool call itself, so a background task is never started for an argument that cannot succeed. A returned success therefore always means "the task really started (or queued)".
+- **Single calls return `taskId`; batches return `batch` + `count`**. A batch does not return per-entry task ids because each entry's id is generated when that entry **starts working** — returning a list with a missing tail would be a lie. The batch id exists before anything starts and is a stable handle: `download_status(batchId: "...")` (new in 1.7.0) lists the whole batch.
+- **The first progress record is on disk before the call returns**, so `download_status(taskId)` works immediately. When all connection slots are busy the entry queues and its record appears when it starts — that is queueing, not loss.
+- **The panel, cancel and retry all work as usual**: background tasks write the same progress tracks; the manager's cancel goes through the in-process registry and retry reuses the same `taskId`.
+- **The connection budget is now process-wide** (a global gate, `src/gate.ts`): background tasks can coexist with a foreground call, and both the "8 connections per file" cap and the in-batch window are per-call constraints that coexistence would pierce. Every entry (foreground / background / retry) acquires a gate slot before starting; the gate capacity is derived from the same formula as the batch window (16 ÷ 8 = 2), so **with no background tasks the behaviour is identical to 1.6.0**. Queued entries wait FIFO; nothing preempts.
+- **`timeoutMs` keeps the same range** (1s–30 minutes): a background entry that times out is still recorded as `failed` and can be retried from the manager. Background mode is the "do not hold the session" option, not an unlimited-duration mode.
+
+## Proxy: `proxy`
+
+In corporate / proxied networks the `HTTPS_PROXY` environment variable used to be read by only one of the three layers (curl read it; the probe and aria2 did not), so proxy users got "probe fails → aria2 fails → curl succeeds on its own" — a **silent fallback to single-threaded**, with the decision made on a network path the download could never have taken. Since 1.7.0:
+
+```
+smart_download(url: "https://example.com/tool.zip", proxy: "http://127.0.0.1:7890")
+# or omit proxy and let the plugin read HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+```
+
+- **Precedence**: explicit `proxy` parameter > `HTTPS_PROXY`/`https_proxy` (https targets) / `HTTP_PROXY`/`http_proxy` (http targets) > `ALL_PROXY`/`all_proxy` > direct.
+- **`NO_PROXY`/`no_proxy` always applies** (even to an explicit `proxy`, matching curl's `-x` + `no_proxy` semantics): exact hosts, `.suffix` matches, `*`, and `host:port`.
+- **The probe, mirror probing and the download share the same proxy**: undici `ProxyAgent` for the probe, aria2's `--all-proxy`, curl's `-x`. The proxy is resolved per entry from that entry's **original URL**, so a batch can mix direct and proxied entries.
+- **http(s) proxies only**: SOCKS support differs across the three layers, so allowing it would reopen the inconsistency. An invalid `proxy` parameter is rejected before any request; an invalid environment variable is **ignored** (one bad global variable must not break every download).
+- Successful results carry a `proxy` field — only when a proxy was actually used.
+
 ## Parameter reference
 
 ### `smart_download`
@@ -503,7 +545,7 @@ What happens after a timeout (these are definitions, not implementation details)
 | Parameter | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `url` | string | one of two | The URL of a single file. **Exactly one** of `url` / `targets` — passing both, or neither, is rejected before any request is made. |
-| `targets` | array | one of two | Download a batch in one call, **at most 50 entries**. Each entry is `{ url (required), output?, sha256?, checksum?, ifExists? }`; entries share `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` but each gets its own output path, verification and progress record. Entries run concurrently up to the plugin's concurrency limit; **one failing entry does not abort the batch** — results are reported per entry. |
+| `targets` | array | one of two | Download a batch in one call, **at most 50 entries**. Each entry is `{ url (required), output?, sha256?, checksum?, expectedSize?, ifExists? }`; entries share `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` / `proxy` but each gets its own output path, verification and progress record. Entries run concurrently up to the plugin's concurrency limit; **one failing entry does not abort the batch** — results are reported per entry. With `background: true` the whole batch runs in the background (a batch id is returned). |
 | `output` | string | no | Output file path. When omitted, tried in order: the `Content-Disposition` filename, the `filename` / `file` query parameter, then the URL's last segment (always a single-segment filename, relative to the host process cwd). |
 | `mirror` | string | no | A mirror prefix (e.g. `https://gh-proxy.com/` or `ghfast.top`) used to accelerate GitHub release downloads; ignored for non-http(s) URLs. Pass the literal `"auto"` to let the plugin pick a built-in mirror **proven to serve the same file** (identical length, and identical ETag whenever the origin sends one); `"auto"` applies to GitHub hosts only and falls back to the original URL when no candidate can be confirmed. |
 | `sha256` | string | no | Expected SHA-256. Accepts bare hex, `sha256:<hex>`, `SHA256(<hex>)` and SRI `sha256-<base64>`; a mismatch fails the download. |
@@ -514,12 +556,16 @@ What happens after a timeout (these are definitions, not implementation details)
 | `headers` | object | no | Extra request headers, e.g. `{"Authorization": "Bearer …"}`. Headers the plugin manages itself (`Range` / `Accept-Encoding` / `Host`, …) are rejected, as are values containing newlines or control characters. |
 | `maxBandwidth` | string | no | A bandwidth cap **shared by every task in this call**, e.g. `"2M"`, `"500K"` or a plain byte count like `"1500000"` (K/M/G are 1024-based). With a batch the cap is split across the entries running concurrently, so the whole batch stays under it. Becomes aria2's `--max-overall-download-limit` / curl's `--limit-rate`. |
 | `timeoutMs` | integer | no | **Per-entry** timeout in milliseconds, `1000`–`1800000` (30 minutes is the cap — this is a synchronous call). A timed-out entry is terminated and reported as failed; in a batch the other entries keep running and **entries that already succeeded are never re-labelled**. Omit it to wait indefinitely. |
+| `proxy` | string | no | The http(s) proxy for this call, e.g. `"http://127.0.0.1:7890"`. **The probe, mirror probing and the download share it**; an explicit parameter wins over `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, and hosts in `NO_PROXY` connect directly (curl semantics). http(s) proxies only (no SOCKS); an invalid value is rejected before any request. Successful results carry a `proxy` field. |
+| `expectedSize` | integer | no | Expected file size in bytes, e.g. the size printed in the official docs. A server-declared length that differs is rejected before downloading; when the server declares no length the downloaded bytes are verified against this size (instead of skipping verification). Per-entry in `targets`. |
+| `background` | boolean | no | Run in the background. Validation still completes synchronously (an invalid argument fails this call), then the call returns immediately with a `taskId` (single) or `batch` + `count` (batch) while the download continues in the host process; poll `download_status` (`batchId` filters a batch). The panel and cancel / retry work as usual. See [Background mode](#background-mode-background-true). |
 
 ### `download_status`
 
 | Parameter | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `taskId` | string | no | Return just one task. |
+| `batchId` | string | no | Filter by batch (new in 1.7.0): a background batch call returns this id; when both `taskId` and `batchId` are given both must match. `total` counts the filtered set before the limit is applied. |
 | `limit` | integer | no | Maximum number of tasks to return (default `10`). |
 
 ### Environment variables
@@ -664,14 +710,15 @@ fine, but can only have their record deleted** — without a reliable path there
 | Windows  | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-win32-arm64`   |
 | Linux    | x64        | ✅ Yes               | `@leisureyu/dsh-aria2-linux-x64`     |
 | Linux    | arm64      | ✅ Yes               | `@leisureyu/dsh-aria2-linux-arm64`   |
-| macOS    | x64 / arm64 | ⚠️ Multi-connection with an `aria2c` on `PATH` | —                     |
+| macOS    | x64         | ✅ Supported | `@leisureyu/dsh-aria2-darwin-x64`   |
+| macOS    | arm64       | ✅ Supported | `@leisureyu/dsh-aria2-darwin-arm64` |
 
 The binary subpackages declare `os` / `cpu` fields, so npm / pnpm skip installing them on non-matching
 platforms. When the subpackage is absent, `getAria2Path()` looks for an `aria2c` on `PATH` and runs
 `--version` once to confirm it is usable; only if that also fails does it return `null` and let `decide()`
 fall back to `curl`. **"The plugin works" and "multi-connection works" are two different things** — an
-unsupported platform does not install a broken plugin, it installs a single-threaded downloader. Why no
-macOS binary is bundled, and where the `PATH` lookup stops, is in
+unsupported platform does not install a broken plugin, it installs a single-threaded downloader. Why the
+macOS subpackage is self-built, and the trust model behind it, is in
 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md).
 
 ## Permissions
@@ -680,7 +727,7 @@ This plugin does exactly these things: **start downloads, verify the downloaded 
 
 | Behaviour | Detail |
 | --- | --- |
-| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`) — **FTP / SFTP / BitTorrent are not supported**: opening the allow-list would leave only the fifth layer of defence (a caller-supplied `sha256` / `checksum`, which is optional) effective, i.e. no content check by default; BitTorrent is further out (DHT / listening ports / seeding would break the "contacts nothing beyond the original URL" promise below). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. **With `mirror: "auto"`, the candidate mirror addresses are probed too** (concurrent HEADs, 5s timeout each) — the necessary cost of auto mode, and it happens **only** when `auto` is passed explicitly; the candidate list can be restricted to mirrors you trust with `DSH_SMARTDL_MIRRORS`. |
+| Outbound network | **Only `http` / `https` are accepted**; any other protocol is rejected before any request (`checkDownloadUrl`) — **FTP / SFTP / BitTorrent are not supported**: opening the allow-list would leave only the fifth layer of defence (a caller-supplied `sha256` / `checksum`, which is optional) effective, i.e. no content check by default; BitTorrent is further out (DHT / listening ports / seeding would break the "contacts nothing beyond the original URL" promise below). When a `mirror` is supplied, **the prefix itself must pass the same allow-list** (a non-`http(s)` prefix is ignored). For an admitted address it sends `HEAD` / `Range` probes (`probeUrl`, 5s timeout) and performs the actual download (`aria2c` or system `curl`). It contacts nothing beyond "the original URL" or "mirror prefix + original URL". With a `mirror`, the request goes to the **mirror-prefixed address** and the original host is no longer contacted directly. **With `mirror: "auto"`, the candidate mirror addresses are probed too** (concurrent HEADs, 5s timeout each) — the necessary cost of auto mode, and it happens **only** when `auto` is passed explicitly; the candidate list can be restricted to mirrors you trust with `DSH_SMARTDL_MIRRORS`. **When `proxy` is passed (or a proxy environment variable is set), the outbound requests above go through that proxy** — the proxy itself adds no extra outbound contact (there is no "probe the proxy first" step; a dead proxy shows up as an honest probe failure). A proxy is a third-party network path; do not download sensitive content through one you do not trust. |
 | Sending request headers | By default only the `accept-encoding: identity` the probe needs. When the caller passes `userAgent` / `referer` / `headers`, those headers appear on **both** the probe request and the download request (visible in the child process command line, so **do not** put long-lived credentials in `headers`). Plugin-managed headers (`Range` / `Accept-Encoding` / `Content-Length` / `Host` / connection-level) cannot be overridden, and a value containing CR / LF / NUL is rejected as injection. |
 | Reading the downloaded file | When `sha256` / `checksum` is supplied, the file just written is read **as a stream** (never buffered whole) to compute its MD5 / SHA-1 / SHA-256 / SHA-512. No other file is read. |
 | Writing the downloaded file | Writes to the path given by the `output` argument (the caller may explicitly choose any writable path, including one outside the current working directory); when omitted the filename comes from `Content-Disposition` first, then the `filename` / `file` query parameter, then the URL, and lands in the current working directory. All three are reduced to a **single path segment** (`/`, `\`, `..` are discarded, Windows-illegal characters replaced, reserved device names escaped), so a derived filename cannot escape the working directory. Parent directories are created as needed (`mkdir -p`). **Overwrite semantics are governed by `ifExists`**: `overwrite` (default) replaces a file of the same name, `skip` does not touch it at all, and `rename` only writes a new name and leaves the old file untouched. With resume enabled, a file of the same name is **appended to (resumed)** rather than rewritten from scratch. aria2 always gets `--allow-overwrite=true` (**required**): by default aria2 neither truncates nor overwrites a file of the same name but saves the new content as `f.1.bin`, while the plugin still returns `path` pointing at the stale file — that silent path mismatch was a real bug in an earlier version. |
@@ -720,7 +767,7 @@ dsh plugin --profile <profile> allow-version <package@version> --dsh-version <ex
 
 The exemption is recorded in that profile's `compatibility.json`; list it with `dsh plugin version-exemptions` and undo it with `revoke-version`. Exemptions are **exact-version** only: a different dsh version does not inherit them.
 
-macOS has no bundled binary **not because of incompatibility but because there is no aria2 binary subpackage from a trustworthy source**. macOS binaries *do* exist and *do* come with hashes — the blocker is "the source cannot be trusted": the per-source check results are in [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) and [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md) (checked 2026-10-12). Since 1.5.0, an `aria2c` on `PATH` (for example `brew install aria2`) is verified with `--version` and then used, so macOS can use multi-connection downloads too. Without one the plugin still installs and works, falling back to single-threaded `curl` (with the reason stated in the result's `reason` field).
+The macOS subpackages (since 1.7.0) are **built from the official source in this repository's own CI**: the source tarball is pinned by SHA256, `otool` asserts that only system libraries are linked, and the artifacts carry SLSA provenance. Why no third-party binary was used (per-source check results, 2026-10-12) and the full trust model are in [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) and [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md). The `PATH` fallback from 1.5.0 remains: when the subpackage is unavailable, an `aria2c` on `PATH` (for example `brew install aria2`) is verified with `--version` and then used.
 
 ## How it works
 
@@ -958,7 +1005,7 @@ A: This is a common heuristic warning about an unsigned `aria2c.exe` inside `nod
 A: Usually the target server does **not support Range requests** (no chunking possible), or the file is small. The plugin falls back to `curl` single-threaded automatically; the `fellback` and `reason` fields in the result explain why.
 
 **Q: It says aria2 is missing / always uses curl.**
-A: Confirm your platform is one of the four bundled rows above (Windows x64 / arm64, Linux x64 / arm64) and that the matching binary subpackage installed successfully (some registry mirrors may not have synced it — switch to the official npm registry and reinstall). The `reason` field in the result explains why. On macOS there is no bundled subpackage: install `aria2` yourself (for example `brew install aria2`) and make sure `aria2c --version` succeeds; the plugin then uses it and otherwise falls back to curl.
+A: Confirm your platform is one of the six bundled rows above (Windows / Linux / macOS, x64 / arm64) and that the matching binary subpackage installed successfully (some registry mirrors may not have synced it — switch to the official npm registry and reinstall). The `reason` field in the result explains why. When the macOS subpackage is unavailable: install `aria2` yourself (for example `brew install aria2`) and make sure `aria2c --version` succeeds; the plugin then uses it and otherwise falls back to curl.
 
 **Q: On Linux it says `aria2c: Permission denied`.**
 A: That means the binary lost its executable bit in the tarball. This project **packs on a Linux runner** in CI and asserts that `bin/aria2c` is `0755`, so a normal install is unaffected; if you repacked manually, `chmod 755` before packing.
@@ -1011,6 +1058,15 @@ A: This is pnpm 11 (bundled with DSH 0.2.0) blocking build scripts in git depend
 **Q: I installed from the GitHub repository URL but no tool showed up / the plugin is inactive?**
 A: First make sure the install actually succeeded: installing from a repository URL requires that git host to be reachable, and when `github.com` is unreachable the install fails at the 5-second probe (the console records `failedAt: 'spec-host'`). If it did install but no tool appears, you are most likely on `1.1.1` or older — `dist/` has been committed to the repository since `1.1.2`; before that either `prepare` was missing (`1.1.0` and older) or pnpm 11 blocked it (`1.1.1`), and in both cases the file `main` points at did not exist, so neither tools nor routes got registered. Upgrade to `1.1.2` or newer.
 
+**Q: How do I know a background download finished?**
+A: The return value carries a `taskId` (single) or a `batch` id; pass it to `download_status` (batches accept the `batchId` parameter) for percentage, speed and terminal state. On profiles with the web UI the bottom-right progress panel shows background tasks as usual. Failed / cancelled background tasks can be retried in place from the download manager.
+
+**Q: How should the proxy be configured?**
+A: Any of three ways: pass `proxy: "http://127.0.0.1:7890"`; or set `HTTPS_PROXY` (https URLs) / `HTTP_PROXY` (http URLs) / `ALL_PROXY`; an explicit parameter wins when both are present. Hosts in `NO_PROXY` always connect directly (even with an explicit `proxy`). The probe, mirror probing and the download all use the **same** proxy — before 1.7.0 only curl read the environment variables, so proxy users were silently degraded to single-threaded downloads. http(s) proxies only; SOCKS is not supported.
+
+**Q: I pass an `Authorization` header — does it leak?**
+A: Since 1.7.0 custom request headers travel to curl / aria2 over **stdin** (`-K -` / `--input-file=-`) and no longer appear in the process command line — the Task Manager / `ps -ef` route of reading another process's argv is closed. Two boundaries remain: header values pass through plugin and subprocess memory (never written to disk), and retries **never replay** headers (they are never persisted). Through a proxy, headers are visible to the proxy server for plain-HTTP targets and invisible for HTTPS targets (CONNECT tunnel).
+
 ## Documentation
 
 | Document | Contents |
@@ -1018,7 +1074,7 @@ A: First make sure the install actually succeeded: installing from a repository 
 | [README](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.md) / [English](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.en.md) | Install, usage, permissions |
 | [ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md) | Internals: what one call goes through, module responsibilities, progress data flow |
 | [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md) | Threat model and the five layers of defence, each with a runnable reproduction |
-| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why macOS is shelved |
+| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | Platform / Node / profile / package-manager matrix, and why the macOS subpackage is CI-built |
 | [TROUBLESHOOTING.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md) | Symptom -> cause -> fix |
 | [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md) | 1.0 code review: must-fix / suggestions / known trade-offs |
 | [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) | Per-version change log |
@@ -1042,7 +1098,7 @@ default" has a positive assertion — see the contract table above).
 
 Requirements: Node.js **22+**, pnpm **9+**.
 
-Current baseline: **627 cases (624 pass / 3 skip / 0 fail)**, **99.18%** line / **92.01%** branch / **97.18%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**).
+Current baseline: **671 cases (668 pass / 3 skip / 0 fail)**, **99.27%** line / **91.85%** branch / **96.63%** function coverage (`node --test --import tsx --experimental-test-coverage`, measured in an **LF working tree**). 1.7.0 adds the runtime dependency `undici` (^7 — the probe needs `ProxyAgent` for explicit proxies; engines `>=20.18.1`, compatible with the plugin's Node `>=22.0.0`).
 Coverage **must be measured in an LF working tree** — V8 line attribution depends on byte
 offsets: measured on the same tree, CRLF reports **99.36%** line coverage while LF reports
 **99.40%**, and the uncovered line numbers shift as well (side-by-side data in [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)).
@@ -1086,6 +1142,7 @@ For local development the per-platform binaries must be placed manually (they ar
 | Windows arm64 | <https://github.com/minnyres/aria2-windows-arm64/releases/download/v1.37.0/aria2_1.37.0_arm64.zip> | `packages/aria2-win32-arm64/bin/aria2c.exe` |
 | Linux x64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-x86_64-linux-musl_static.zip> | `packages/aria2-linux-x64/bin/aria2c` |
 | Linux arm64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-aarch64-linux-musl_static.zip> | `packages/aria2-linux-arm64/bin/aria2c` |
+| macOS x64 / arm64 | No manual download needed — run `.github/workflows/spike-darwin.yml` (manual dispatch), or build locally with `scripts/build-aria2-darwin.sh` | `packages/aria2-darwin-x64/bin/aria2c` etc. |
 
 Remember to `chmod 755` the Linux binaries after extraction, otherwise a local `npm pack` produces a tarball without the executable bit.
 
@@ -1117,6 +1174,7 @@ aria2 officially ships **Windows x64** binaries and source only, so the other th
 | Windows arm64 | [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64) `v1.37.0` | `5694080902fff84c8636e561c48f7a65278e8d4f05efefe953637f60a397c81f` |
 | Linux x64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0` (musl static) | `e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a` |
 | Linux arm64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0` (musl static) | `0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6` |
+| macOS x64 / arm64 | **Built in this repository's own CI** (`scripts/build-aria2-darwin.sh`; source is the official release tarball, SHA256 `a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8b20efa`; artifacts carry SLSA provenance) | Recorded per build in the CI logs and provenance (pinned source + reproducible script — no longer dependent on a fixed hash from a third-party publisher) |
 
 ## Disclaimer
 

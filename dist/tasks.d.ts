@@ -10,8 +10,16 @@ export interface RetryRequest {
     sha256?: string;
     checksum?: string;
     ifExists?: 'overwrite' | 'skip' | 'rename';
+    /** 调用方声明的期望文件大小（字节）；重试时同样参与字节数校验 */
+    expectedSize?: number;
     /** 镜像前缀（含 `auto`） */
     mirror?: string;
+    /**
+     * 调用方显式传入的代理地址（1.7.0）。不是凭证（它本来就是明文配置），
+     * 与 mirror 同级落盘：不带上的话，走显式代理的任务重试时会静默变直连。
+     * 环境变量派生的代理**不**在这里 —— 重试时按当时的 env 重新解析。
+     */
+    proxy?: string;
     /** 该条目当时的带宽上限（批量里是均分后的份额） */
     maxBandwidthBytes?: number;
     timeoutMs?: number;

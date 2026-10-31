@@ -22,7 +22,7 @@ import {
   getAria2Path,
 } from './downloader.js'
 import type { Aria2Observation } from './downloader.js'
-import { decide, decideConcurrency, LARGE_FILE } from './decision.js'
+import { decide } from './decision.js'
 import { isSafeTaskId, ProgressReporter, readTaskRecord } from './progress.js'
 import type { ProgressSession } from './progress.js'
 import { applyMirror, isAutoMirror } from './mirror.js'
@@ -55,6 +55,8 @@ import { registerStatusRpc } from './rpc.js'
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js'
 import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js'
 import { recordThroughput } from './throughput-cache.js'
+import { downloadGate, GATE_CAPACITY } from './gate.js'
+import { checkProxyParam, resolveProxy } from './proxy.js'
 import {
   describeMismatch,
   describeSkip,
@@ -71,6 +73,8 @@ import {
 } from './tasks.js'
 import type { RetryRequest, RetryStartResult } from './tasks.js'
 import type {
+  BackgroundBatchResult,
+  BackgroundSingleResult,
   BatchDownloadResult,
   BatchItemResult,
   DownloadMethod,
@@ -79,6 +83,7 @@ import type {
   IfExistsPolicy,
   RequestHeaders,
   SmartDownloadArgs,
+  SmartDownloadOutcome,
   SmartDownloadResult,
   ToolExecutionContext,
 } from './types.js'
@@ -205,6 +210,48 @@ function renderBatch(value: BatchDownloadResult): string {
   return [head, ...lines].join('\n')
 }
 
+/**
+ * 判定「后台形态」（1.7.0）。
+ *
+ * 为什么是类型谓词而不是就地 `'background' in value`：render 的三元链需要把
+ * 联合类型**双向**收窄 —— `in` 只收窄真值分支，假值分支仍混着后台两支，后面
+ * 访问 `skipped` / `path` 全部报错。谓词把「后台两支」一次性从联合里摘出去，
+ * 前台分支保持与 1.2.0 相同的窄化结果。
+ */
+function isBackgroundResult(
+  value: SmartDownloadOutcome,
+): value is BackgroundSingleResult | BackgroundBatchResult {
+  return 'background' in value && value.background === true
+}
+
+/**
+ * smart_download 返回值的模型可见文案（output.render 的主体）。
+ *
+ * 四支形态四条文案：后台两支给「下一步」（拿 taskId / batchId 去 download_status 查），
+ * 前台单条目的文案逐字保留（1.2.0 回归项），批量走 renderBatch。
+ */
+function renderOutcome(value: SmartDownloadOutcome): string {
+  if (isBackgroundResult(value)) {
+    return 'taskId' in value
+      ? `Download started in background (task ${value.taskId}): poll download_status with taskId "${value.taskId}" for progress and final state.`
+      : `Batch ${value.batch} started in background (${value.count} entries): poll download_status with batchId "${value.batch}" for per-entry progress.`
+  }
+  if ('results' in value) return renderBatch(value)
+  return value.skipped === true
+    ? `Download skipped (already exists): ${value.path}${verifiedNote(value)}${
+        value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''
+      }`
+    : `Download ${value.success ? 'succeeded' : 'failed'}${
+        value.method ? ` via ${value.method}` : ''
+      }${
+        value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''
+      }${value.mirrored ? ' (via mirror)' : ''}${
+        value.verifySkipped ? ` (${value.verifySkipped})` : ''
+      }${verifiedNote(value)}${
+        value.diskCheckSkipped ? ` (${value.diskCheckSkipped})` : ''
+      }${value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''}`
+}
+
 export function apply(ctx: Context): void {
   // 浏览器端进度面板的数据源；纯 CLI profile 下没有 connection 服务时静默跳过。
   registerStatusRpc(ctx)
@@ -216,7 +263,7 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'smart_download',
       description:
-        'Download a file with multi-threading when possible. It probes the server, then uses bundled aria2 with 4 or 8 connections based on file size, and automatically falls back to single-threaded curl if Range is unsupported, the file is small, or aria2 is unavailable. Resumes an interrupted download when the server supports Range. Pass the checksum printed in the project\'s official documentation as sha256 to verify the downloaded bytes against it, and pass userAgent / referer / headers when that documentation\'s download link needs them. Set mirror to a prefix such as "https://gh-proxy.com/" or to "auto" to accelerate a GitHub download. Pass targets instead of url to download several files in one call: each entry is verified and reported on its own, a failing entry never discards the entries that succeeded, and maxBandwidth caps the whole call. Poll progress with download_status.',
+        'Download a file with multi-threading when possible. It probes the server, then uses bundled aria2 with 4 or 8 connections based on file size, and automatically falls back to single-threaded curl if Range is unsupported, the file is small, or aria2 is unavailable. Resumes an interrupted download when the server supports Range. Pass the checksum printed in the project\'s official documentation as sha256 to verify the downloaded bytes against it, and pass userAgent / referer / headers when that documentation\'s download link needs them. Set mirror to a prefix such as "https://gh-proxy.com/" or to "auto" to accelerate a GitHub download. Pass proxy to route the probe and the download through the same HTTP(S) proxy. Pass targets instead of url to download several files in one call: each entry is verified and reported on its own, a failing entry never discards the entries that succeeded, and maxBandwidth caps the whole call. Pass background: true to start the download and return immediately with a taskId (or a batch id for targets), then poll progress with download_status.',
       parameters: {
         url: {
           type: 'string',
@@ -257,6 +304,11 @@ export function apply(ctx: Context): void {
                 type: 'string',
                 description:
                   "Optional expected checksum for this entry's bytes: md5/sha1/sha256/sha512, e.g. \"sha512:<hex>\" or a bare hex digest (the algorithm is inferred from its length). Mutually exclusive with sha256.",
+              },
+              expectedSize: {
+                type: 'integer',
+                description:
+                  "Optional expected size in bytes for this entry (same semantics as the call-level expectedSize; per-entry wins for that entry).",
               },
               ifExists: {
                 type: 'string',
@@ -318,6 +370,21 @@ export function apply(ctx: Context): void {
           description:
             'Optional extra request headers as a "Name": "value" map, e.g. {"Authorization": "Bearer …"}. Merged with userAgent / referer, which win on conflicts. Headers the plugin manages itself (Range, Accept-Encoding, Host, …) are rejected.',
         },
+        proxy: {
+          type: 'string',
+          description:
+            'Optional HTTP(S) proxy URL for this call, e.g. "http://127.0.0.1:7890". The probe, mirror probing and the download itself all use the same proxy, so the decision is never based on a response the download could not have seen. An explicit proxy wins over the HTTPS_PROXY / HTTP_PROXY / ALL_PROXY environment variables; hosts listed in NO_PROXY connect directly (same semantics as curl). Only http(s) proxies are supported (no SOCKS); an invalid value is rejected before any request is made.',
+        },
+        expectedSize: {
+          type: 'integer',
+          description:
+            'Optional expected file size in bytes, e.g. the size printed in the project\'s official documentation. When the server declares a length that differs, the call is rejected before downloading; when the server declares no length (or a compressed response), the downloaded bytes are verified against this size instead of skipping verification.',
+        },
+        background: {
+          type: 'boolean',
+          description:
+            'Run the download in the background. The same pre-flight validation runs first (an invalid argument still fails this call synchronously), then the call returns immediately with a taskId (single) or a batch id plus count (batch) while the download continues in the host process. Poll download_status for progress and final state (batch: pass its batchId). The progress panel and the download manager (cancel / retry) work as usual. Entries whose connection slots are busy are queued; timeoutMs keeps the same 1s..30min range.',
+        },
       },
       output: {
         schema: {
@@ -346,6 +413,8 @@ export function apply(ctx: Context): void {
                 mirrored: { type: 'boolean' },
                 mirror: { type: 'string' },
                 mirrorSkipped: { type: 'string' },
+                // 1.7.0：实际使用的代理地址（仅走了代理时出现）
+                proxy: { type: 'string' },
               },
             },
             {
@@ -382,47 +451,65 @@ export function apply(ctx: Context): void {
                       mirrored: { type: 'boolean' },
                       mirror: { type: 'string' },
                       mirrorSkipped: { type: 'string' },
+                      proxy: { type: 'string' },
                     },
                   },
                 },
               },
             },
+            {
+              // 1.7.0：后台形态（单条目 / 批量共用一支）。「已提交」与「已完成」
+              // 是两种语义，字段集与前台两支互斥 —— additionalProperties:false
+              // 保证后台结果不会恰好落进前台分支（反之亦然）。
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                success: { type: 'boolean' },
+                background: { type: 'boolean' },
+                taskId: { type: 'string' },
+                url: { type: 'string' },
+                output: { type: 'string' },
+                batch: { type: 'string' },
+                count: { type: 'integer' },
+              },
+            },
           ],
         },
-        render: (_args: SmartDownloadArgs, value: SmartDownloadResult | BatchDownloadResult) => [
+        render: (_args: SmartDownloadArgs, value: SmartDownloadOutcome) => [
           {
             type: 'text',
-            // 分支一的文案逐字保留（1.2.0 回归项）；批量走另一条文案。
-            text:
-              'results' in value
-                ? renderBatch(value)
-                : value.skipped === true
-                  ? `Download skipped (already exists): ${value.path}${verifiedNote(value)}${
-                      value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''
-                    }`
-                  : `Download ${value.success ? 'succeeded' : 'failed'}${
-                      value.method ? ` via ${value.method}` : ''
-                    }${
-                      value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''
-                    }${value.mirrored ? ' (via mirror)' : ''}${
-                      value.verifySkipped ? ` (${value.verifySkipped})` : ''
-                    }${verifiedNote(value)}${
-                      value.diskCheckSkipped ? ` (${value.diskCheckSkipped})` : ''
-                    }${value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''}`,
+            // 四支形态四条文案，主体收在 renderOutcome（后台两支给「下一步」；
+            // 前台单条目的文案逐字保留 —— 1.2.0 回归项）。
+            text: renderOutcome(value),
           },
         ],
       },
       async execute(
         args: SmartDownloadArgs,
         exec: ToolExecutionContext,
-      ): Promise<SmartDownloadResult | BatchDownloadResult> {
+      ): Promise<SmartDownloadOutcome> {
         // 0a. 带宽上限与单条目超时：非法值都在**发起任何请求之前**拒绝（同一套做法）。
         //     放到后面等于先下了几百 MB 再告诉调用方参数写错了。
         const maxBandwidthBytes = parseMaxBandwidth(args.maxBandwidth)
         const timeoutMs = parseTimeoutMs(args.timeoutMs)
 
+        // 0a-1. proxy 参数（1.7.0）：调用级，在这里校验一次（非法直接拒绝）。
+        // 每条目再按各自的原始 URL 解析生效代理（NO_PROXY 逐条判定，见 downloadOneInner）。
+        if (args.proxy !== undefined) {
+          const outcome = checkProxyParam(args.proxy)
+          if (!outcome.ok) throw new Error(`拒绝下载：${outcome.reason}`)
+        }
+
         // 0b. url / targets 二选一；超批量上限也在这里拒绝（都不发请求）。
         const dispatch = resolveTargets(args)
+        // 0a-2. background（1.7.0）：非布尔值显式拒绝，而不是 `=== true` 判否后
+        // 静默落回前台 —— 调用方要的是「立即返回」，静默降级成同步等待与意图相反。
+        if (args.background !== undefined && typeof args.background !== 'boolean') {
+          throw new Error(
+            `拒绝下载：background 必须是布尔值（收到 ${JSON.stringify(args.background)}）`,
+          )
+        }
+        const background = args.background === true
 
         const header = exec.agent?.session?.header
         const session: ProgressSession = { id: header?.id, cwd: header?.cwd }
@@ -434,23 +521,27 @@ export function apply(ctx: Context): void {
           referer: args.referer,
           headers: args.headers,
           timeoutMs,
+          proxyParam: args.proxy,
         }
 
         // 1. 单条目：与 1.2.0 完全同一条路径（同一个 downloadOne，抛错照抛）
         if (dispatch.kind === 'single') {
-          return downloadOne(dispatch.item, {
+          const singleCtx: ItemContext = {
             ...shared,
             batchId: makeBatchId(),
             maxBandwidthBytes,
-          })
+          }
+          if (!background) return downloadOne(dispatch.item, singleCtx)
+          return startBackgroundSingle(dispatch.item, singleCtx, args.output)
         }
 
-        // 2. 批量：窗口按「批内总连接数有界」反推（推导与「为什么」见 batchWindow）；
+        // 2. 批量：窗口 = 全局闸门容量（1.7.0 起与闸门同源，见 src/gate.ts ——
+        //    没有后台任务时两者本来相等，行为与 1.6.0 完全相同；有后台任务时
+        //    闸门保证「批内 + 后台」合计仍不越过连接预算）。
         //    失败/取消逐条返回（D4=②）
-        const limit = batchWindow(decideConcurrency(LARGE_FILE))
         // 实际并发位：条目比窗口少时按条目数算 —— 否则 2 条的批次也按窗口份分带宽，
         // 用户给的上限会被白白用掉不到四分之一。
-        const workers = Math.min(limit, dispatch.targets.length)
+        const workers = Math.min(GATE_CAPACITY, dispatch.targets.length)
         const batchId = makeBatchId()
         // 带宽上限是**一批内共享**的，因此按实际并发位均分：一批的合计吞吐不会超过
         // 用户给的那个数。这里不需要任何跨调用状态 —— smart_download 未声明
@@ -459,18 +550,22 @@ export function apply(ctx: Context): void {
           maxBandwidthBytes === undefined
             ? undefined
             : Math.max(1, Math.floor(maxBandwidthBytes / workers))
-        const results = await runBatch(
-          dispatch.targets,
-          { ...shared, batchId, maxBandwidthBytes: perItem },
-          workers,
-        )
-        return {
-          batch: batchId,
-          results,
-          succeeded: results.filter((item) => item.success).length,
-          failed: results.filter((item) => !item.success && item.cancelled !== true).length,
-          cancelled: results.filter((item) => item.cancelled === true).length,
+        const batchCtx: ItemContext = {
+          ...shared,
+          batchId,
+          maxBandwidthBytes: perItem,
         }
+        if (!background) {
+          const results = await runBatch(dispatch.targets, batchCtx, workers)
+          return {
+            batch: batchId,
+            results,
+            succeeded: results.filter((item) => item.success).length,
+            failed: results.filter((item) => !item.success && item.cancelled !== true).length,
+            cancelled: results.filter((item) => item.cancelled === true).length,
+          }
+        }
+        return startBackgroundBatch(dispatch.targets, batchCtx, workers, batchId)
       },
     }),
   )
@@ -479,12 +574,17 @@ export function apply(ctx: Context): void {
     defineTool({
       name: 'download_status',
       description:
-        'Query the progress of downloads started by smart_download. Returns a read-only snapshot of recent tasks (id, percentage, status, speed, ETA) read from the plugin progress directories. Pass taskId to look up one task, or omit it to list the most recent ones.',
+        'Query the progress of downloads started by smart_download. Returns a read-only snapshot of recent tasks (id, percentage, status, speed, ETA) read from the plugin progress directories. Pass taskId to look up one task, batchId to list the tasks of one call (a background batch returns this id), or omit both to list the most recent ones.',
       parameters: {
         taskId: {
           type: 'string',
           description:
             'Optional task id returned by an earlier download; omit to list recent tasks',
+        },
+        batchId: {
+          type: 'string',
+          description:
+            'Optional batch id to list only the tasks of one call. Background batch calls return this id; when both taskId and batchId are given both conditions must match. "total" counts the filtered set before the limit is applied.',
         },
         limit: {
           type: 'integer',
@@ -560,7 +660,7 @@ export function apply(ctx: Context): void {
         // 拿不到会话时退化为只扫轨道二（与 0.5.0 之前的行为一致）。
         const header = exec.agent?.session?.header
         const session: ProgressSession = { id: header?.id, cwd: header?.cwd }
-        return readDownloadStatus(args.limit, args.taskId, session)
+        return readDownloadStatus(args.limit, args.taskId, session, args.batchId)
       },
     }),
   )
@@ -617,6 +717,19 @@ interface ItemContext {
    * 从面板重试时直接复用磁盘上读回的那一份，避免二次推导改变路径。
    */
   request?: RetryRequest
+  /**
+   * `proxy` 参数（1.7.0）。**调用方已在 execute 的 preflight 阶段校验过**的
+   * 代理地址；这里只透传，不再校验。每条目按自己的原始 URL 解析生效代理
+   * （NO_PROXY 逐条判定），解析收在 downloadOneInner 里。
+   */
+  proxyParam?: string
+  /**
+   * 后台模式（1.7.0）的开工回调：条目**真正开始跑**（拿到闸门槽位、建好
+   * ProgressReporter）时以该 reporter 调用一次。后台 execute 用它等待「第一条
+   * 进度记录落盘」，保证 `download_status(taskId)` 在返回之后立即可查。
+   * 前台路径不设置 —— 行为与 1.6.0 逐字段相同。
+   */
+  onStarted?: (reporter: ProgressReporter) => void
 }
 
 /** 批量里的一个条目（与 DownloadTarget 同构，内部别名，便于单条目复用同一条路径）。 */
@@ -625,6 +738,7 @@ interface DownloadItem {
   output?: string
   sha256?: string
   checksum?: string
+  expectedSize?: number
   ifExists?: IfExistsPolicy
 }
 
@@ -644,8 +758,13 @@ function buildRetryRequest(item: DownloadItem, ctx: ItemContext): RetryRequest {
     ...(output === undefined ? {} : { output }),
     ...(item.sha256 === undefined ? {} : { sha256: item.sha256 }),
     ...(item.checksum === undefined ? {} : { checksum: item.checksum }),
+    ...(item.expectedSize === undefined ? {} : { expectedSize: item.expectedSize }),
     ...(item.ifExists === undefined ? {} : { ifExists: item.ifExists }),
     ...(ctx.mirror === undefined ? {} : { mirror: ctx.mirror }),
+    // 代理不是凭证，可以落盘（与 mirror 同级）：重试时若不带上，走显式代理
+    // 的任务会静默变直连。环境变量派生的代理不会进这里 —— 重试时重新解析，
+    // 拿到的永远是当时的最新配置。
+    ...(ctx.proxyParam === undefined ? {} : { proxy: ctx.proxyParam }),
     ...(ctx.maxBandwidthBytes === undefined
       ? {}
       : { maxBandwidthBytes: ctx.maxBandwidthBytes }),
@@ -681,7 +800,29 @@ async function downloadOne(item: DownloadItem, ctx: ItemContext): Promise<SmartD
   }
 }
 
-async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<SmartDownloadResult> {
+/**
+ * 条目级 preflight：所有「不需要网络、不需要探测」的参数校验收口在这里。
+ *
+ * 为什么单独一层（1.7.0）：同一份校验有两个消费方 ——
+ * - **前台路径**：下载主体的第一步，非法值就地抛错（与 1.6.0 的语义完全一致）；
+ * - **后台路径**：必须在启动后台任务之前同步跑一遍 —— 后台任务的异常只进进度
+ *   轨道，而 reporter 在校验之后才创建，校验失败时**没有任何进度可写**，任务会
+ *   「看起来提交了，实际上哪也没去」。校验前移后，非法入参仍然在工具调用处
+ *   同步抛错，能开进后台的条目必然能写出进度。
+ *
+ * 两个消费方跑**同一个**函数（而不是抄两份）：校验规则与文案只写一处，
+ * 漂移风险为零。
+ */
+function preflight(
+  item: DownloadItem,
+  ctx: ItemContext,
+): {
+  requestHeaders: RequestHeaders
+  ifExists: IfExistsPolicy
+  expectedSha256?: string
+  expectedChecksum?: ChecksumSpec
+  expectedSize?: number
+} {
   // 0. 协议白名单：URL 可能来自模型读到的任意页面，必须先收紧到 http(s)。
   // 实测（0.4.1）file:// 会被 curl 接受并复制本地文件到目标路径。
   const checked = checkDownloadUrl(item.url)
@@ -721,6 +862,19 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     expectedChecksum = normalized
   }
 
+  // 0b-1. expectedSize（1.7.0）：正整数，其余拒绝。schema 层只表达「是什么类型」，
+  // 越界值由这里挡（与 maxBandwidth / timeoutMs 同一套做法：非法值在发请求之前拒绝）。
+  let expectedSize: number | undefined
+  if (item.expectedSize !== undefined) {
+    const value = Number(item.expectedSize)
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(
+        `拒绝下载：expectedSize 必须是正整数字节数（收到 ${JSON.stringify(item.expectedSize)}）`,
+      )
+    }
+    expectedSize = value
+  }
+
   // 0c. 同名文件策略：三个值之外一律拒绝，避免把拼错的值静默当成 overwrite。
   const ifExists: IfExistsPolicy = item.ifExists ?? 'overwrite'
   if (ifExists !== 'overwrite' && ifExists !== 'skip' && ifExists !== 'rename') {
@@ -739,7 +893,54 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
   if (!headerResult.ok) {
     throw new Error(`拒绝下载：${headerResult.reason}`)
   }
-  const requestHeaders: RequestHeaders = headerResult.headers
+
+  return {
+    requestHeaders: headerResult.headers,
+    ifExists,
+    ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
+    ...(expectedChecksum === undefined ? {} : { expectedChecksum }),
+    ...(expectedSize === undefined ? {} : { expectedSize }),
+  }
+}
+
+/**
+ * 单条目下载的编排入口：preflight → 代理解析 → 全局闸门 → 下载主体。
+ *
+ * 全局闸门（1.7.0）：所有条目（前台 / 后台 / 重试）开工前先拿槽位。容量与批内
+ * 窗口同源（src/gate.ts），因此「没有后台任务」时前台批量与单条目的行为与 1.6.0
+ * 完全相同 —— 批量窗口宽度本来就等于闸门容量。为什么放在 preflight 之后：
+ * 非法参数要立刻拒绝，不该在闸门口排队等一个注定失败的调用。
+ */
+async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<SmartDownloadResult> {
+  const pre = preflight(item, ctx)
+
+  // 0e. 代理解析（1.7.0）：每条目解析一次 —— NO_PROXY 按条目的**原始主机**判定，
+  // 同一批里完全可能有的条目直连、有的走代理。探测与下载共用同一个解析结果
+  // （见 src/proxy.ts 文件头：三层不一致正是这个特性要修的静默降级）。
+  const proxy = resolveProxy(item.url, ctx.proxyParam).proxyUrl ?? undefined
+
+  const releaseGate = await downloadGate.acquire()
+  try {
+    return await downloadOneStarted(item, ctx, pre, proxy)
+  } finally {
+    releaseGate()
+  }
+}
+
+/** 下载主体（拿到闸门槽位之后才执行；入参全部来自 preflight 与代理解析）。 */
+async function downloadOneStarted(
+  item: DownloadItem,
+  ctx: ItemContext,
+  pre: {
+    requestHeaders: RequestHeaders
+    ifExists: IfExistsPolicy
+    expectedSha256?: string
+    expectedChecksum?: ChecksumSpec
+    expectedSize?: number
+  },
+  proxy: string | undefined,
+): Promise<SmartDownloadResult> {
+  const { requestHeaders, ifExists, expectedSha256, expectedChecksum, expectedSize } = pre
 
   // 1. 镜像：显式前缀走拼接；`auto` 必须先拿到原始地址的指纹才能挑候选，
   //    因此自动模式的解析推迟到探测之后（见下方 2b）。
@@ -772,6 +973,11 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     provisionalPath,
     retryRequest,
   )
+
+  // 后台模式（1.7.0）：开工即回调，后台启动方据此等到「第一条进度记录落盘」
+  // 再返回，保证 download_status(taskId) 在调用返回后立即可查。前台路径不设置
+  // 该钩子，行为与 1.6.0 逐字段相同。
+  ctx.onStarted?.(reporter)
 
   // 单条目的超时信号：与整批信号合并（AbortSignal.any），因此超时只终止这一条，
   // 同批其它条目照常跑。为什么不用 Promise.race：子进程必须**真的**被结束
@@ -829,11 +1035,16 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
   reporter.report(0, '探测中…')
   let probe: Awaited<ReturnType<typeof probeUrl>>
   try {
-    probe = await probeUrl(requestedUrl, signal, { headers: requestHeaders })
+    probe = await probeUrl(requestedUrl, signal, { headers: requestHeaders, proxy })
   } catch (err) {
     // 探测阶段也可能被取消/超时：不兜住的话该任务会在两张轨道上永远停在 running
     // （面板要等 10 分钟才会忽略它），而它其实已经结束了。
     if (abortOutcome() !== 'failed') return await finishAborted(err)
+    // 探测失败同样要有终态（1.7.0 收口）：只 throw 的话前台调用方看得到错误，
+    // 但进度轨道永远停在「探测中」，批量里这一行的面板会一直转圈。
+    const message = err instanceof Error ? err.message : String(err)
+    reporter.fail(`探测失败：${message}`)
+    await reporter.awaitFlush()
     throw err
   }
 
@@ -850,6 +1061,7 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
         async (candidateUrl): Promise<MirrorProbeOutcome> => {
           const candidateProbe = await probeUrl(candidateUrl, signal, {
             headers: requestHeaders,
+            proxy,
           })
           return {
             ok: candidateProbe.contentLength !== undefined,
@@ -861,6 +1073,10 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     } catch (err) {
       // 候选镜像的探测同样可能被取消/超时打断（这里会连起好几个 5s 超时的请求）
       if (abortOutcome() !== 'failed') return await finishAborted(err)
+      // 与主探测同一条收口：异常路径也要有终态，不让轨道停在「探测中」
+      const message = err instanceof Error ? err.message : String(err)
+      reporter.fail(`镜像解析失败：${message}`)
+      await reporter.awaitFlush()
       throw err
     }
     requestedUrl = resolution.url
@@ -868,6 +1084,23 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     mirrorPrefix = resolution.mirror
     mirrorSkipped = resolution.skipped
     if (resolution.reason) reporter.report(0, resolution.reason)
+  }
+
+  // 2c-0. expectedSize 对账（1.7.0）：远端声明了长度且与调用方给的不等时，在发
+  // 任何下载请求之前拒绝 —— 两种「应该多大」打架，说明地址与文档至少一个过期了；
+  // 硬下只会白跑一趟，而且没人说得清该信哪个大小。自动镜像已被证实与原地址等长，
+  // 因此这里的对账对镜像下载同样成立。
+  if (
+    expectedSize !== undefined &&
+    probe.contentLength !== undefined &&
+    probe.contentLength !== expectedSize
+  ) {
+    const message =
+      `拒绝下载：远端声明 ${probe.contentLength} 字节，与调用方声明的 expectedSize（${expectedSize} 字节）不一致` +
+      ' —— 地址与官方文档至少一个已过期，请核对后再试'
+    reporter.fail(message)
+    await reporter.awaitFlush()
+    throw new Error(message)
   }
 
   // 探测可能拿不到文件大小（HEAD 失败 / 超时 / chunked 无 Content-Length）。
@@ -935,13 +1168,17 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     checksum?: string
     checksumAlgorithm?: string
   }> => {
+    // 字节数校验的基准（1.7.0）：调用方给了 expectedSize 时以它为准 —— 它是对
+    // 「未压缩落盘字节数」的承诺，与远端是否声明长度、是否返回压缩编码都无关
+    // （与远端声明的对账已在 2c-0 完成，两者不会打架）。没给时维持原样：
+    // 远端声明长度 + 压缩编码判定，与 1.6.0 逐字段相同。
     const outcome = verifySize(
       localFileSize(outputPath),
-      probe.contentLength,
-      probe.contentEncoding,
+      expectedSize ?? probe.contentLength,
+      expectedSize !== undefined ? undefined : probe.contentEncoding,
     )
     if (outcome.kind === 'mismatch') {
-      const message = describeMismatch(outcome)
+      const message = describeMismatch(outcome, expectedSize !== undefined ? 'caller' : 'remote')
       reporter.fail(message)
       await reporter.awaitFlush()
       throw new IntegrityError(message)
@@ -1009,6 +1246,9 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
     mirrored,
     ...(mirrorPrefix ? { mirror: mirrorPrefix } : {}),
     ...(mirrorSkipped ? { mirrorSkipped } : {}),
+    // 代理（1.7.0）：只有确实走了代理时才出现该字段 —— 「没配代理」是常态，
+    // 常态不占字段位（与 mirror / mirrorSkipped 同一口径）。
+    ...(proxy !== undefined ? { proxy } : {}),
     success: true,
     path: outputPath,
     method,
@@ -1029,11 +1269,16 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
   // 有摘要时仍然校验已有文件 —— 「跳过下载」不等于「放弃验证」。校验失败
   // 必须抛错并保留原文件，不能把一个坏文件报成 skipped 成功。
   if (ifExists === 'skip' && existsSync(outputPath)) {
+    // 「跳过下载」不等于「放弃验证」：摘要与 expectedSize（1.7.0 起三者一视同仁）
+    // 任一给出时都校验已有文件 —— 校验失败照样抛错并保留原文件，不能把一个坏
+    // 文件报成 skipped 成功。
     const integrity =
-      expectedSha256 !== undefined || expectedChecksum !== undefined
+      expectedSha256 !== undefined || expectedChecksum !== undefined || expectedSize !== undefined
         ? await assertIntegrity('文件已存在（已跳过下载）')
         : { verifySkipped: '' }
     if (expectedSha256 === undefined && expectedChecksum === undefined) {
+      // assertIntegrity 只在「校验了内容哈希」时自己写终态；expectedSize 只验
+      // 字节数、终态仍由这里写（与「什么都没传」的既有路径同一条）。
       reporter.done('下载跳过（文件已存在）')
       await reporter.awaitFlush()
     }
@@ -1042,6 +1287,7 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
       mirrored,
       ...(mirrorPrefix ? { mirror: mirrorPrefix } : {}),
       ...(mirrorSkipped ? { mirrorSkipped } : {}),
+      ...(proxy !== undefined ? { proxy } : {}),
       success: true,
       path: outputPath,
       ...sizeField,
@@ -1117,6 +1363,7 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
         resume,
         requestHeaders,
         ctx.maxBandwidthBytes,
+        proxy,
       )
       reporter.done()
       // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
@@ -1153,6 +1400,7 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
           resume,
           requestHeaders,
           ctx.maxBandwidthBytes,
+          proxy,
         )
         reporter.done('下载完成（curl 回退）')
         await reporter.awaitFlush()
@@ -1185,6 +1433,7 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
       resume,
       requestHeaders,
       ctx.maxBandwidthBytes,
+      proxy,
     )
     reporter.done()
     await reporter.awaitFlush()
@@ -1201,33 +1450,134 @@ async function downloadOneInner(item: DownloadItem, ctx: ItemContext): Promise<S
 }
 
 /**
- * 批内滑动窗口宽度：按「批内总连接数有界」反推。
+ * 「批内连接预算」与「窗口宽度」的推导（1.7.0 起收口在 src/gate.ts）：
  *
- * 为什么不再是「单条目最高档」：单文件上限压在 8 的理由是「避免触发服务器按 IP 限
- * 并发」（src/decision.ts 的注释），而 8 条 × 每条 8 连接 = 峰值 64 连接，正好违背
- * 那个既定取舍。
+ *   进程内连接预算 = 单条目最高档 × 2（= 16）
+ *   闸门容量 = 预算 ÷ 单条目可能占用的连接数（每条 ≤ 8）→ 2
  *
- * 为什么是「反推」而不是写死一个 2：窗口与「一条会占几个连接」是耦合的 ——
- * decision.ts 的档位阶梯一旦调整，写死的窗口会静默失真（既省不下连接、又不够并发）。
- * 因此预算与档位都从 decideConcurrency() 来：
- *
- *   批内连接预算 = 单条目最高档 × 2
- *
- * 为什么是两倍（而不是一倍或四倍）：批次里的各条目往往喂不满自己的分片上限 ——
- * 分片数要够多、服务器要够快；两倍是愿意为「批量比单文件快」多冒的连接风险上限。
- *
- *   窗口 = 预算 ÷ 单条目可能占用的连接数
- *
- * 代入当前阶梯（小文件 4 / 大文件 8）：每条 8 连接时窗口 2、每条 4 连接时窗口 4，
- * 两种情况峰值都是 16。批量在开工前并不知道各条目的大小（那要逐条探测），因此统一
- * 按最高档保守计算 —— 当前实际窗口恒为 2。单条目内部开 4 还是 8 仍由 decide() 按
- * 实际大小决定，与本窗口互不影响。
- *
- * @param perItemTier 单条目可能占用的连接数（当前传最高档，见上）
+ * 1.6.0 及之前，这条推导只约束**一批**（batchWindow）；1.7.0 起后台任务可以与
+ * 前台调用并存，约束升级为**进程内** —— 所有条目开工前先拿全局闸门的槽位。
+ * 容量与批内窗口是同一个数：没有后台任务时行为与 1.6.0 完全相同，有后台任务时
+ * 「批内 + 后台」合计仍不越过连接预算。完整推导与「为什么是两倍」见 src/gate.ts。
  */
-function batchWindow(perItemTier: number): number {
-  const budget = decideConcurrency(LARGE_FILE) * 2
-  return Math.max(1, Math.floor(budget / perItemTier))
+
+/**
+ * 后台批量里「preflight 就不合格」的条目：补一条 failed 进度记录，不影响其余条目。
+ *
+ * 为什么需要它（与 cancelTarget 同一条理由）：批量「一条失败不影响其余」是既定
+ * 语义，后台批量不能因为换了个启动方式就把它改成「一个坏条目否决整批」；但
+ * reporter 在 preflight 之后才创建，直接开工会在轨道上凭空消失。这里为不合格的
+ * 条目造一个独立 taskId（与 cancelTarget 同构），把拒绝原因写进终态。
+ */
+async function failTarget(target: DownloadItem, ctx: ItemContext, message: string): Promise<void> {
+  const output = targetOutputPath(target)
+  const taskId = makeTaskId()
+  const request = buildRetryRequest(target, ctx)
+  const reporter = new ProgressReporter(
+    taskId,
+    output,
+    ctx.session,
+    ctx.batchId,
+    output === '' ? undefined : path.resolve(output),
+    request,
+  )
+  reporter.fail(message)
+  await reporter.awaitFlush()
+}
+
+/**
+ * 后台启动单个条目（1.7.0）。
+ *
+ * 三个关键点：
+ * - **exec 用独立的 controller**：工具调用的 exec.signal 在调用结束后的语义由宿主
+ *   决定，而后台下载必须活过这次调用 —— 与 startRetry 同一套做法（1.6.0）。
+ *   取消走管理端点的进程内注册表（registerRunningTask），与前台一致；
+ * - **preflight 在启动前同步跑一遍**：非法入参在这里抛错（工具调用直接失败），
+ *   而不是留下一个无声失败的后台任务；
+ * - **返回前等第一条进度记录落盘**（onStarted 钩子 + awaitFlush）：保证
+ *   `download_status(taskId)` 在调用返回后立即可查，而不是「查了个寂寞」。
+ *   闸门被占满时条目还在排队，记录要等开工才出现 —— 这是排队语义，写进了参数说明。
+ */
+async function startBackgroundSingle(
+  item: DownloadItem,
+  ctx: ItemContext,
+  outputArg: string | undefined,
+): Promise<BackgroundSingleResult> {
+  preflight(item, ctx)
+  const taskId = makeTaskId()
+  const controller = new AbortController()
+  const exec: ToolExecutionContext = {
+    signal: controller.signal,
+    agent: { session: { header: { id: ctx.session.id, cwd: ctx.session.cwd } } },
+  }
+  const reporters: ProgressReporter[] = []
+  void downloadOne(item, {
+    ...ctx,
+    exec,
+    taskIdOverride: taskId,
+    controller,
+    onStarted: (reporter) => {
+      reporters.push(reporter)
+    },
+  }).catch(() => {
+    // 后台任务的失败已经写进进度记录（含 preflight 之后的每条失败路径）；
+    // 这里再抛只会变成未处理的 rejection。
+  })
+  // setImmediate 跨过 downloadOne 的整条启动微任务链（preflight → 闸门 → reporter
+  // → onStarted），之后 flush 才有东西可等。
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  await Promise.all(reporters.map((reporter) => reporter.awaitFlush()))
+  return {
+    success: true,
+    background: true,
+    taskId,
+    url: item.url,
+    ...(outputArg === undefined ? {} : { output: path.resolve(outputArg) }),
+  }
+}
+
+/**
+ * 后台启动一批（1.7.0）。
+ *
+ * 与后台单条目同构，多一层「不合格条目落轨」：preflight 失败的条目补一条
+ * failed 记录（见 failTarget），其余照常开工 —— 前台批量「一条失败不影响其余」
+ * 的语义在后台同样成立。返回值只带批次 ID：条目的 taskId 在各条目开工时才生成，
+ * 未开工的条目还没有 ID，给一个缺尾巴的列表等于谎报；`download_status(batchId)`
+ * 是可靠的整批句柄。
+ */
+async function startBackgroundBatch(
+  targets: DownloadTarget[],
+  ctx: ItemContext,
+  workers: number,
+  batchId: string,
+): Promise<BackgroundBatchResult> {
+  const runnable: DownloadItem[] = []
+  for (const target of targets) {
+    try {
+      preflight(target, ctx)
+      runnable.push(target)
+    } catch (err) {
+      await failTarget(target, ctx, err instanceof Error ? err.message : String(err))
+    }
+  }
+  const controller = new AbortController()
+  const exec: ToolExecutionContext = {
+    signal: controller.signal,
+    agent: { session: { header: { id: ctx.session.id, cwd: ctx.session.cwd } } },
+  }
+  const reporters: ProgressReporter[] = []
+  void runBatch(runnable, {
+    ...ctx,
+    exec,
+    onStarted: (reporter) => {
+      reporters.push(reporter)
+    },
+  }, workers).catch(() => {
+    // 同 startBackgroundSingle：失败已落轨，不再向上抛。
+  })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  await Promise.all(reporters.map((reporter) => reporter.awaitFlush()))
+  return { success: true, background: true, batch: batchId, count: targets.length }
 }
 
 /** 批量上限：与进度读取端的 MAX_STATUS_LIMIT 对齐，理由见 resolveTargets。 */
@@ -1268,6 +1618,7 @@ function resolveTargets(
         output: args.output,
         sha256: args.sha256,
         checksum: args.checksum,
+        expectedSize: args.expectedSize,
         ifExists: args.ifExists,
       },
     }
@@ -1458,6 +1809,7 @@ function toItemResult(target: DownloadItem, value: SmartDownloadResult): BatchIt
     ...(value.mirrored ? { mirrored: value.mirrored } : {}),
     ...(value.mirror ? { mirror: value.mirror } : {}),
     ...(value.mirrorSkipped ? { mirrorSkipped: value.mirrorSkipped } : {}),
+    ...(value.proxy ? { proxy: value.proxy } : {}),
   }
 }
 
@@ -1591,6 +1943,12 @@ export function startRetry(
   if (request.checksum !== undefined && !normalizeChecksum(request.checksum)) {
     return { started: false, taskId, reason: 'not-retryable' }
   }
+  // 代理（1.7.0）与摘要同一套纪律：记录里的 proxy 形状上像就行了吗？不 ——
+  // 非法代理开跑必然失败，而失败会写进这条任务记录，看起来像「服务器坏了」。
+  // 在这里提前判 not-retryable，与摘要的预校验同一条理由。
+  if (request.proxy !== undefined && !checkProxyParam(request.proxy).ok) {
+    return { started: false, taskId, reason: 'not-retryable' }
+  }
 
   const output = request.output ?? (task.outPath !== '' ? task.outPath : undefined)
   const item: DownloadItem = {
@@ -1614,6 +1972,7 @@ export function startRetry(
     session: session ?? {},
     batchId: request.batchId ?? makeBatchId(),
     mirror: request.mirror,
+    proxyParam: request.proxy,
     maxBandwidthBytes: request.maxBandwidthBytes,
     timeoutMs: request.timeoutMs,
     taskIdOverride: taskId,

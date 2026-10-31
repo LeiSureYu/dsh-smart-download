@@ -41,7 +41,7 @@ test('apply(): 工具 schema 通过 dsh-tools 校验并注册两个工具', () =
   )
 })
 
-test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都不再是必填）', () => {
+test('smart_download 的 parameters 含 15 项（1.7.0 新增 background / expectedSize / proxy），url 与 targets 二选一（都不再是必填）', () => {
   const registered: Array<{ name: string; parameters: Record<string, unknown> }> = []
   const ctx = stubCtx((tool: { name: string; parameters: Record<string, unknown> }) => {
     registered.push(tool)
@@ -70,12 +70,15 @@ test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都
   assert.deepEqual(
     Object.keys(params.properties).sort(),
     [
+      'background',
       'checksum',
+      'expectedSize',
       'headers',
       'ifExists',
       'maxBandwidth',
       'mirror',
       'output',
+      'proxy',
       'referer',
       'sha256',
       'targets',
@@ -84,6 +87,13 @@ test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都
       'userAgent',
     ],
   )
+  // 1.7.0 新增三项的形态断言：background 是 boolean、expectedSize 是 integer、
+  // proxy 是 string。工具 schema 是模型唯一的参数说明书，漏声明一项 = 那个参数
+  // 对模型不存在。
+  assert.equal(params.properties.background?.type, 'boolean', 'background 必须声明为 boolean')
+  assert.equal(params.properties.expectedSize?.type, 'integer', 'expectedSize 必须声明为 integer')
+  assert.equal(params.properties.proxy?.type, 'string', 'proxy 必须声明为 string')
+  assert.match(params.properties.proxy?.description ?? '', /NO_PROXY/, 'proxy 说明必须写明 NO_PROXY 直连')
   // timeoutMs（D3）：必须是 integer（超时是毫秒数，不接受字符串或小数），且说明里
   // 必须写明「超时的那一条失败、批量里其余条目不中断」—— 这是用户拍板时要的语义，
   // 模型只看得见 description，写漏了它就只能靠猜。
@@ -167,8 +177,13 @@ test('smart_download 的 parameters 含 12 项，url 与 targets 二选一（都
   assert.equal(items.additionalProperties, false)
   assert.deepEqual(
     Object.keys(items.properties ?? {}).sort(),
-    ['checksum', 'ifExists', 'output', 'sha256', 'url'],
-    '条目字段与单条目同构：url / output / sha256 / checksum / ifExists',
+    ['checksum', 'expectedSize', 'ifExists', 'output', 'sha256', 'url'],
+    '条目字段与单条目同构：url / output / sha256 / checksum / expectedSize（1.7.0）/ ifExists',
+  )
+  assert.equal(
+    (items.properties?.expectedSize as { type?: string } | undefined)?.type,
+    'integer',
+    '条目级 expectedSize 必须声明为 integer（与单条目同构）',
   )
   assert.deepEqual(items.required, ['url'], '条目的 url 必填')
   assert.deepEqual(
@@ -383,18 +398,21 @@ test('smart_download.render：通用摘要按真实算法显示，skip 不带 vi
   )
 })
 
-test('smart_download.output schema：单条与批量都声明 1.5.0 新增字段', () => {
+test('smart_download.output schema：单条与批量都声明新增字段（1.5.0 校验类 + 1.7.0 proxy），后台是独立的第三支', () => {
   const registered: Array<{ name: string; output: { schema: unknown } }> = []
   apply(stubCtx((tool: never) => registered.push(tool)) as never)
   const schema = registered.find((t) => t.name === 'smart_download')!.output.schema as {
     oneOf: Array<{
-      properties: Record<string, unknown>
+      properties: Record<string, { type?: string }>
       additionalProperties?: boolean
     }>
   }
 
-  assert.equal(schema.oneOf.length, 2)
-  const [single, batch] = schema.oneOf
+  // 1.7.0 起三支：前台单条目 / 前台批量 / 后台（单条目与批量共用一支）。
+  // 「已提交」与「已完成」是两种语义，后台必须独立成支 —— 否则后台结果会
+  // 恰好落进前台分支的 additionalProperties 白名单里。
+  assert.equal(schema.oneOf.length, 3)
+  const [single, batch, backgroundBranch] = schema.oneOf
   const item = (
     batch!.properties.results as {
       items: { properties: Record<string, unknown>; additionalProperties?: boolean }
@@ -404,8 +422,19 @@ test('smart_download.output schema：单条与批量都声明 1.5.0 新增字段
     assert.ok(single!.properties[key], `单条 output 必须声明 ${key}`)
     assert.ok(item.properties[key], `批量 item output 必须声明 ${key}`)
   }
+  // 1.7.0：proxy 只在「确实走了代理」时出现，两个前台分支都要声明
+  assert.ok(single!.properties.proxy, '单条 output 必须声明 proxy')
+  assert.ok(item.properties.proxy, '批量 item output 必须声明 proxy')
+  // 后台分支：字段集与前台互斥（additionalProperties:false + 前台两支没有这些键）
+  assert.ok(backgroundBranch, 'oneOf 必须有第三支（后台形态）')
+  for (const key of ['success', 'background', 'taskId', 'url', 'output', 'batch', 'count']) {
+    assert.ok(backgroundBranch.properties[key], `后台 output 必须声明 ${key}`)
+  }
+  assert.equal(backgroundBranch.properties.taskId?.type, 'string')
+  assert.equal(backgroundBranch.properties.count?.type, 'integer')
   assert.equal(single!.additionalProperties, false)
   assert.equal(item.additionalProperties, false)
+  assert.equal(backgroundBranch.additionalProperties, false)
 })
 
 /* ---------------- 1.3.0：批量（路线 A）的模型可见文案 ---------------- */

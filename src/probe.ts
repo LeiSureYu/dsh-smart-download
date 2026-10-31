@@ -15,6 +15,8 @@
  * 因此探测**必须**强制 `accept-encoding: identity`，否则任何支持 gzip 的
  * 服务器都会让 0.7.0 的大小校验 100% 误报（把正确的下载判成损坏）。
  */
+import { fetch as undiciFetch, ProxyAgent } from 'undici'
+import type { Dispatcher } from 'undici'
 import type { ProbeOptions, ProbeResult } from './types.js'
 import { normalizeContentEncoding } from './verify.js'
 import { headersToFetchInit } from './headers.js'
@@ -186,21 +188,55 @@ export async function probeUrl(
   externalSignal?: AbortSignal,
   options: ProbeOptions = {},
 ): Promise<ProbeResult> {
+  const dispatcher =
+    options.proxy === undefined
+      ? undefined
+      : (options.dispatcherFactory ?? ((proxy: string) => new ProxyAgent(proxy)))(options.proxy)
+  // 无代理时不构造 dispatcher，走全局 fetch —— 与 1.6.0 的请求形态逐字段相同
+  if (dispatcher === undefined) {
+    return probeUrlWithDispatcher(url, externalSignal, options, undefined)
+  }
+  try {
+    return await probeUrlWithDispatcher(url, externalSignal, options, dispatcher)
+  } finally {
+    // 探测结束即关闭 dispatcher（1.7.0 收口）：每次探测都 new 一个 ProxyAgent，
+    // 不关闭的话 keepalive 连接会一直引用它，批量场景（50 条 = 50 次探测）会积压
+    // 几十个空闲连接。close() 等在途请求排空后关闭空闲连接；清理失败不影响
+    // 已得出的探测结论，静默即可。
+    void dispatcher.close().catch(() => {})
+  }
+}
+
+async function probeUrlWithDispatcher(
+  url: string,
+  externalSignal: AbortSignal | undefined,
+  options: ProbeOptions,
+  dispatcher: Dispatcher | undefined,
+): Promise<ProbeResult> {
   const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS
   const threshold = options.threshold ?? DEFAULT_THRESHOLD
   // 调用方的头与探测强制的 identity 合并；identity 最后合并，覆盖不掉
   // （见 src/headers.ts：`accept-encoding` 同时在保留名单里，两头都堵）。
   const baseHeaders = headersToFetchInit(options.headers, PROBE_ACCEPT_ENCODING)
 
+  // 代理（1.7.0）：给了 proxy 时探测也必须走它 —— 探测决定「要不要多线程」与
+  // 「期望字节数」，走的是与真实下载不同的网络路径时，结论就建立在一个下载时
+  // 根本不成立的响应上（与 src/headers.ts 的「探测与下载同一套头」是同一类错位，
+  // 只是发生在网络层）。
+  const doFetch = dispatcher === undefined
+    ? fetch
+    : (undiciFetch as unknown as typeof fetch)
+
   // 1. 先尝试 HEAD
   let head: Response | null = null
   let headError: string | undefined
   try {
-    head = await fetch(url, {
+    head = await doFetch(url, {
       method: 'HEAD',
       headers: baseHeaders,
       redirect: 'follow',
       signal: mergeSignal(externalSignal, timeout),
+      ...(dispatcher === undefined ? {} : { dispatcher }),
     })
   } catch (err) {
     // 刻意不在这里返回：交给下面的 Range GET 兜底再判一次（见函数头实测）
@@ -225,11 +261,12 @@ export async function probeUrl(
   if (!head || head.status === 405 || headLength === undefined) {
     let get: Response
     try {
-      get = await fetch(url, {
+      get = await doFetch(url, {
         method: 'GET',
         headers: { ...baseHeaders, Range: 'bytes=0-0' },
         redirect: 'follow',
         signal: mergeSignal(externalSignal, timeout),
+        ...(dispatcher === undefined ? {} : { dispatcher }),
       })
     } catch (err) {
       // 两条路都失败才判不支持；HEAD 的失败原因保留在文案里，便于区分

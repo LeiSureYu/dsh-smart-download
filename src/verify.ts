@@ -140,10 +140,15 @@ export const VERIFY_MISMATCH_NEXT_STEP =
   '下一步：产物、半包与旁车指纹均已保留（便于核对与续传），可直接重跑一次'
 
 /** 把校验失败翻译成给人看的错误信息 */
-export function describeMismatch(outcome: Extract<VerifyOutcome, { kind: 'mismatch' }>): string {
+export function describeMismatch(
+  outcome: Extract<VerifyOutcome, { kind: 'mismatch' }>,
+  /** 期望值的来源（1.7.0 起）：`remote`（默认，与 1.6.0 逐字节相同）或 `caller`（expectedSize） */
+  source: 'remote' | 'caller' = 'remote',
+): string {
   const actualText = outcome.actual === null ? '文件不存在' : `${outcome.actual} 字节`
+  const expectedText = source === 'caller' ? '调用方声明的 expectedSize' : '远端声明'
   return (
-    `下载完整性校验失败：落盘 ${actualText}，远端声明 ${outcome.expected} 字节\n` +
+    `下载完整性校验失败：落盘 ${actualText}，${expectedText} ${outcome.expected} 字节\n` +
     VERIFY_MISMATCH_NEXT_STEP
   )
 }

@@ -29,8 +29,16 @@ export interface RetryRequest {
   sha256?: string
   checksum?: string
   ifExists?: 'overwrite' | 'skip' | 'rename'
+  /** 调用方声明的期望文件大小（字节）；重试时同样参与字节数校验 */
+  expectedSize?: number
   /** 镜像前缀（含 `auto`） */
   mirror?: string
+  /**
+   * 调用方显式传入的代理地址（1.7.0）。不是凭证（它本来就是明文配置），
+   * 与 mirror 同级落盘：不带上的话，走显式代理的任务重试时会静默变直连。
+   * 环境变量派生的代理**不**在这里 —— 重试时按当时的 env 重新解析。
+   */
+  proxy?: string
   /** 该条目当时的带宽上限（批量里是均分后的份额） */
   maxBandwidthBytes?: number
   timeoutMs?: number
@@ -213,7 +221,15 @@ export function parseRetryRequest(raw: unknown, outPath?: string): RetryRequest 
     ...(sha256 === undefined ? {} : { sha256 }),
     ...(checksum === undefined ? {} : { checksum }),
     ...(ifExists === undefined ? {} : { ifExists }),
+    // 期望大小同样是「可选但一旦存在必须合法」：非法时整条拒绝（丢弃这个字段
+    // 等于把「下载后核对大小」悄悄变成「不核对」）
+    ...(positive(body.expectedSize, Number.MAX_SAFE_INTEGER) === undefined
+      ? {}
+      : { expectedSize: positive(body.expectedSize, Number.MAX_SAFE_INTEGER) }),
     ...(text(body.mirror) === undefined ? {} : { mirror: text(body.mirror) }),
+    // proxy 是显式配置（明文、非凭证），形状按字符串收口；合法性与 mirror 一样
+    // 由重试执行路径的同一套校验兜底（resolveProxy 对非法值按直连处理）
+    ...(text(body.proxy) === undefined ? {} : { proxy: text(body.proxy) }),
     ...(positive(body.maxBandwidthBytes, Number.MAX_SAFE_INTEGER) === undefined
       ? {}
       : { maxBandwidthBytes: positive(body.maxBandwidthBytes, Number.MAX_SAFE_INTEGER) }),

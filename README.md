@@ -19,10 +19,11 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 
 桌面版（DeepSeek Harness 0.2.0 起）装同一个包：用桌面版自带的 CLI，或侧边栏的 Plugins 页面。
 
-> **最近更新（1.6.0）**：下载管理器现在可以直接**取消**进行中的任务、**原地重试**
-> 失败或已取消的任务（复用同一个 `taskId`；请求头与凭证不落盘、不重放）。
-> 1.5.0 带来了通用摘要校验、同名文件策略、磁盘预检与服务器文件名。
-> 完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
+> **最近更新（1.7.0）**：**macOS 正式支持**（x64 / arm64 子包由本仓库 CI 从官方源码自构建，六平台全部多线程）；新增 `background: true` **后台下载**（校验照旧同步完成，
+> 调用立即返回 `taskId` / 批次 ID，下载在宿主进程继续）；新增 `proxy` **代理参数**
+> （探测 / 镜像 / 下载三层共用同一代理，支持 `NO_PROXY`）；自定义请求头改走
+> **stdin**，`Authorization` 不再出现在进程命令行里。1.6.0 的下载管理器取消 /
+> 重试、1.5.0 的摘要校验等见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
 
 - **自动多线程加速** —— 下载前先探测目标服务器，支持多连接就调用内置 `aria2c` 并发下载，不支持则自动回退到系统 `curl`，两种情况都能下完。
 - **零配置** —— aria2 二进制随插件一起安装（npm `optionalDependencies`），无需自行下载或配置 PATH。
@@ -37,14 +38,18 @@ dsh plugin --profile web add @leisureyu/dsh-smart-dl
 - **服务器给的真文件名** —— URL 末段没有文件名（`…/download`）时，读取 `Content-Disposition` 里的名字并净化后落盘，不再一律叫 `download`。
 - **能带请求头** —— `userAgent` / `referer` / `headers`：官方文档给的地址常需要伪装浏览器或带 Referer，探测与下载用**同一套**头，不会两边不一致。
 - **镜像自动挑** —— `mirror: "auto"` 时插件自己从内置候选表里选一个**被证实与原地址同源**的 GitHub 镜像，模型不用先「知道」gh-proxy 这类域名。
+- **后台下载** —— `background: true`：校验照旧在发请求前同步完成，调用立即返回 `taskId`（批量给批次 ID），下载在宿主进程里继续；进度用 `download_status` 查、面板照常显示、取消重试照常可用。30 分钟的超时上限不再挡着长下载占会话。见[后台下载](#后台下载模式background-true)。
+- **代理三层一致** —— `proxy` 参数（或 `HTTPS_PROXY` 环境变量）：探测、镜像探测与下载走**同一个**代理，`NO_PROXY` 命中的主机直连。此前探测与 aria2 不读代理环境变量、只有 curl 读，代理用户被静默降级单线程。见[代理](#代理proxy)。
+- **凭证不进命令行** —— 传了自定义请求头时改走 stdin（curl `-K -` / aria2 `--input-file=-`），`Authorization` 不再出现在任务管理器 / `ps -ef` 能读到的 argv 上；不传头时命令行与 1.6.0 逐字节相同。
+- **照官方文档核对大小** —— `expectedSize`：把文档里印的文件大小传进来，远端声明与它打架就在发请求前拒绝；远端没声明长度时，用它完成字节数校验（替代「跳过」）。
 
-支持 **Windows x64 / arm64** 与 **Linux x64 / arm64**，这四组合是完整支持（随包 aria2 多线程）。
-macOS 没有随包子包，但 `PATH` 上有可用的 `aria2c`（例如 Homebrew 安装的）时同样会多线程加速；没有则回退 `curl` 单线程。为什么没随包分发 macOS 二进制，见[兼容性说明](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)（卡点是「来源不可信」，不是「没有二进制」）。
+支持 **Windows / Linux / macOS 的 x64 / arm64**，这六组合是完整支持（随包 aria2 多线程）。
+macOS 的两个子包（x64 / arm64）由**本仓库 CI 从官方源码自构建**（1.7.0 起，aria2 官方不发布 macOS 二进制；为什么自构建而不是用第三方二进制，见[兼容性说明](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)）。此外 `PATH` 上有可用的 `aria2c`（例如 Homebrew 安装的）时同样会多线程加速。
 
 `dsh-smart-dl` 为 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 注册两个工具：
 
-- **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c`（或 `PATH` 上的 `aria2c`）多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选：`mirror` 镜像加速（前缀或 `auto`）、`checksum` / `sha256` 内容核对、`ifExists` 同名文件策略、`userAgent` / `referer` / `headers` 请求头、断点续传；用 `targets` 代替 `url` 可一次下载一批（`maxBandwidth` 限整批带宽、`timeoutMs` 限每个条目的耗时）。
-- **`download_status`**：查询下载进度。只读地返回最近任务的状态快照（百分比、速度、ETA），可用来回答“刚才那个下载到百分之几了”。
+- **`smart_download`**：下载文件。先探测目标服务器是否支持多线程，支持则调用随插件分发的 `aria2c`（或 `PATH` 上的 `aria2c`）多线程加速，否则自动回退到系统自带的 `curl` 单线程下载，保证任何情况下都能完成下载。可选：`mirror` 镜像加速（前缀或 `auto`）、`checksum` / `sha256` 内容核对、`expectedSize` 大小核对、`ifExists` 同名文件策略、`userAgent` / `referer` / `headers` 请求头（1.7.0 起走 stdin，凭证不进命令行）、`proxy` 代理（探测与下载共用）、断点续传；用 `targets` 代替 `url` 可一次下载一批（`maxBandwidth` 限整批带宽、`timeoutMs` 限每个条目的耗时）；传 `background: true` 立即返回任务 ID、后台继续下载。
+- **`download_status`**：查询下载进度。只读地返回最近任务的状态快照（百分比、速度、ETA），可用来回答“刚才那个下载到百分之几了”；可按 `taskId` 或 `batchId`（1.7.0）过滤。
 
 ## 目录
 
@@ -70,6 +75,8 @@ macOS 没有随包子包，但 `PATH` 上有可用的 `aria2c`（例如 Homebrew
   - [批内并发：按「总连接数有界」反推](#批内并发按总连接数有界反推)
   - [`maxBandwidth`：整批共享的带宽上限](#maxbandwidth整批共享的带宽上限)
   - [`timeoutMs`：单条目超时（路线 A 是同步调用）](#timeoutms单条目超时路线-a-是同步调用)
+- [后台下载模式：`background: true`](#后台下载模式background-true)
+- [代理：`proxy`](#代理proxy)
 - [参数与选项速查](#参数与选项速查)
   - [`smart_download`](#smart_download)
   - [`download_status`](#download_status)
@@ -157,7 +164,7 @@ dsh plugin --profile web add github:LeiSureYu/dsh-smart-download
 >
 > **1.0.0 是首个正式版。** 相较于 0.9.x，这一版把「哪些情况在静默降级」全部摊开：完整性校验的**跳过**与**通过**不再共用同一个返回值（新增 `verifySkipped` 字段），取消下载会真的上报 `cancelled` 而不是伪装成失败，并且修掉了两个 0.9.0 遗留的真问题 —— `mirror` 参数可以绕过协议白名单（`file://` 前缀会把本地文件复制出来），以及 `awaitFlush` 的超时计时器没 `unref` 导致 CLI 每次下载多卡约 2 秒。逐条依据见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
 >
-> **版本要求：请使用 `1.6.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
+> **版本要求：请使用 `1.7.0` 或更高。** 0.7.0 ~ 0.9.0 的历史（完整性校验、续传指纹、进度轨道 `state`、面板、跨平台二进制）不再在这里复述，完整记录见 [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md)。
 >
 > 更早的 `0.1.x` / `0.2.1` 有安装期缺陷（插件清单校验、`peerDependencies` 范围解析不到预发布版），不要再用；升级到 `1.6.0` 即可。
 
@@ -466,7 +473,7 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 
 ### `timeoutMs`：单条目超时（路线 A 是同步调用）
 
-`timeoutMs` 是**每个条目**的超时（毫秒，`1000`..`1800000`，即 1 秒到 30 分钟）。为什么需要它：本工具是同步调用，一个卡死的条目会让整批一直不返回。30 分钟是保守上限（1GB @ 1MB/s ≈ 17 分钟），更长的等待说明应当改用「先返回、后台继续」的形态 —— 那个形态明确不做，所以宁可让它在这里失败，也不挂住整个会话。
+`timeoutMs` 是**每个条目**的超时（毫秒，`1000`..`1800000`，即 1 秒到 30 分钟）。为什么需要它：本工具是同步调用，一个卡死的条目会让整批一直不返回。30 分钟是保守上限（1GB @ 1MB/s ≈ 17 分钟）；1.7.0 起有了[后台模式](#后台下载模式background-true)，超过 30 分钟的下载请传 `background: true` —— 前台形态仍保持这个上限，宁可让它在调用处失败，也不挂住整个会话。
 
 超时之后会发生什么（这几条是定义，不是实现细节）：
 
@@ -476,6 +483,66 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 - 超时**不**回退到 curl —— 回退等于把同一份等待再花一遍。
 - 缺省（不传）表示不设超时；非法值（越界、小数、非数字）在发起任何请求之前抛错。
 
+## 后台下载模式：`background: true`
+
+传 `background: true`，下载不再占住会话：
+
+```
+smart_download(url: "https://example.com/big.iso", background: true)
+# 立即返回 { "success": true, "background": true, "taskId": "dl-xxx" }
+# 之后用 download_status(taskId: "dl-xxx") 查进度；批量给 batch，用 batchId 过滤
+```
+
+要点：
+
+- **校验照旧同步完成**：协议白名单、摘要格式、请求头、`expectedSize`、`ifExists`、
+  `maxBandwidth` / `timeoutMs` 的合法性检查全部发生在**返回之前** —— 非法参数
+  照旧让这次调用直接失败，不会启动一个注定失败的后台任务。因此「返回成功」永远
+  意味着「任务真的开跑了（或在排队）」。
+- **单条目返回 `taskId`，批量返回 `batch` + `count`**。批量为什么不逐条给
+  `taskId`：条目的 taskId 在各条目**开工时**才生成，返回时未开工的条目还没有 ID
+  —— 给一个缺尾巴的列表等于谎报。批次 ID 是开工前就确定的稳定句柄，
+  `download_status(batchId: "...")`（1.7.0 新增）能把整批查出来。
+- **返回时首条进度记录已落盘**：`download_status(taskId)` 在调用返回后立即可查。
+  闸门被占满时条目在排队，记录要等**开工**才出现 —— 这是排队语义，不是丢失。
+- **进度面板、取消、重试全部照常**：后台任务与前台任务写同一份进度轨道；管理器
+  的取消走进程内注册表，重试复用同一 `taskId`。
+- **连接预算升级为进程内**（全局闸门，`src/gate.ts`）：后台任务可以与前台调用并存，
+  「单文件 8 连接」与「批内窗口」两道既有约束都是调用内的，并存会被击穿。所有条目
+  （前台 / 后台 / 重试）开工前先拿闸门槽位；容量与批内窗口由同一个公式推导
+  （16 ÷ 8 = 2），**没有后台任务时行为与 1.6.0 完全相同**。被占满时前台条目排队
+  等待（先到先得，不做抢占）。
+- **`timeoutMs` 范围不变**（1s–30 分钟）：后台超时的条目照旧记 `failed`，可从
+  管理器重试。1.6.0 及之前「30 分钟上限是因为同步调用」的理由对前台仍然成立；
+  后台形态提供的是「不挂住会话」的另一个选项，而不是无限时长。
+
+## 代理：`proxy`
+
+企业内网、走代理出网的环境里，`HTTPS_PROXY` 环境变量此前只被三层中的一层读到
+（curl 读、探测与 aria2 不读），净效果是：探测失败 → aria2 失败 → curl 靠环境
+变量侥幸成功 —— **静默降级单线程**，而且探测结论建立在下载根本不成立的网络路径上。
+1.7.0 起：
+
+```
+smart_download(url: "https://example.com/tool.zip", proxy: "http://127.0.0.1:7890")
+# 或者不传 proxy，让插件读环境变量 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+```
+
+规则：
+
+- **取值优先级**：显式 `proxy` 参数 > `HTTPS_PROXY`/`https_proxy`（https 目标）、
+  `HTTP_PROXY`/`http_proxy`（http 目标）> `ALL_PROXY`/`all_proxy` > 直连；
+- **`NO_PROXY`/`no_proxy` 始终生效**（对显式参数也是，与 curl 的 `-x` + `no_proxy`
+  语义一致）：支持精确主机、`.suffix` 后缀匹配、`*` 通配、`host:port` 精确端口；
+- **探测、镜像候选探测与下载共用同一个代理**：落地为 undici `ProxyAgent`（探测）、
+  aria2 的 `--all-proxy`、curl 的 `-x`。代理按条目的**原始 URL** 解析（每条目一次），
+  同一批里完全可能有的直连、有的走代理；
+- **只支持 http(s) 代理**：SOCKS 对三者的支持参差，放行会重新打破三层一致。
+  `proxy` 参数的非法值在发请求前拒绝；环境变量里的非法值**忽略**（一个写错的全局
+  变量不该打断所有下载）；
+- 成功结果新增 `proxy` 字段 —— 仅确实走了代理时出现；`NO_PROXY` 命中而直连、
+  或没配代理时，字段不出现。
+
 ## 参数与选项速查
 
 ### `smart_download`
@@ -483,7 +550,7 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `url` | string | 二选一 | 单个文件的地址。与 `targets` **二选一** —— 都给或都不给都会在发请求前被拒。 |
-| `targets` | array | 二选一 | 一次下载一批，**最多 50 条**。每条是 `{ url（必填）, output?, sha256?, checksum?, ifExists? }`；条目之间共享 `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth`，各自有自己的输出路径、校验与进度记录。条目并发受插件并发上限约束；**一条失败不中止整批**，结果逐条给出。 |
+| `targets` | array | 二选一 | 一次下载一批，**最多 50 条**。每条是 `{ url（必填）, output?, sha256?, checksum?, expectedSize?, ifExists? }`；条目之间共享 `mirror` / `userAgent` / `referer` / `headers` / `maxBandwidth` / `proxy`，各自有自己的输出路径、校验与进度记录。条目并发受插件并发上限约束；**一条失败不中止整批**，结果逐条给出。传 `background: true` 则整批后台执行（返回批次 ID）。 |
 | `output` | string | 否 | 输出路径。不传时依次尝试 `Content-Disposition` 文件名、查询串 `filename` / `file`、URL 末段（结果必定是单段文件名，相对进程 cwd）。 |
 | `mirror` | string | 否 | 镜像前缀（如 `https://gh-proxy.com/` 或 `ghfast.top`），用于加速 GitHub Release 下载；非 http(s) 地址忽略。传字面量 `"auto"` 让插件从内置候选表里挑一个**被证实与原地址同源**的镜像（长度一致，且源站给了 ETag 时 ETag 也一致）；`"auto"` 只对 GitHub 生效，挑不出候选就回退原地址。 |
 | `sha256` | string | 否 | 期望的 SHA-256。接受裸 hex、`sha256:<hex>`、`SHA256(<hex>)`、SRI `sha256-<base64>` 四种写法；不匹配即判失败。 |
@@ -493,6 +560,9 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 | `referer` | string | 否 | Referer 头。同样探测与下载共用。 |
 | `headers` | object | 否 | 额外请求头，如 `{"Authorization": "Bearer …"}`。插件自管的头（`Range` / `Accept-Encoding` / `Host` 等）会被拒绝；值里含换行或控制字符也会被拒绝。 |
 | `maxBandwidth` | string | 否 | 整次调用**所有任务共享**的带宽上限，如 `"2M"` / `"500K"` / 纯字节数 `"1500000"`（K/M/G 按 1024 计）。批量时上限在并发条目间分摊，整批不超。落地为 aria2 的 `--max-overall-download-limit` / curl 的 `--limit-rate`。 |
+| `proxy` | string | 否 | 本条目生效的 http(s) 代理地址，如 `"http://127.0.0.1:7890"`。**探测、镜像探测与下载共用同一个代理**；显式参数优先于 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量，`NO_PROXY` 命中的主机直连（与 curl 语义一致）。只支持 http(s) 代理（不支持 SOCKS）；非法值在发请求前拒绝。走了代理时返回值带 `proxy` 字段。 |
+| `expectedSize` | integer | 否 | 期望的文件大小（字节），如官方文档里印的值。远端声明了长度且与它不等 → 发请求前拒绝；远端没声明长度 → 下载完成后用它做字节数校验（替代「跳过」）。批量条目可逐条给。 |
+| `background` | boolean | 否 | 后台执行。校验照旧在发请求前同步完成（非法参数让本次调用直接失败），随后立即返回 `taskId`（单条目）或 `batch` + `count`（批量），下载在宿主进程继续；`download_status` 查进度（批量用 `batchId` 过滤），面板与取消 / 重试照常。见[后台下载模式](#后台下载模式background-true)。 |
 | `timeoutMs` | integer | 否 | **单个条目**的超时毫秒数，`1000`–`1800000`（30 分钟封顶 —— 这是同步调用）。超时条目被终止并报失败；批量时其余条目继续跑，**已成功的条目不会被改写**。不传则一直等。 |
 
 ### `download_status`
@@ -500,6 +570,7 @@ $env:DSH_SMARTDL_MIRRORS = "https://my-mirror.corp/,http://10.0.0.9:8080"
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `taskId` | string | 否 | 只查某一个任务。 |
+| `batchId` | string | 否 | 按批次过滤（1.7.0 新增）：后台批量调用的返回值里有这个 ID；与 `taskId` 同时给时两个条件都要满足。`total` 是过滤后的未截断总数。 |
 | `limit` | integer | 否 | 最多返回多少条任务（默认 `10`）。 |
 
 ### 环境变量
@@ -631,13 +702,14 @@ download_status(taskId: "dl-xxx")      # 只查指定任务
 | Windows | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-win32-arm64` |
 | Linux   | x64   | ✅ 支持             | `@leisureyu/dsh-aria2-linux-x64`   |
 | Linux   | arm64 | ✅ 支持             | `@leisureyu/dsh-aria2-linux-arm64` |
-| macOS   | x64 / arm64 | ⚠️ 条件支持多线程 | —（可用 `PATH` 上的 `aria2c`）      |
+| macOS   | x64         | ✅ 支持 | `@leisureyu/dsh-aria2-darwin-x64`   |
+| macOS   | arm64       | ✅ 支持 | `@leisureyu/dsh-aria2-darwin-arm64` |
 
 二进制子包通过 `os` / `cpu` 字段声明，npm / pnpm 在不匹配的平台上会自动跳过安装。
 子包不存在时，`getAria2Path()` 会再查 `PATH` 上的 `aria2c` 并执行一次 `--version`
 验证可用性；仍找不到才返回 `null`、由 `decide()` 回退 `curl`。**「插件可用」与「多线程可用」
 是两件事** —— 不支持的平台不会装出一个坏掉的插件，只会装出一个单线程下载器。
-macOS 为什么没有随包子包、`PATH` 查找的边界在哪，见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)。
+macOS 子包为什么是自构建、信任模型与复现方式见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md)。
 
 ## 权限说明
 
@@ -645,7 +717,7 @@ macOS 为什么没有随包子包、`PATH` 查找的边界在哪，见 [COMPATIB
 
 | 行为 | 说明 |
 | --- | --- |
-| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）—— **不支持 FTP / SFTP / BitTorrent**：放开白名单后五层防护里只剩第五层（调用方提供的 `sha256` / `checksum`，可选）有效，即默认无内容校验；BT 的 DHT / 监听端口 / 做种还会打破下方「除原始 URL 外不访问其他地址」这条承诺。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。**`mirror: "auto"` 时，候选镜像地址也会被探测**（并发 HEAD，每个同样 5s 超时）—— 这是自动模式的必要代价，且**必须显式传 `auto` 才会发生**；候选表可用 `DSH_SMARTDL_MIRRORS` 限定为你信任的镜像。 |
+| 网络出站请求 | **仅接受 `http` / `https`**，其他协议在下载前直接拒绝（`checkDownloadUrl`）—— **不支持 FTP / SFTP / BitTorrent**：放开白名单后五层防护里只剩第五层（调用方提供的 `sha256` / `checksum`，可选）有效，即默认无内容校验；BT 的 DHT / 监听端口 / 做种还会打破下方「除原始 URL 外不访问其他地址」这条承诺。传入 `mirror` 时，**镜像前缀本身也要过同一道白名单**（前缀非 `http(s)` 时镜像不生效）。对通过校验的地址发起 `HEAD` / `Range` 探测（`probeUrl`，5s 超时），以及实际下载（`aria2c` 或系统 `curl`）。除「原始 URL」或「镜像前缀 + 原始 URL」外不访问其他地址。**`mirror: "auto"` 时，候选镜像地址也会被探测**（并发 HEAD，每个同样 5s 超时）—— 这是自动模式的必要代价，且**必须显式传 `auto` 才会发生**；候选表可用 `DSH_SMARTDL_MIRRORS` 限定为你信任的镜像。__传了 `proxy`（或环境变量里有代理）时，上述出站请求经该代理发出__ —— 代理本身不产生额外出站（「探测代理通不通」这件事不存在，失败会在探测处如实暴露）；代理是第三方网络路径，请不要经不受信任的代理下载敏感内容。 |
 | 发送请求头 | 默认只发探测必需的 `accept-encoding: identity`。调用方传了 `userAgent` / `referer` / `headers` 时，这些头会**同时**出现在探测请求与下载请求上（子进程命令行里可见，因此**不要**把长期凭证写进 `headers`）。插件自身管理的头（`Range` / `Accept-Encoding` / `Content-Length` / `Host` / 连接级头）拒绝覆盖；头值含 CR / LF / NUL 判为注入并拒绝。 |
 | 读取下载文件 | `sha256` / `checksum` 校验时以**流式**方式读取刚落盘的那个文件（不整份进内存），用于计算 MD5 / SHA-1 / SHA-256 / SHA-512。不读其他文件。 |
 | 写入下载文件 | 写入 `output` 参数指定的路径（调用方可以显式指定任意可写路径，包括当前工作目录之外的目录）；未指定时优先采用 `Content-Disposition` 里服务器声明的文件名，其次查询串 `filename` / `file`，最后按 URL 推导，落在当前工作目录。三者**都必定是单个路径段**（`/`、`\`、`..` 等被丢弃，并替换 Windows 非法字符、规避保留设备名），因此推导出的文件名不会逃出工作目录。父目录不存在时会自动创建（`mkdir -p`）。**覆盖语义由 `ifExists` 决定**：`overwrite`（默认）会替换同名文件；`skip` 完全不碰已有文件；`rename` 只写新名字，已有文件原样保留。启用断点续传后，同名文件会被**续写**而非重头覆盖。aria2 一律带 `--allow-overwrite=true`（**必须**）：aria2 默认遇到同名文件既不截断也不覆盖，而是另存为 `f.1.bin`，而插件返回的 `path` 仍指向旧文件 —— 前一个版本的静默路径错位就是这么来的。 |
@@ -653,8 +725,8 @@ macOS 为什么没有随包子包、`PATH` 查找的边界在哪，见 [COMPATIB
 | 读取进度文件 | `download_status` 只**读**取上述两条进度轨道目录，不写文件、不联网。 |
 | 写进度文件 | 轨道一 `$DSH_PROGRESS_DIR/<taskId>.jsonl`，未设置该环境变量时写 `<session.cwd>/.dsh-progress/<session.id>/<taskId>.jsonl`（拿不到会话上下文则不写）；轨道二 `$DSH_DOWNLOAD_PROGRESS_DIR/<taskId>.json`，缺省为 `<DSH_HOME>/downloads/tasks/<taskId>.json`。目录不可写时静默跳过，不影响下载。 |
 | HTTP 端点（仅带 Web 界面的 profile） | 插件在共享 `/api` 载体上注册**三条**精确路由：`POST /api/smartdl.status`（**只读**快照，读的是与 `download_status` 同一份进度文件）、`POST /api/smartdl.cleanup`（**会删进度文件**）与 `POST /api/smartdl.manage`（单条任务的 `inspect` / `forget` / `delete` / `reveal` / `cancel` / `retry`）。cleanup 的删除范围被严格限制在两条进度轨道目录内，且只删「文件名符合本插件规则（`*.json` / `*.jsonl`）且 mtime 早于保留窗口」的**普通文件**（用 `lstat`，目录与符号链接一律不碰）：默认窗口 24 小时（下限 60 秒、上限 365 天），单次默认删 200 个（硬上限 500），并按最旧优先排序。它**不**删下载产物、**不**递归、**不**碰其它目录；参数非法（如窗口或条数越界）直接以 `ok:false` + 可操作文案拒绝，而不是把参数夹到边界后照删。manage 的 `cancel` 只 abort **当前 Host 进程内**登记的任务，`retry` 只接受 `failed` / `cancelled` 且请求信息只能来自本插件记录（不保存也不重放请求头）；两者都不需要 `confirm`，也不会落到删除产物分支。**影响面**：进度文件是「已完成 / 失败」回执与重试元数据的唯一来源，删掉后面板与 `download_status` 就看不到那些任务了（已下载的文件不受影响，但这层历史信息无法从别处恢复）。**鉴权**：沿用载体自身（浏览器会话 cookie + loopback / Origin 校验），没有按任务或按会话的授权 —— 能调用这些端点的人就能清理本机所有会话的历史进度、取消本机正在跑的下载。要清轨道一（`<session.cwd>/.dsh-progress/<session.id>/`）必须在请求 payload 里带 `session: { id, cwd }`；不带时返回里会用 `taskDirSkipped` 明确说明「轨道一未参与」，而不是假装清完了。 |
-| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。 |
-| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）。 |
+| 子进程 | 启动随包 `aria2c` 或系统 `curl`，均以 `windowsHide: true` 启动（不弹控制台窗口），并响应 `AbortSignal` 取消（先 `SIGTERM`，1s 内未退出则 `SIGKILL`；该兜底**所有平台**都挂，POSIX 上进程同样可以忽略 `SIGTERM`）。取消会记为 `cancelled` 状态，与「下载失败」区分。__自定义请求头经 stdin 传给子进程__（curl `-K -` / aria2 `--input-file=-`，1.7.0 起）：`Authorization` 一类的值不出现在进程命令行里（任务管理器 / `ps -ef` 读不到）；没有自定义头时不写 stdin，命令行与 1.6.0 逐字节相同。 |
+| 读取环境变量 | 仅读取 `DSH_PROGRESS_DIR`、`DSH_DOWNLOAD_PROGRESS_DIR`、`DSH_HOME`（用于定位缺省进度目录；缺省值由 `os.homedir()` 提供，不直接读 `USERPROFILE` / `HOME`），以及 `DSH_SMARTDL_MIRRORS`（覆盖自动镜像的候选表，仅影响 `mirror: "auto"`）；1.7.0 起还会读代理变量 `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy` / `ALL_PROXY` / `all_proxy` / `NO_PROXY` / `no_proxy`（仅在 `proxy` 参数未给出时读取；非法值忽略，见[代理](#代理proxy)）。 |
 
 **不需要**的权限：不读取 DSH 会话内容、不访问凭证或密钥、不修改 DSH 配置（仅在安装时由 DSH 自身应用 `cordis.patch.yml`）、无遥测与联网上报。
 
@@ -685,7 +757,7 @@ dsh plugin --profile <profile> allow-version <包@版本> --dsh-version <精确 
 
 豁免记录在该 profile 的 `compatibility.json` 里，可以用 `dsh plugin version-exemptions` 查看、`revoke-version` 撤销。豁免的粒度是**精确版本**：换了 dsh 版本就不再生效。
 
-macOS 没有随包子包：**不是兼容性问题，而是没有可信来源的 aria2 二进制子包**（macOS 二进制存在且带哈希，卡点是「来源不可信」—— 逐个来源的核对结果见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) 与 [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md)，核对时间 2026-10-12）。1.5.0 起，如果 `PATH` 上有可用的 `aria2c`（例如 `brew install aria2`），插件会先执行 `--version` 验证再使用，因此 macOS 也能多线程加速；没有时仍可安装并正常工作，走 `curl` 单线程回退，返回结果的 `reason` 会写明原因。
+macOS 的两个子包（1.7.0 起）由**本仓库 CI 从官方源码自构建**：源码 pin SHA256、`otool` 断言只链系统库、产物附 SLSA provenance。为什么不用第三方二进制（逐个来源的核对结果，2026-10-12）与自构建的完整信任模型，见 [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) 与 [PLAN-P2-PLATFORM.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/PLAN-P2-PLATFORM.md)。1.5.0 起的 `PATH` 兜底保留：如果 `PATH` 上有可用的 `aria2c`（例如 `brew install aria2`），子包不可用时插件会先执行 `--version` 验证再使用。
 
 ## 工作原理
 
@@ -700,12 +772,20 @@ macOS 没有随包子包：**不是兼容性问题，而是没有可信来源的
      · url 必须是 http(s)（file:// / ftp:// 一律拒绝）
      · sha256 必须能归一化成 64 位十六进制；checksum 必须能识别出算法与摘要，
        且两者不能同时给
+     · expectedSize 必须是正整数（1.7.0）
      · ifExists 只能是 overwrite / skip / rename
      · headers 不能覆盖插件自管的头，值不能含 CR / LF / NUL
+     · proxy（如给出）必须是合法 http(s) URL（1.7.0；不支持 SOCKS）
         │
         ▼
 [1] 组装请求头：headers + userAgent + referer 合成**一份**，
-    探测与下载共用（两边不一致会让探测结论与真实下载错位）
+    探测与下载共用（两边不一致会让探测结论与真实下载错位）；
+    有自定义头时经 stdin 交给子进程（curl -K - / aria2 --input-file=-），
+    凭证不进命令行；无头时命令行与 1.6.0 逐字节相同
+
+[1e] 逐条目代理解析（1.7.0）：proxy 参数 > 环境变量（按 scheme 查
+     HTTPS_PROXY / HTTP_PROXY / ALL_PROXY）> 直连；NO_PROXY 命中的主机直连。
+     探测、镜像候选探测与下载共用同一个解析结果
         │
         ▼
 [2] 镜像解析
@@ -893,6 +973,11 @@ CLI 下每次下载结束都要多卡约 2 秒才退出；以及 aria2 失败回
 | `cleanupHistory` 参数越界 | 静默夹到边界后照删 | 越界必须 `ok:false` + 文案点名字段与范围，且**一个文件都不删** |
 | cleanup 扫不到轨道一 | 安静地只扫轨道二 → 假装清完了 | 必须 `taskDir === ''` + `taskDirSkipped` 固定文案说明「轨道一未参与」及原因 |
 | 单条目超时 | 卡住整批不返回 | 超时的那一条记 `failed`（不是 `cancelled`）并带超时文案；同批其余条目继续跑；已完成条目不被改判；不回退 curl |
+| `resolveProxy` | 参数/环境变量各说各话 → 三层不一致 | 显式参数最优先；`NO_PROXY` 命中（含 `*`、`.suffix`、`host:port`、裸 IPv6）必须直连；非法环境变量必须被忽略且返回 `{ proxyUrl: null, source: 'none' }`；集成用例证明探测真的经过了代理（CONNECT 隧道 + 隧道内真实请求两层断言）（`test/proxy.test.ts`） |
+| `buildXxxInvocation`（stdin 形态） | 凭证留在 argv → 同机进程可读走 | 无头时 argv 与 `buildXxxArgs` **逐字节相等**且 stdin 为 undefined；有头时 argv 不含任何头名/头值、含 `-K -` / `--input-file=-`；配置里的 `\` 与 `"` 必须转义（`test/stdin-args.test.ts`） |
+| `DownloadGate` | 并发上限「看起来有」实际没拦 → 击穿连接预算 | 容量外 acquire 必须真的等待（pendingCount 可断言）；唤醒是 FIFO 且槽位**转交**（active 不变）；reset 后旧 release 不把计数打成负数（`test/gate.test.ts`） |
+| `background: true` | 校验失败被吞进后台 → 「看似提交、实际没跑」 | 非法 URL + background 在**调用处同步抛错**且轨道无记录；返回前首条进度记录必须已落盘（`download_status(taskId)` 立即可查）；后台批量里 preflight 不合格的条目自己留下 `failed` 记录、不影响其余（`test/background.test.ts`） |
+| `expectedSize` | 远端没声明长度时字节数校验静默跳过 | 声明长度与它打架 → 发请求前拒绝（源站只收到探测请求）；chunked + 相符 → 成功且**不出现** `verifySkipped`；不符 → 判失败且文案写明「调用方声明的 expectedSize」而不是「远端声明」（`test/expected-size.test.ts`） |
 
 所有断言都是**正向**的：检查“有没有真的产出”，而不是“有没有崩溃”。真实样本保存在 `test/fixtures/`（curl 为保留 `\r` 的 `.bin`），并对“fixture 必须含 `\r`”做了强制断言。
 
@@ -950,7 +1035,7 @@ A：这是对 `node_modules` 内未签名 `aria2c.exe` 的常见启发式告警�
 A：通常是目标服务器**不支持 Range 请求**（无法分片），或文件本身较小。插件会自动回退到 `curl` 单线程下载；返回结果中的 `fellback` 与 `reason` 字段会说明具体原因。
 
 **Q：提示找不到 aria2 / 始终走 curl？**
-A：请确认当前平台属于上表四行之一（Windows x64 / arm64、Linux x64 / arm64），且 `optionalDependencies` 中对应的二进制子包安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。返回结果的 `reason` 字段会说明具体原因。macOS 没有随包子包；先在 `PATH` 上装一个可用的 `aria2c`（`aria2c --version` 能正常退出）即可启用多线程，否则会回退 curl。
+A：请确认当前平台属于上表六行之一（Windows / Linux / macOS 的 x64 / arm64），且 `optionalDependencies` 中对应的二进制子包安装成功（部分镜像源可能未同步该包，可切换官方 npm 源后重装）。返回结果的 `reason` 字段会说明具体原因。macOS 子包不可用时，先在 `PATH` 上装一个可用的 `aria2c`（`aria2c --version` 能正常退出）即可启用多线程，否则会回退 curl。
 
 **Q：Linux 上提示 `aria2c: Permission denied`？**
 A：这是 tarball 里二进制缺少可执行位。本项目在 CI 中**于 Linux runner 上打包**并强制断言 `bin/aria2c` 为 `0755`，正常安装不会出现；若你手动重打包过，请在打包前 `chmod 755`。
@@ -997,6 +1082,16 @@ A：这是 DSH 0.2.0 自带 pnpm 11 的构建审批：git 依赖一旦带 `prepa
 **Q：用 GitHub 仓库地址装上之后，工具没有出现 / 插件没启用？**
 A：先确认真的装成功了：从仓库地址安装要求该 git 主机可达，`github.com` 连不上时安装会在 5 秒探测处失败（控制台会留下 `failedAt: 'spec-host'`）。若确实装上了却没有工具，多半是装到了 `1.1.1` 或更早 —— `1.1.2` 起 `dist/` 已提交进仓库，之前的版本要么缺 `prepare`（`1.1.0` 及更早）、要么 `prepare` 被 pnpm 11 拦下（`1.1.1`），两种情况下 `main` 指向的文件都不存在，工具与路由注册不出来。升级到 `1.1.2` 及以上即可。
 
+
+__Q：`background: true` 之后怎么知道下载完了？__
+A：返回值里有 `taskId`（单条目）或 `batch`（批量），把它传给 `download_status`（批量用 `batchId` 参数过滤）即可查到百分比、速度与终态。带 Web 界面的 profile 右下角的进度面板同样会显示后台任务。失败 / 被取消的任务可以在下载管理器里原地重试。
+
+__Q：代理到底怎么配？__
+A：三种方式任选：调用时传 `proxy: "http://127.0.0.1:7890"`；或设置环境变量 `HTTPS_PROXY`（https 地址）/ `HTTP_PROXY`（http 地址）/ `ALL_PROXY`；两者都配时参数优先。`NO_PROXY` 命中的主机始终直连（对显式参数也是）。探测、镜像探测与下载走**同一个**代理 —— 1.6.0 及之前只有 curl 会读环境变量，代理用户会被静默降级到单线程。只支持 http(s) 代理，不支持 SOCKS。
+
+__Q：传了 `Authorization` 头，会不会泄露？__
+A：1.7.0 起自定义请求头经 **stdin** 传给 curl / aria2（`-K -` / `--input-file=-`），不再出现在进程命令行里 —— 同机进程通过任务管理器 / `ps -ef` 读 argv 的路子已经断了。仍要注意的两条边界：头值会经过插件内存与子进程内存（不落盘），且重试**不会**重放请求头（它们从不保存）；代理场景下头对代理服务器可见（HTTPS 目标走 CONNECT 隧道时对代理不可见，HTTP 目标可见）。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -1004,7 +1099,7 @@ A：先确认真的装成功了：从仓库地址安装要求该 git 主机可�
 | [README](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.md) / [English](https://github.com/LeiSureYu/dsh-smart-download/blob/main/README.en.md) | 安装、用法、权限说明 |
 | [ARCHITECTURE.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/ARCHITECTURE.md) | 内部结构：一次调用经过哪些步骤、模块职责、进度数据流 |
 | [SECURITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/SECURITY.md) | 威胁模型与五层防护，每层对应的实测复现 |
-| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 为什么搁置 |
+| [COMPATIBILITY.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/COMPATIBILITY.md) | 平台 / Node / profile / 包管理器矩阵，macOS 子包为什么是 CI 自构建 |
 | [TROUBLESHOOTING.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/TROUBLESHOOTING.md) | 症状 → 原因 → 处理 |
 | [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md) | 1.0 代码审查：必修 / 建议 / 已知折衷 |
 | [CHANGELOG.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/CHANGELOG.md) | 逐版本变更记录 |
@@ -1026,7 +1121,7 @@ profile 与 bundle 的装载规则，官方文档更新后本插件会跟着对�
 
 环境要求：Node.js **22+**、pnpm **9+**。
 
-当前基线：**627 例用例（624 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.18%** / 分支 **92.01%** / 函数 **97.18%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。
+当前基线：**671 例用例（668 通过 / 3 跳过 / 0 失败）**，行覆盖 **99.27%** / 分支 **91.85%** / 函数 **96.63%**（`node --test --import tsx --experimental-test-coverage`，**LF 工作区**实测）。1.7.0 起新增运行时依赖 `undici`（^7，探测走显式代理需要 `ProxyAgent`；engines `>=20.18.1`，与插件的 Node `>=22.0.0` 兼容）。
 覆盖率数字**必须在 LF 工作区测量** —— V8 的行归属依赖源码偏移，把行尾换成 CRLF，
 同一份代码会报出另一组数字，未覆盖行号也会整体漂移（1.4.x 的对照数据是 CRLF **99.36%** / LF **99.40%**，见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)）。
 3 个跳过用例是平台限制（只在 Linux / 特定文件系统复现），CI 的 Ubuntu job 会真跑。详见 [REVIEW-1.0.md](https://github.com/LeiSureYu/dsh-smart-download/blob/main/docs/REVIEW-1.0.md)。
@@ -1065,6 +1160,7 @@ pnpm check
 | Windows arm64 | <https://github.com/minnyres/aria2-windows-arm64/releases/download/v1.37.0/aria2_1.37.0_arm64.zip> | `packages/aria2-win32-arm64/bin/aria2c.exe` |
 | Linux x64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-x86_64-linux-musl_static.zip> | `packages/aria2-linux-x64/bin/aria2c` |
 | Linux arm64 | <https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-aarch64-linux-musl_static.zip> | `packages/aria2-linux-arm64/bin/aria2c` |
+| macOS x64 / arm64 | 不需要手动下载 —— 跑一次 `.github/workflows/spike-darwin.yml`（手动触发），或按 `scripts/build-aria2-darwin.sh` 在本机自构建 | `packages/aria2-darwin-x64/bin/aria2c` 等 |
 
 Linux 二进制解压后记得 `chmod 755`，否则本地 `npm pack` 出来的 tarball 也会缺少可执行位。
 
@@ -1096,6 +1192,7 @@ aria2 官方仅提供 **Windows x64** 与源码包，因此另外三个平台使
 | Windows arm64 | [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64) `v1.37.0` | `5694080902fff84c8636e561c48f7a65278e8d4f05efefe953637f60a397c81f` |
 | Linux x64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a` |
 | Linux arm64 | [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) `1.37.0`（musl 静态） | `0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6` |
+| macOS x64 / arm64 | **本仓库 CI 自构建**（`scripts/build-aria2-darwin.sh`，源码为官方 release tarball，SHA256 `a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8b20efa`；产物附 SLSA provenance） | 每次构建随 CI 日志与 provenance 记录（源码锚定 + 可复现脚本，不再依赖第三方发布者的固定哈希） |
 
 ## 声明
 

@@ -144,7 +144,15 @@ export function parseRetryRequest(raw, outPath) {
         ...(sha256 === undefined ? {} : { sha256 }),
         ...(checksum === undefined ? {} : { checksum }),
         ...(ifExists === undefined ? {} : { ifExists }),
+        // 期望大小同样是「可选但一旦存在必须合法」：非法时整条拒绝（丢弃这个字段
+        // 等于把「下载后核对大小」悄悄变成「不核对」）
+        ...(positive(body.expectedSize, Number.MAX_SAFE_INTEGER) === undefined
+            ? {}
+            : { expectedSize: positive(body.expectedSize, Number.MAX_SAFE_INTEGER) }),
         ...(text(body.mirror) === undefined ? {} : { mirror: text(body.mirror) }),
+        // proxy 是显式配置（明文、非凭证），形状按字符串收口；合法性与 mirror 一样
+        // 由重试执行路径的同一套校验兜底（resolveProxy 对非法值按直连处理）
+        ...(text(body.proxy) === undefined ? {} : { proxy: text(body.proxy) }),
         ...(positive(body.maxBandwidthBytes, Number.MAX_SAFE_INTEGER) === undefined
             ? {}
             : { maxBandwidthBytes: positive(body.maxBandwidthBytes, Number.MAX_SAFE_INTEGER) }),

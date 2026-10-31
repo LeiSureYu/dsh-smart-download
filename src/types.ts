@@ -27,6 +27,15 @@ export interface DownloadTarget {
    */
   checksum?: string
   /**
+   * 该条目的期望文件大小（字节），可选（1.7.0 新增）。
+   *
+   * 与 `sha256` 同构的「不依赖远端信息」的校验来源：官方文档常印文件大小，而
+   * 远端没声明 Content-Length 时字节数校验只能跳过 —— 调用方给的大小把那个洞
+   * 补上。远端声明了长度且与它不等时，在发请求之前就拒绝（两种「应该多大」
+   * 打架说明地址或文档至少一个过期了）。
+   */
+  expectedSize?: number
+  /**
    * 该条目的同名文件策略，可选；缺省沿用单条目默认值 `overwrite`。
    * 逐条独立生效，因为同一批里「覆盖安装包」与「保留已有报告」完全可能同时存在。
    */
@@ -85,6 +94,13 @@ export interface SmartDownloadArgs {
    */
   mirror?: string
   /**
+   * 期望的文件大小（字节），可选（1.7.0 新增）。
+   *
+   * 语义见 DownloadTarget.expectedSize：远端声明了长度且与它不等时在发请求前
+   * 拒绝；远端没声明长度时，下载完成后用它做字节数校验（替代「跳过」）。
+   */
+  expectedSize?: number
+  /**
    * 期望的 SHA-256 摘要，可选；下载完成后逐字节核对。
    *
    * 用法就是「把官方文档里写着的那个摘要粘进来」，接受裸十六进制、
@@ -115,6 +131,26 @@ export interface SmartDownloadArgs {
    * `Range` / `Accept-Encoding` / `Host` 等由插件自身管理的头不允许覆盖。
    */
   headers?: Record<string, unknown>
+  /**
+   * 本条目生效的代理地址（1.7.0 新增），http(s) URL，如 `"http://127.0.0.1:7890"`。
+   *
+   * 显式参数优先于环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`），
+   * `NO_PROXY` 命中的主机直连（与 curl 的 `-x` + `no_proxy` 语义一致）。
+   * **探测、镜像候选探测与下载共用同一个代理** —— 探测走与下载不同的网络路径时，
+   * 决策建立在下载时根本不成立的响应上。非法值（非 http(s)、缺主机名）在发起
+   * 任何请求之前拒绝。SOCKS 不受支持。
+   */
+  proxy?: string
+  /**
+   * 后台执行（1.7.0 新增）。传 `true` 时，所有入参校验在发请求之前照常同步完成，
+   * 随后**立即返回** `taskId`（单条目）或 `batch`（批量），下载在宿主进程里继续。
+   * 进度与终态用 `download_status` 查询（批量可用 `batchId` 过滤），面板照常显示，
+   * 管理器的取消 / 重试照常可用。
+   *
+   * 校验失败（非法 URL / 摘要 / 头等）仍然**同步抛错**，不会启动一个必然失败的
+   * 后台任务。`timeoutMs` 的取值范围与前台相同（上限 30 分钟）。
+   */
+  background?: boolean
 }
 
 /** 下载使用的底层方式 */
@@ -175,6 +211,51 @@ export interface SmartDownloadResult {
    * 与 `verifySkipped` 同理：自动镜像静默失效时，调用方必须能看见原因。
    */
   mirrorSkipped?: string
+  /**
+   * 本次实际使用的代理地址（1.7.0 新增）；仅在确实走了代理时出现。
+   * `NO_PROXY` 命中而直连、或根本没配代理时，该字段不出现 —— 「没有代理」
+   * 是常态而非异常，与既有字段「有值才出现」的口径一致。
+   */
+  proxy?: string
+}
+
+/**
+ * 后台单条目调用的返回值（1.7.0 新增）。
+ *
+ * 返回的是「已开始」而不是「已完成」：下载在宿主进程里继续，进度与终态经
+ * `download_status(taskId)` 查询。校验错误不会出现在这个分支 —— 它们在启动前
+ * 就同步抛掉了。
+ */
+export interface BackgroundSingleResult {
+  /** 提交成功（= 任务已在后台开始，而非下载完成） */
+  success: boolean
+  /** 标记这是后台形态；与前台单条目分支互斥 */
+  background: true
+  /** 任务 ID：进度查询、面板取消与重试都认它 */
+  taskId: string
+  /** 原始 URL（镜像解析发生在后台任务内部，故这里不是最终请求地址） */
+  url: string
+  /** 显式指定的输出路径（绝对路径）；未指定时由探测阶段决定，不在此返回 */
+  output?: string
+}
+
+/**
+ * 后台批量调用的返回值（1.7.0 新增）。
+ *
+ * 为什么只有批次 ID 而没有逐条 `taskIds`：批量条目的 taskId 在各条目**开工时**
+ * 才生成（窗口内的条目先开工），返回时未开工的条目还没有 ID —— 给一个缺尾巴的
+ * 列表等于谎报。批次 ID 是开工前就确定的稳定句柄，`download_status` 用
+ * `batchId` 过滤即可把整批查出来。
+ */
+export interface BackgroundBatchResult {
+  /** 提交成功（= 整批已在后台开始） */
+  success: boolean
+  /** 标记这是后台形态；与前台批量分支互斥 */
+  background: true
+  /** 批次 ID：`download_status(batchId)` 的过滤键，与两条进度轨道里写的是同一个值 */
+  batch: string
+  /** 批内条目总数（等于入参 targets 的长度） */
+  count: number
 }
 
 /**
@@ -229,6 +310,8 @@ export interface BatchItemResult {
   mirror?: string
   /** 未使用自动镜像的说明 */
   mirrorSkipped?: string
+  /** 本次实际使用的代理地址（1.7.0 新增）；仅走了代理时出现 */
+  proxy?: string
 }
 
 /**
@@ -251,6 +334,19 @@ export interface BatchDownloadResult {
   /** 取消条数（整批取消时未完成的那些条目） */
   cancelled: number
 }
+
+/**
+ * `smart_download` 的全部返回形态（1.7.0 起四支互斥）：
+ * 前台单条目 / 前台批量 / 后台单条目 / 后台批量。
+ *
+ * 后台两支表达的是「已提交」，前台两支表达的是「已完成」—— 两类语义不能共用
+ * 一组字段，否则「success: true 到底指哪个」就说不清了。
+ */
+export type SmartDownloadOutcome =
+  | SmartDownloadResult
+  | BatchDownloadResult
+  | BackgroundSingleResult
+  | BackgroundBatchResult
 
 /** URL 探测结果 */
 export interface ProbeResult {
@@ -302,6 +398,18 @@ export interface ProbeOptions {
    * 探测自身强制的 `accept-encoding: identity` 永远最后合并，覆盖不掉。
    */
   headers?: RequestHeaders
+  /**
+   * 本次生效的代理地址（1.7.0 新增），http(s) URL。
+   * 探测与下载共用同一个解析结果（src/proxy.ts）：探测走与下载不同的网络路径时，
+   * 「要不要多线程」「期望字节数」都会建立在一个下载时根本不成立的响应上。
+   */
+  proxy?: string
+  /**
+   * 测试接缝（生产代码不传）：替换默认的 `new ProxyAgent(proxy)`。
+   * 存在的唯一目的是让测试断言「探测结束后 dispatcher 会被关闭」（资源清理的
+   * 正向断言）；生产路径永远走缺省工厂。
+   */
+  dispatcherFactory?: (proxy: string) => import('undici').Dispatcher
 }
 
 /**
@@ -336,6 +444,11 @@ export interface ToolExecutionContext {
 export interface DownloadStatusArgs {
   /** 指定任务 ID；缺省时列出最近的任务 */
   taskId?: string
+  /**
+   * 按批次 ID 过滤（1.7.0 新增）。后台批量调用的返回值里有这个 ID；
+   * 与 `taskId` 同时给时两个条件都要满足（AND）。
+   */
+  batchId?: string
   /** 最多返回多少条 */
   limit?: number
 }

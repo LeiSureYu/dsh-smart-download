@@ -5,9 +5,11 @@
 
 ## 一句话结论
 
-Windows 与 Linux 的 x64 / arm64 四个组合是**完整支持**：随包 aria2 多线程加速可用。
-macOS **插件完全可用**；`PATH` 上有可用的 `aria2c`（例如 `brew install aria2` 安装的）时
-同样多线程，没有时才回退 `curl` 单线程。
+六个平台组合（Windows / Linux / macOS 的 x64 / arm64）自 1.7.0 起全部**完整支持**：
+随包 aria2 多线程加速可用。macOS 的两个子包由**本仓库自己的 CI 从官方源码构建**
+（1.7.0 起，见下）—— 1.3 时代「macOS 只在 `PATH` 有 `aria2c` 时才多线程」的
+结论已被这一新事实推翻，历史核对记录保留在下方作为「为什么选择自构建而非
+第三方」的依据。
 
 ## 平台矩阵
 
@@ -17,9 +19,10 @@ macOS **插件完全可用**；`PATH` 上有可用的 `aria2c`（例如 `brew in
 | Windows | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-win32-arm64` | 第三方 ARM64 构建（官方无此架构） |
 | Linux | x64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-x64` | musl 静态构建，任意发行版可用 |
 | Linux | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-arm64` | 同上 |
-| macOS | x64 / arm64 | ✅ | `PATH` 有 `aria2c` 时支持 | — | 不随包分发，可用 Homebrew 安装，见下 |
+| macOS | x64 | ✅ | ✅ | `@leisureyu/dsh-aria2-darwin-x64` | 本仓库 CI 自构建（1.7.0 起），见下 |
+| macOS | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-darwin-arm64` | 同上，Apple Silicon 原生构建 |
 
-**「插件可用」与「多线程可用」是两件事。** Windows / Linux 的四个组合各对应一个独立
+**「插件可用」与「多线程可用」是两件事。** 六个受支持组合（Windows / Linux / macOS）各对应独立
 npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在不匹配的平台上会**直接跳过安装**，
 不会报错。`src/downloader.ts` 的 `getAria2Path()` 按以下顺序定位 aria2：
 
@@ -32,11 +35,12 @@ npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在�
 因此**没有随包子包的平台不会装出一个坏掉的插件**，只会装出一个单线程下载器；
 如果用户在 `PATH` 上自备了可用的 aria2，则仍可多线程。
 
-### macOS 为什么搁置
+### macOS：从「搁置」到「CI 自构建」（1.7.0 起）
 
-不是兼容性问题，是**缺一个可信来源的 aria2 二进制**。本项目只分发自己验证过哈希的二进制
-（见 README 的「第三方组件声明」）。这一条在 1.3 被**逐个来源重新核对过**（2026-10-12），
-结论不变、证据更强：**卡点是「来源不可信」，不是「没有二进制」**。
+1.3 时本节叫「macOS 为什么搁置」：不是兼容性问题，而是**缺一个可信来源的 aria2 二进制**。
+那一核对（2026-10-12）的全部事实今天仍然成立 —— 但它证明的是「第三方来源不可信」，
+而不是「这件事做不成」。1.7.0 换了信任模型：**不找可信的第三方构建者，而是让本仓库的
+CI 成为构建者**，把三条否决理由逐条变成工程约束：
 
 | 说法 | 是否成立 |
 | --- | --- |
@@ -64,7 +68,7 @@ npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在�
    构建出来」。工作流本身也未 pin 源码 commit、依赖 `brew install` 当时最新版本，
    无法重跑一次构建并比对哈希。
 3. **产物形态不利**：macOS 无法完全静态链接，因此这两个文件是动态链接的（HTTPS 走
-   `--with-appletls`），仍依赖宿主系统库版本，与现有四个子包的形态不一致。
+   `--with-appletls`），仍依赖宿主系统库版本，与现有（当时的）子包形态不一致 —— 1.7.0 的自构建子包同样以「只链系统库」收口。
 
 其余来源逐个核对的结果（全部 2026-10-12，来源清单与逐条证据见
 [PLAN-P2-PLATFORM.md](./PLAN-P2-PLATFORM.md) §A.2 与附录 C）：
@@ -81,25 +85,34 @@ npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在�
   且是动态链接带 5 个依赖（`c-ares, libssh2, openssl@4, sqlite, gettext`），属用户环境
   依赖。来源：<https://formulae.brew.sh/api/formula/aria2.json>
 
-自建 macOS 二进制技术上存在（GitHub 官方 runner 同时提供 x64 与 arm64 的 macOS 镜像，
-来源：<https://github.com/actions/runner-images/blob/main/README.md>，核对时间 2026-10-12），
-但那是**新增长期维护负担**而不是「补个子包」（runner 标签有生命周期：`macos-14` 已进入
-废弃流程，见 <https://github.com/actions/runner-images/issues/13518>），且两条前置条件
-未确证，1.3 内不做。因此如实搁置。**没有硬做的版本。**
-在 macOS 上插件保持可用、行为可预测：`PATH` 上没有可用 `aria2c` 时所有下载走 `curl`，
-路径、校验与进度逻辑与其他平台一致。想启用多线程可自行安装：
+**1.7.0 的落地方式**（`scripts/build-aria2-darwin.sh` + `publish.yml` 的
+`binaries-darwin` job）：
 
-```bash
-brew install aria2
-aria2c --version
-```
+- **源码锚定**：aria2 1.37.0 官方 release tarball，SHA256
+  `a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8b20efa`
+  （2026-10-31 从官方 release 取回自算），构建前核对，不匹配立即失败；
+- **构建环境**：GitHub 官方 macOS runner 原生构建（`macos-15` = Apple Silicon，
+  `macos-15-intel` = Intel，不交叉编译）。runner 标签有生命周期（`macos-13/14`
+  已退役，见 <https://github.com/actions/runner-images/blob/main/README.md>，
+  2026-10-31 核对）—— 这是选择当前标签的依据，也是这个子包比 win/linux 多出来的
+  一项真实维护负担，如实在此记录；
+- **可复现与可核验**：构建配置全部写死在脚本里（openssl 静态归档为 TLS 后端，
+  与 win/linux 平台一致；metalink / SFTP / SQLite / libz 等本插件用不到的组件
+  全部关闭）；产物断言 `otool -L` 动态依赖**只有系统库**（链进 brew 路径的
+  二进制在用户机器上无法运行 —— FerroDownload 候选的第 3 条否决理由由此收口）；
+  `actions/attest-build-provenance` 给产物签发 SLSA provenance（第 2 条「构建
+  证明 404」由此收口）；发布方就是本仓库自己的 CI（第 1 条「发布方不可信」
+  由此收口）；
+- **签名口径**：ad-hoc 签名（arm64 内核要求至少 ad-hoc 才能运行；npm 安装路径
+  不产生 Gatekeeper quarantine 属性，无公证需求）。
 
-安装后如果 DSH 已经启动，建议重启宿主以刷新 `PATH`。**`PATH` 上的 aria2 是用户自行安装、
-非本项目分发的二进制**，项目不校验它的来源或哈希；随包二进制才有发布前的哈希核对。
-这一点是信任边界，不是兼容性差异。
+`PATH` 查找（1.5.0 起）保留不变：子包未安装（旧版本插件、镜像源未同步）时，
+`brew install aria2` 的 `aria2c` 经 `--version` 验证后仍会被采用。**`PATH` 上的
+aria2 是用户自行安装、非本项目分发的二进制**，项目不校验它的来源或哈希；随包
+二进制才有发布前的核对。这一点是信任边界，不是兼容性差异。
 
-如果后续补齐了 macOS 子包，只需要往 `ARIA2_TARGETS`（`src/downloader.ts`）加
-`darwin-x64` / `darwin-arm64` 两项并发布对应子包，其余代码不用改。
+升级 aria2 版本时：改构建脚本与子包的版本 pin、跑一次
+`.github/workflows/spike-darwin.yml`（手动触发，不发布），再走正常发布流程。
 
 **本插件不支持 FTP / SFTP / BitTorrent**，理由见 README「权限说明」与
 [SECURITY.md](./SECURITY.md)「已知边界」。
@@ -249,9 +262,18 @@ allowBuilds:
 不可用时由服务端（`op:'reveal'`）起宿主进程打开（Windows `explorer.exe /select,`、
 macOS `open -R`、Linux `xdg-open`）。缺这个服务只会少一点原生贴合度。
 
+## 运行时依赖（`1.7.0` 起）
+
+主包新增一个**普通**运行时依赖：`undici`（`^7`）。为什么必须引入：探测走显式
+代理需要 undici 的 `ProxyAgent`，而 Node 没有把内置 undici 的这个类暴露出来
+（没有 `node:undici` 模块）。版本选择：`undici@8` 要求 Node `>=22.19.0`，
+与插件声明的 engines `>=22.0.0` 冲突，因此固定在 `^7`（engines
+`>=20.18.1`，同时兼容 Node 22 与 24）。纯 JS 依赖、无传递依赖、不参与
+`optionalDependencies` 的平台过滤 —— 安装面与原有依赖一致。
+
 ## 二进制子包版本
 
-四个子包版本号统一为 **`1.37.0`**，与它们打包的 aria2 版本一致（不是本插件的版本）。
+六个子包版本号统一为 **`1.37.0`**，与它们打包的 aria2 版本一致（不是本插件的版本）。
 主包通过 `optionalDependencies` 精确 pin 到该版本，避免「主包升级了、子包还是旧二进制」
 这类错配。
 

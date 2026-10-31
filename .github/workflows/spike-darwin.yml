@@ -52,13 +52,21 @@ jobs:
         # dist/ 已随仓库提交（纯 ESM），不需要任何安装步骤。
         run: |
           set -euo pipefail
+          pwd
           node --version
+          mkdir -p smoke-bin
+          ls -l ${{ matrix.outdir }}/bin/aria2c
           node --input-type=module -e "
           import { spawn } from 'node:child_process'
           import { createServer } from 'node:http'
-          import { readFileSync, statSync } from 'node:fs'
+          import { existsSync, readFileSync, statSync } from 'node:fs'
           import { pathToFileURL } from 'node:url'
+          import path from 'node:path'
           const { buildAria2Invocation } = await import(pathToFileURL('./dist/downloader.js').href)
+          console.log('cwd:', process.cwd())
+          const aria2c = path.resolve('${{ matrix.outdir }}/bin/aria2c')
+          console.log('binary:', aria2c, 'exists:', existsSync(aria2c))
+          if (!existsSync(aria2c)) { console.error('binary missing'); process.exit(3) }
           const body = Buffer.alloc(1024 * 1024, 0x41)
           const server = createServer((req, res) => {
             res.writeHead(200, { 'content-length': String(body.length), 'accept-ranges': 'bytes' })
@@ -71,7 +79,8 @@ jobs:
             'http://127.0.0.1:' + port + '/smoke.bin', out, 4, false,
             { 'User-Agent': 'spike-darwin/1.0' },
           )
-          const child = spawn('${{ matrix.outdir }}/bin/aria2c', args, { stdio: ['pipe', 'inherit', 'inherit'] })
+          const child = spawn(aria2c, args, { stdio: ['pipe', 'inherit', 'inherit'] })
+          child.on('error', (err) => { console.error('spawn error dump:', err); process.exit(4) })
           if (stdin !== undefined) child.stdin.end(stdin)
           const code = await new Promise((resolve) => child.on('close', resolve))
           const ok = code === 0 && statSync(out).size === body.length && readFileSync(out).equals(body)

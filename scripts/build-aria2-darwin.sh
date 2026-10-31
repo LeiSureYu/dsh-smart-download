@@ -95,6 +95,12 @@ cd "$WORK/aria2-$VERSION"
 export OPENSSL_CFLAGS="-I$OPENSSL_PREFIX/include"
 # 直接指到 .a 文件：linker 默认偏好 .dylib，指目录会让它链上 brew 的动态库
 export OPENSSL_LIBS="$OPENSSL_PREFIX/lib/libssl.a $OPENSSL_PREFIX/lib/libcrypto.a"
+# aria2 在 __APPLE__ 下无条件使用 Security.framework 的 SecRandomCopyBytes
+# （SimpleRandomizer.cc，源码级 #if 分支，configure 的探测覆盖不到它）。
+# 实测（spike #1，2026-10-31）：不挂框架时链接期报
+# "Undefined symbols: _SecRandomCopyBytes / _kSecRandomDefault"。
+# automake 把 $(LIBS) 放在链接命令最末（对象之后），-framework 的位置正好正确。
+export LIBS="-framework Security"
 
 ./configure \
   --enable-static --disable-shared \

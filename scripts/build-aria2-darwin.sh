@@ -44,7 +44,9 @@ echo "=== building aria2 $VERSION for darwin-$SUBPKG_ARCH ==="
 
 # 与目标子包声明一致（packages/aria2-darwin-*/package.json 的 os/cpu）；
 # 不一致说明 runner 标签选错了（比如在 macos-15-intel 上产出 arm64）。
-DECLARED_CPU="$(node -p "require('./$OUT_DIR/package.json').cpu[0]")"
+# 用 readFileSync 而不是 require('./…')：OUT_DIR 在上方已规范化成绝对路径，
+# require 的 './…' 前缀会把它当相对路径拼成 './/Users/…' 直接炸（spike #5 实测）。
+DECLARED_CPU="$(node -p "JSON.parse(require('fs').readFileSync('$OUT_DIR/package.json','utf8')).cpu[0]")"
 if [ "$DECLARED_CPU" != "$SUBPKG_ARCH" ]; then
   echo "::error::runner 架构（$SUBPKG_ARCH）与子包声明（$DECLARED_CPU）不一致 —— 检查 workflow 的 runs-on 标签"
   exit 1

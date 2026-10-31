@@ -27,6 +27,13 @@ ARIA2_TARBALL_SHA256="a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8
 
 OUT_DIR="${1:?用法: build-aria2-darwin.sh <输出目录，如 packages/aria2-darwin-arm64>}"
 
+# 把落盘目录**现在**就规范化成绝对路径（实测教训，spike #3，勿改回去）：
+# 步骤 3 会 cd 进 $WORK/aria2-$VERSION 做 configure/make，而构建结束时
+# 有 `trap 'rm -rf "$WORK"'`。若末尾的 mkdir/cp 用相对路径，产物会落进
+# $WORK 里、脚本自己的验证也照常通过（全绿），然后随 $WORK 一起被删除
+# —— 下一个步骤拿到的就是「构建绿但产物消失」。
+OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd)"
+
 ARCH="$(uname -m)"
 case "$ARCH" in
   arm64)  SUBPKG_ARCH="arm64" ;;

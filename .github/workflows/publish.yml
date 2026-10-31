@@ -324,7 +324,13 @@ jobs:
               echo "::endgroup::"
               return 1
             fi
-            NODE_AUTH_TOKEN="$token" npm publish "$tgz" --access public
+            # ⚠️ 这里若失败，绝不能让后面的 echo 把 $? 重置成 0：
+            # v1.7.0 首发实测（2026-10-31），EOTP 被紧跟的 echo 吞掉、job 转绿，
+            # darwin 两个子包静默未发布 —— 这正是本项目最痛恨的静默失败形态。
+            NODE_AUTH_TOKEN="$token" npm publish "$tgz" --access public || {
+              echo "::endgroup::"
+              return 1
+            }
             echo "::endgroup::"
           }
 

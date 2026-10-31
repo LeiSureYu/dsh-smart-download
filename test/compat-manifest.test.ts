@@ -236,8 +236,11 @@ test('发布包内容：只带面向用户的文件，内部规划/评审文档�
   const out = spawnSync('npm pack --dry-run --json', {
     cwd: root,
     encoding: 'utf8',
-    // Windows 上 npm 是 npm.cmd，需要 shell 才能找到
-    shell: process.platform === 'win32',
+    // 单串命令必须配 shell: true —— POSIX 上不写 shell 会把整串当成一个
+    // 可执行文件名（spike #5.5 在 ubuntu 上实测 ENOENT）。shell 下参数全是
+    // 本测试写死的字面量，无注入面；POSIX 走 /bin/sh、Windows 走 cmd.exe，
+    // npm 两者都能找到。
+    shell: true,
   })
   assert.equal(out.status, 0, `npm pack --dry-run 失败：${out.stderr || out.error?.message || ''}`)
   // npm 11 的 `--json` 顶层是**数组**，npm 12 改成**按包名索引的对象** —— 两种都接受。

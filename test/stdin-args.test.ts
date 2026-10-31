@@ -90,10 +90,18 @@ test('aria2 有自定义头：argv 不含头、不含 URL 与 -o，URI 与头经
   )
 })
 
-test('aria2 input file：out 取 basename；Windows 路径的分隔符不进 stdin', () => {
+test('aria2 input file：out 按当前平台取 basename，目录不混进 out', () => {
+  // dirname/basename 是平台相关的：win32 认反斜杠，posix 只认斜杠。对 POSIX
+  // 而言 'C:\\downloads\\tool.zip' 是一个（怪但完全合法的）文件名 —— 产物行为
+  // 与 path.basename 一致即为正确，因此两个平台各自断言（ubuntu 实测教训）。
   const { stdin } = buildAria2Invocation(URL_EXAMPLE, OUT_WIN, 8, false, HEADERS)
-  assert.ok(stdin!.includes('  out=tool.zip\n'), 'out 必须是纯文件名（aria2 的 out 相对于 -d）')
-  assert.ok(!stdin!.includes('\\'), 'Windows 目录分隔符不得进 input file')
+  if (process.platform === 'win32') {
+    assert.ok(stdin!.includes('  out=tool.zip\n'), 'out 必须是纯文件名（aria2 的 out 相对于 -d）')
+    assert.ok(!stdin!.includes('\\'), 'Windows 目录分隔符不得进 input file')
+  } else {
+    // POSIX：路径里没有斜杠，整串按一个文件名落盘
+    assert.ok(stdin!.includes('  out=' + OUT_WIN + '\n'), 'POSIX 上整串都是一个文件名')
+  }
 })
 
 test('aria2 stdin 形态仍保留代理与带宽开关（与 argv 形态同一组共用开关）', () => {

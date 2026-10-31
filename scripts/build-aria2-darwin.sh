@@ -128,14 +128,17 @@ codesign --verify "$BIN"
 
 # ---------- 5. 正向断言 ①：动态库只有系统 ----------
 # 链进了 /opt/homebrew / /usr/local 的库 = 在没有 brew 的用户机器上直接崩。
-# 这是本脚本最要紧的一条断言。
-BAD_LIBS="$(otool -L "$BIN" | awk 'NR>1 {print $1}' | grep -vE '^/usr/lib/' || true)"
+# 系统路径有两处：/usr/lib/（libSystem 等）与 /System/Library/（各系统
+# framework，包括 aria2 必需的 Security.framework）—— 两处都在每一台 macOS 上
+# 存在，除此之外一律不允许。实测（spike #2，2026-10-31）：第一版名单漏了
+# /System/Library/，把系统自带的 Security.framework 误杀。
+BAD_LIBS="$(otool -L "$BIN" | awk 'NR>1 {print $1}' | grep -vE '^/usr/lib/|^/System/Library/' || true)"
 if [ -n "$BAD_LIBS" ]; then
   echo "::error::二进制链进了非系统库（用户机器上会加载失败）："
   echo "$BAD_LIBS"
   exit 1
 fi
-echo "--- otool -L（应全部是 /usr/lib/ 系统库）---"
+echo "--- otool -L（应全部是系统库：/usr/lib/ 与 /System/Library/）---"
 otool -L "$BIN"
 
 # ---------- 6. 正向断言 ②：能运行 + 真的能 HTTPS 下载 ----------

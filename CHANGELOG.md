@@ -84,6 +84,18 @@ behavior that is consistent within one layer but not across layers.
   - **安装侧零改动**：子包照常声明 `os: ["darwin"]`，npm / pnpm 在其它平台上
     自动跳过；`PATH` 兜底（1.5.0）保留。子包 README 写明来源与复现方式。
 
+  **CI 实测结论（2026-10-31，spike-darwin.yml run #6，双架构全绿）**：构建 6m15s
+  （arm64）/ 5m38s（x64）；`otool -L` 恰好三条系统依赖 ——
+  `Security.framework`、`/usr/lib/libc++.1.dylib`、`/usr/lib/libSystem.B.dylib`，
+  无任何 brew 路径；产物 ad-hoc 签名、`-rwxr-xr-x`（x64 SHA256
+  `2a9bcb08e8b4e68664d875b85365c5176e961e8b27c396d0f62e84fe1851b807`，7,195,856 字节）；
+  真实 HTTPS 下载（registry.npmjs.org）与「用插件 `buildAria2Invocation`（含头走
+  stdin 形态）下载 1MiB 逐字节核对」的集成冒烟全部通过。
+  上线过程共六轮迭代，每轮都只有真 Apple 硬件能暴露：①链接缺
+  `SecRandomCopyBytes`（`LIBS="-framework Security"` 修复）；②otool 断言名单漏了
+  `/System/Library/`；③④落盘目录被脚本 `cd` 拖进 `$WORK` 后随 EXIT trap 删除
+  （脚本自验证全绿、产物却不在工作区 —— 现已锚定绝对路径）；⑤清单读取撞上
+  绝对路径的 `require('./…')`。六条修复全部带实测注释进脚本。
   局限如实记录：macOS 无法完全静态链接（动态依赖系统库），runner 标签有生命周期
   （`macos-13/14` 已退役），这两条是该子包比 win/linux 多出来的长期维护面；
   升级 aria2 版本时先跑 `.github/workflows/spike-darwin.yml`（手动触发，不发布）。
@@ -161,7 +173,8 @@ behavior that is consistent within one layer but not across layers.
   「未列入 -> null」规则；构建脚本过 `bash -n` 语法检查，configure 开关
   （`--without-*` / `ARIA2_STATIC` / `OPENSSL_LIBS` 覆盖）从 1.37.0 源码实地
   核对，源码 tarball SHA256 下载自算 —— macOS 上的真实构建结果以
-  `spike-darwin.yml` 的 CI 运行为准（本仓库无 macOS 开发机，不假装测过）。
+  `spike-darwin.yml` 的 CI 运行为准（本仓库无 macOS 开发机；macOS 真实构建结果见上方「CI 实测结论」——
+  已在真机双架构验证通过）。
 - 真机实测（Windows，`node` 直接跑）：aria2 `--input-file=-` 携带
   Authorization 下载 1MB 文件逐字节正确；curl `-K -` 的 argv 不含任何头文本而
   服务器收到全部头；aria2 `--all-proxy` 的请求确实经过本地代理。

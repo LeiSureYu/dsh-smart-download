@@ -85,6 +85,12 @@ CI 成为构建者**，把三条否决理由逐条变成工程约束：
   且是动态链接带 5 个依赖（`c-ares, libssh2, openssl@4, sqlite, gettext`），属用户环境
   依赖。来源：<https://formulae.brew.sh/api/formula/aria2.json>
 
+**CI 实测（2026-10-31，run #6 双架构全绿）**：`otool -L` 三条系统依赖
+（Security.framework / libc++ / libSystem）、ad-hoc 签名、真实 HTTPS 下载与
+「插件自身命令行构造器下载 1MiB 逐字节核对」的集成冒烟全部通过；六轮迭代
+（缺 Security.framework → 断言名单 → 落盘目录被 `cd` 拖进 `$WORK` 随 trap 删除 →
+绝对路径下的 `require('./…')`）的修复全部带实测注释进脚本，详见 CHANGELOG 1.7.0。
+
 **1.7.0 的落地方式**（`scripts/build-aria2-darwin.sh` + `publish.yml` 的
 `binaries-darwin` job）：
 

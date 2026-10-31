@@ -17,6 +17,14 @@
 - 签名：ad-hoc（本机可运行；npm 安装路径不经过 Gatekeeper，无公证需求）
 - 每次发布的工作流与提交一一对应，可复现：同一段脚本、同一份 pin 过的源码
 
+## CI 实测（2026-10-31，spike-darwin.yml run #6）
+
+- 动态依赖（`otool -L`）：`Security.framework` + `/usr/lib/libc++.1.dylib` +
+  `/usr/lib/libSystem.B.dylib`，共三条，全部为系统库
+- 构建耗时：约 5.5–6.5 分钟（GitHub macOS 标准 runner，含 brew 依赖检查）
+- HTTPS 冒烟：从 `registry.npmjs.org` 真实下载成功；集成冒烟经插件自身
+  `buildAria2Invocation`（头走 stdin）下载 1MiB 逐字节核对通过
+
 由 CI（`.github/workflows/publish.yml` 的 `binaries-darwin` job）构建并复制到 `bin/aria2c`，**不提交到 Git 仓库**。本地开发时请按主仓库 README 的说明手动放置该文件。
 
 ## 许可证

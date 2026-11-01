@@ -12,6 +12,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ProgressSession } from './progress.js';
+export { DownloadCancelledError, DownloadPausedError } from './tasks.js';
 import type { RetryStartResult } from './tasks.js';
 export declare const name = "dsh-smart-dl";
 export declare const inject: string[];

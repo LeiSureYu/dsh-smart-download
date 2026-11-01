@@ -65,6 +65,8 @@ import {
 } from './verify.js'
 import type { DownloadStatusSnapshot } from './status.js'
 import {
+  DownloadCancelledError,
+  DownloadPausedError,
   isRunning,
   PAUSE_ABORT_REASON,
   parseRetryRequest,
@@ -72,6 +74,7 @@ import {
   setRetryHandler,
   unregisterRunningTask,
 } from './tasks.js'
+export { DownloadCancelledError, DownloadPausedError } from './tasks.js'
 import type { RetryRequest, RetryStartResult } from './tasks.js'
 import type {
   BackgroundBatchResult,
@@ -1735,16 +1738,11 @@ class DownloadTimeoutError extends Error {}
  * exec.signal 是整批共享的 —— 条目级取消（面板上点某一条的取消）不会让
  * exec.signal 变成 aborted，只靠那个信号判断会把取消误报成失败。
  */
-class DownloadCancelledError extends Error {}
+// DownloadCancelledError 本体同样在 src/tasks.ts；此处不再重复定义。
 
 /**
  * 暂停专用的错误类型（1.8.0）。
  *
- * 与取消同理：暂停既不是「失败」也不是「取消」——它在面板上是第三个状态，
- * runBatch 据此给该条目打 `paused: true`，同批其余条目照常跑。
- */
-class DownloadPausedError extends Error {}
-
 /**
  * 解析单条目超时（毫秒）。
  *

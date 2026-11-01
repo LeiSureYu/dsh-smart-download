@@ -67,6 +67,19 @@ export declare function isRunning(taskId: string): boolean;
  * 不需要第二条信号通道。哨兵串保持唯一：reason 的其它取值（AbortError /
  * TimeoutError 一类 DOMException）绝不能撞上它。
  */
+/**
+ * 暂停专用的错误类型（1.8.0）：runBatch 与 RPC 下载路径（1.9.0）据此把
+ * 「用户暂停」标成 paused（不是取消也不是失败）。本体放在 tasks.ts 以避免
+ * download-rpc.ts → index.ts 的循环依赖。
+ */
+export declare class DownloadPausedError extends Error {
+}
+/**
+ * 取消专用的错误类型（1.6.0 / 1.9.0 共用）：与暂停同理，取消在面板上是
+ * 与「失败」不同的状态。
+ */
+export declare class DownloadCancelledError extends Error {
+}
 export declare const PAUSE_ABORT_REASON = "dsh-smart-dl:paused";
 /**
  * 请求暂停一条正在跑的任务。

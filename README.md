@@ -70,7 +70,7 @@ smart_download({ "url": "https://example.com/big.iso", "background": true })
 
 | 功能 | 用法 |
 | --- | --- |
-| 多线程加速（按大小 4/8 连接，自动回退 curl） | 默认行为 |
+| 多线程加速（按大小 4/8 连接，自动回退 curl） | 默认行为；1.9.0 起走常驻 RPC daemon，暂停/继续为原地语义 |
 | 断点续传（同源指纹校验，防「续错文件」） | 默认行为 |
 | 摘要校验 | `sha256` 或 `checksum`（MD5 / SHA-1 / SHA-256 / SHA-512） |
 | 期望大小核对 | `expectedSize` |

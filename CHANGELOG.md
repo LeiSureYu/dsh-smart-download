@@ -11,6 +11,54 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-02
+
+**aria2 下载路径升级为常驻 RPC daemon：暂停/继续变成原地语义（亚秒级），进度从
+stdout 摘要解析变成结构化 tellStatus，队列与连接预算由 daemon 原生管理。**
+
+**The aria2 download path upgrades to a resident RPC daemon: pause/resume becomes
+in-place (sub-second), progress comes from structured tellStatus instead of stdout
+summary parsing, and queue/connection management is natively enforced by the
+daemon.**
+
+### 新增 / Added
+
+- **常驻 daemon**（`src/rpc-daemon.ts`）：懒启动、幂等、随机端口 + `--rpc-secret`
+  强制鉴权。生命周期绑定（SPIKE Q1 实测）：POSIX 用 `--stop-with-pid`（插件死亡
+  daemon 跟随退出），Windows 用 stdin-EOF watchdog（插件持有 watchdog 的 stdin
+  管道，插件死亡 → EOF → watchdog 杀 daemon 后退出，实测无孤儿）。daemon 起不来
+  时（端口耗尽 / 二进制损坏）抛 `DaemonUnavailableError`，调用方回退 spawn 路径。
+- **RPC 下载路径**（`src/download-rpc.ts`）：与 spawn 路径**同契约**（同入参、同
+  返回 Aria2Observation、同 reporter 事件），内部改为 addUri → tellStatus 轮询 →
+  完成。进度 500ms 轮询一次；吞吐观测（速度 + connections）产出给既有吞吐缓存；
+  HTTP 错误 / daemon 通信失败照常回退 curl。
+- **暂停原地语义**：RPC 路径收到暂停信号 → `aria2.pause(gid)`（实测 23ms）→
+  状态 paused → `reporter.paused()` → `DownloadPausedError`。继续 = 管理器的
+  「重试」→ `aria2.unpause(gid)`（实测恢复传输 41ms）——不重启进程、不重探测、
+  不重走指纹核对。daemon 崩溃 / DSH 重启后的恢复仍靠既有 `.part.json` 指纹 +
+  断点续传（与 1.8 模型相同）。
+
+### 变更 / Changed
+
+- aria2 下载优先走 RPC；daemon 不可用时自动降级到 1.8 的 spawn 路径（不退役，
+  作为 RPC 的故障后备保留）；curl 路径完全不变。
+- `stdout` 摘要解析（`parseAria2Summary`）与 `LineBuffer` 在 RPC 路径上不再使用
+  —— 结构化 tellStatus 消除了 0.9.0 那类格式变化导致的面板速度丢失。spawn 后备
+  路径的摘要解析保留不变。
+
+### 附带发现（SPIKE Q1b，影响 1.9 设计）
+
+- `--stop-with-pid` 在 Windows 构建上**不存在**（POSIX-only 选项，实测 unknown
+  option）。Windows 侧的生命周期绑定用 stdin-EOF watchdog（~15 行，纯 Node）。
+
+### 测试 / Tests
+
+- 新增 `test/rpc-daemon.test.ts`（2 例：RPC 下载 8MiB 完整走通含字节核对、
+  pause → paused → startRetry 续传到完成）。
+- 基线：**681 例（678 通过 / 3 跳过 / 0 失败）**；`pnpm check` 通过。
+
+
+
 ## [1.8.0] - 2026-11-02
 
 **下载管理器补上最后一块体验缺口：暂停 / 继续。** 同时把两处「白拿的」改进收进来：

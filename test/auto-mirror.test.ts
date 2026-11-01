@@ -359,3 +359,54 @@ test('pickMirrorServingSameFile: 缺省候选表同样读环境变量', async ()
     assert.deepEqual(seen, [`${MINE}${URL}`])
   })
 })
+
+/* ---------------- 1.8.0:通过校验的候选中取探测延迟最小者 ---------------- */
+
+test('pickMirrorServingSameFile: 多个合格候选 → 取探测延迟最小的（不是表序第一个）', async () => {
+  // 显式拉开延迟差距（50 / 5 / 30ms），判定不受事件循环抖动影响
+  const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+  const answers: Record<string, MirrorProbeOutcome> = {
+    [`${M1}${URL}`]: { ok: true, contentLength: SIZE, etag: ETAG },
+    [`${M2}${URL}`]: { ok: true, contentLength: SIZE, etag: ETAG },
+    [`${M3}${URL}`]: { ok: true, contentLength: SIZE, etag: ETAG },
+  }
+  const probe = async (url: string): Promise<MirrorProbeOutcome> => {
+    if (url === `${M1}${URL}`) await delay(50)
+    if (url === `${M2}${URL}`) await delay(5)
+    if (url === `${M3}${URL}`) await delay(30)
+    return answers[url] ?? { ok: false }
+  }
+  const picked = await pickMirrorServingSameFile(
+    URL,
+    { contentLength: SIZE, etag: ETAG },
+    probe,
+    PREFIXES,
+  )
+  assert.equal(picked?.candidate.mirror, M2, '必须选中延迟最小的合格候选（M2=5ms，而非表序 M1=50ms）')
+  assert.match(picked!.reason, new RegExp('探测延迟 \\d+ms'), '理由里带实测延迟数值（数值随环境波动，不断言具体值）')
+  const reasonText = picked!.reason
+  const after = reasonText.split('探测延迟 ')[1] ?? ''
+  const delayText = after.split('，')[0] ?? ''
+  assert.ok(/^[0-9]+ms$/.test(delayText), '理由必须带实测延迟数值（如 "14ms"），实际：' + reasonText)
+})
+
+test('pickMirrorServingSameFile: 不合格候选再快也不入选（排序只影响谁被选中，不影响谁能入选）', async () => {
+  const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+  const answers: Record<string, MirrorProbeOutcome> = {
+    // M1 最快但长度不一致（不同源）——再快也不能用
+    [`${M1}${URL}`]: { ok: true, contentLength: SIZE + 7, etag: ETAG },
+    [`${M2}${URL}`]: { ok: true, contentLength: SIZE, etag: ETAG },
+  }
+  const probe = async (url: string): Promise<MirrorProbeOutcome> => {
+    if (url === `${M1}${URL}`) await delay(2)
+    if (url === `${M2}${URL}`) await delay(40)
+    return answers[url] ?? { ok: false }
+  }
+  const picked = await pickMirrorServingSameFile(
+    URL,
+    { contentLength: SIZE, etag: ETAG },
+    probe,
+    [M1, M2],
+  )
+  assert.equal(picked?.candidate.mirror, M2, '同源校验优先于速度')
+})

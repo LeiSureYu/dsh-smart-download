@@ -15,13 +15,18 @@ const require = createRequire(import.meta.url);
 /**
  * 平台 → 子包映射表。
  * 键为 `${process.platform}-${process.arch}`，与 npm 的 os/cpu 字段语义一致。
- * 未列入的平台（如 darwin）视为不支持，getAria2Path 返回 null，由调用方回退 curl。
+ * 未列入的平台视为不支持，getAria2Path 返回 null，由调用方回退 curl。
+ * darwin 的两个子包（1.7.0 起）由本仓库 CI 从官方源码构建 —— aria2 官方不发
+ * macOS 二进制，第三方候选过不了可信门槛，见 scripts/build-aria2-darwin.sh
+ * 与 docs/COMPATIBILITY.md。
  */
 export const ARIA2_TARGETS = Object.freeze({
     'win32-x64': { pkg: '@leisureyu/dsh-aria2-win32-x64', bin: 'bin/aria2c.exe' },
     'win32-arm64': { pkg: '@leisureyu/dsh-aria2-win32-arm64', bin: 'bin/aria2c.exe' },
     'linux-x64': { pkg: '@leisureyu/dsh-aria2-linux-x64', bin: 'bin/aria2c' },
     'linux-arm64': { pkg: '@leisureyu/dsh-aria2-linux-arm64', bin: 'bin/aria2c' },
+    'darwin-x64': { pkg: '@leisureyu/dsh-aria2-darwin-x64', bin: 'bin/aria2c' },
+    'darwin-arm64': { pkg: '@leisureyu/dsh-aria2-darwin-arm64', bin: 'bin/aria2c' },
 });
 /**
  * 查询给定平台 / 架构对应的 aria2 子包描述。
@@ -34,9 +39,9 @@ export function aria2TargetFor(platform, arch) {
  * 定位随插件分发的 aria2 二进制。
  * 先按当前平台 / 架构选择子包；子包不存在时再查 PATH 上的 `aria2c`。
  *
- * 为什么必须查 PATH（1.5.0）：macOS 没有随包子包（ARIA2_TARGETS 里没有 darwin），
- * 而 Homebrew 安装的 `aria2c` 完全可用。此前 darwin 在第一步就直接返回 null，
- * 于是 macOS 用户永远只能单线程 curl —— 明明装了 aria2 也用不上。
+ * 为什么必须查 PATH（1.5.0）：随包子包不可用时（macOS 用户没装新子包的旧版本、
+ * 或镜像源未同步），Homebrew 安装的 `aria2c` 完全可用。此前 darwin 在第一步就
+ * 直接返回 null，于是 macOS 用户永远只能单线程 curl —— 明明装了 aria2 也用不上。
  *
  * 为什么查到的 PATH 二进制还要跑一次 `--version`：PATH 上可能是一个同名脚本、
  * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在

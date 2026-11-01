@@ -11,6 +11,45 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-02
+
+**下载管理器补上最后一块体验缺口：暂停 / 继续。** 同时把两处「白拿的」改进收进来：
+自动镜像按实测延迟排序、管理器一键重试全部失败项。
+
+**The download manager gains pause / resume — the last missing piece of its UX —
+plus two free wins: latency-sorted automatic mirrors and one-click retry for all
+failed tasks.**
+
+### 新增 / Added
+
+- **暂停 / 继续**：管理器里运行中的行新增「暂停」按钮。暂停 = 终止子进程但终态记
+  `paused`（新状态，琥珀色显示），**半包与旁车指纹原样保留**；「重试」按钮对
+  paused 行放行——即「继续」，由既有 `planResume()` 指纹核对兜底，从断点续传。
+  实现：`op:'pause'`（manage 端点新 op，与 cancel 同组、不需要 confirm）、
+  `controller.abort(PAUSE_ABORT_REASON)` 哨兵经 `AbortSignal.any` 传播，
+  `finishAborted` 据此写 paused 终态；批量里被暂停的条目标 `paused: true`
+  （不是取消也不是失败），同批其余条目照常。dsh-task-progress 的读取端不认识
+  paused 时按 running 处理（外观退化，本插件读取端与面板正确显示）。
+- **自动镜像按探测延迟排序**：候选并行探测后，在通过同源校验（可达 / 等长 /
+  ETag 一致，三条件不变）的候选中取**探测延迟最小**者，理由文案带实测延迟；
+  并列时稳定排序保持候选表顺序。此前按表序取第一个——表序只是写入时的猜测，
+  延迟是白拿的实测信号。
+- **管理器「重试全部失败」**：工具栏按钮，对当前列表中所有 failed / cancelled /
+  paused 的行**顺序**调用既有单行 retry（复用全部行级纪律：在途互斥、不传
+  confirm）。不做服务端批量 op——`startRetry` 的白名单与元数据校验逐条生效，
+  N 次调用没有第二种语义。
+
+### 测试 / Tests
+
+- 新增 `test/pause.test.ts`（3 例：后台下载 → 暂停 → paused 终态 → 续传到完成
+  且字节数核对、rpc op:pause 的 not-running / unknown 回告、批量中一条暂停其余
+  照常）；auto-mirror 追加延迟排序 2 例（显式拉开 50/5/30ms 差距 + 同源校验优先
+  于速度）；client 追加 3 例（paused 行按钮矩阵、点暂停发 op pause 不带 confirm、
+  重试全部失败逐条发 retry）。
+- 基线：`pnpm test` 全绿（含新增用例）；`pnpm check` 通过。
+
+
+
 ## [1.7.0] - 2026-10-31
 
 **四件事：下载不再必须等（后台模式）、代理三层终于一致（proxy）、凭证离开命令行

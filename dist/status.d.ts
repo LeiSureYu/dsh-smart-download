@@ -13,7 +13,7 @@ export interface TaskStatus {
     /** 最近一条状态说明 */
     msg: string;
     /** 任务状态；`cancelled` 只在进度记录显式声明 `state: 'cancelled'` 时出现 */
-    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    status: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
     /** 速度字符串，如 "8.2MB/s" */
     spd: string;
     /** 剩余时间字符串，如 "4m51s" */

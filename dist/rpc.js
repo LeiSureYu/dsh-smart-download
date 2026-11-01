@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js';
 import { cleanupHistory, readCleanupQuery } from './cleanup.js';
 import { isSafeTaskId, removeTaskRecords, resolveDownloadProgressDir, resolveTaskProgressDir, } from './progress.js';
-import { cancelRunningTask, getRetryHandler, isKnownTask } from './tasks.js';
+import { cancelRunningTask, getRetryHandler, isKnownTask, pauseRunningTask } from './tasks.js';
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
 const API_PATH = '/api';
 /** status 端点名（只读）；客户端以 `rpc.call('/api', 'smartdl.status', ...)` 调用。 */
@@ -211,6 +211,7 @@ export function readManagePayload(payload) {
         op !== 'delete' &&
         op !== 'reveal' &&
         op !== 'cancel' &&
+        op !== 'pause' &&
         op !== 'retry') {
         return {
             error: `${MANAGE_BAD_PAYLOAD}（op 必须是 inspect / forget / delete / reveal / cancel / retry）`,
@@ -478,6 +479,29 @@ export function cancelManagedTask(taskId, session) {
     return { cancelled: false, taskId, reason: 'not-running', state: task.status };
 }
 /**
+ * `op:'pause'`：暂停当前 Host 进程里正在跑的那一条（1.8.0）。
+ *
+ * 与 cancel 同一条纪律：只对本进程有效，「没在跑」不是错误而是如实回答。
+ * 终态 paused 由子进程退出后 `finishAborted` 写入（半包与指纹保留，
+ * 管理器的「重试/继续」对 paused 行放行）。
+ */
+export function pauseManagedTask(taskId, session) {
+    if (pauseRunningTask(taskId) === 'paused') {
+        // 与 cancel 同一取舍：这里只表示「暂停请求已被接受」，paused 终态由
+        // 下一次轮询呈现。
+        return { paused: true, taskId };
+    }
+    const task = findTask(taskId, session);
+    if (!task) {
+        return {
+            paused: false,
+            taskId,
+            reason: isKnownTask(taskId) ? 'not-running' : 'unknown',
+        };
+    }
+    return { paused: false, taskId, reason: 'not-running', state: task.status };
+}
+/**
  * `op:'retry'`：以同一个 taskId 重新发起一条已失败 / 已取消的下载（1.6.0）。
  *
  * 真正的实现由插件入口通过 `setRetryHandler` 注入（rpc.ts 不 import index.ts，
@@ -655,6 +679,9 @@ export function registerStatusRpc(ctx) {
             // cancel / retry 必须在 delete 的 confirm 分支之前分派：它们不需要
             // confirm，且绝不能因为调用方多带了一个 confirm:true 就落到删除产物的
             // 路径上（那是不可逆操作）。
+            // pause 与 cancel 同组：不需要 confirm，也绝不能落到删除产物分支。
+            if (op === 'pause')
+                return ok(pauseManagedTask(taskId, session));
             if (op === 'cancel')
                 return ok(cancelManagedTask(taskId, session));
             if (op === 'retry')

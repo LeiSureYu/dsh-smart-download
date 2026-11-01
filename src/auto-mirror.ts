@@ -128,24 +128,37 @@ export async function pickMirrorServingSameFile(
   if (candidates.length === 0) return null
 
   const settled = await Promise.allSettled(
-    candidates.map(async (candidate) => ({ candidate, outcome: await probe(candidate.url) })),
+    candidates.map(async (candidate) => {
+      const startedAt = Date.now()
+      const outcome = await probe(candidate.url)
+      return { candidate, outcome, elapsed: Date.now() - startedAt }
+    }),
   )
 
+  // 通过同源校验的候选中取探测延迟最小者；并列时稳定排序保持候选表顺序。
+  const passing: Array<{
+    candidate: { mirror: string; url: string }
+    elapsed: number
+  }> = []
   for (const entry of settled) {
     if (entry.status !== 'fulfilled') continue
-    const { candidate, outcome } = entry.value
+    const { candidate, outcome, elapsed } = entry.value
     if (!outcome.ok) continue
     if (outcome.contentLength !== expected.contentLength) continue
     if (!etagMatches(expected.etag, outcome.etag)) continue
-
-    const etagNote = expected.etag === undefined ? '' : '，ETag 一致'
-    return {
-      candidate,
-      reason: `镜像 ${candidate.mirror} 返回同一文件（${expected.contentLength} 字节${etagNote}）`,
-    }
+    passing.push({ candidate, elapsed })
   }
+  passing.sort((a, b) => a.elapsed - b.elapsed)
+  const best = passing[0]
+  if (!best) return null
 
-  return null
+  const etagNote = expected.etag === undefined ? '' : '，ETag 一致'
+  return {
+    candidate: best.candidate,
+    reason:
+      `镜像 ${best.candidate.mirror} 返回同一文件（${expected.contentLength} 字节${etagNote}，` +
+      `探测延迟 ${best.elapsed}ms，为通过校验的候选中最快）`,
+  }
 }
 
 /* ------------------------------ 对外入口 ------------------------------ */

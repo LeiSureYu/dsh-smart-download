@@ -77,6 +77,9 @@ smart_download({ "url": "https://example.com/big.iso", "background": true })
 | 镜像加速（自动选择，先证实同源再采用） | `mirror: "auto"` |
 | 代理（探测 / 镜像 / 下载三层一致，支持 `NO_PROXY`） | `proxy` |
 | 一次下载一批 | `targets` + `maxBandwidth` + `timeoutMs` |
+| 暂停 / 继续（半包与指纹保留，从断点续传） | 下载管理器行内按钮 |
+| 自动镜像按实测延迟排序（同源校验不变） | `mirror: "auto"` 默认行为 |
+| 一键重试全部失败项 | 下载管理器工具栏按钮 |
 | 后台执行 | `background: true` |
 | 同名文件策略 | `ifExists: "overwrite" \| "skip" \| "rename"` |
 | 自定义请求头（凭证走 stdin，不进命令行） | `userAgent` / `referer` / `headers` |
@@ -162,6 +165,7 @@ smart_download(url, …)
 - **提示找不到 aria2？** 六平台均有子包；镜像源未同步时切官方 npm 源重装。
 - **GitHub 下载慢？** 传 `mirror: "auto"`。
 - **摘要怎么核对？** 把官方文档里的摘要原样传给 `sha256`，四种常见写法都认。
+- **重跑报退出码 33 / 36？** 33 = HTTP range error（服务器忽略/未接受你发的 Range），36 = bad download resume（无法从断点续传）。33 不代表服务器永久不支持 Range；删除半包后重跑会全量重下。
 - **更多问题** → [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)
 
 ## 文档

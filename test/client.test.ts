@@ -2925,3 +2925,107 @@ test('管理器：行级操作在途时禁用删除按钮，Delete 键也不打�
     panel.dispose()
   }
 })
+
+/* ---------------- 1.8.0：暂停 / 继续 ---------------- */
+
+test('管理器：运行中的行有暂停按钮，暂停后的行只有重试', async () => {
+  const { request } = serve([
+    managedTask({ id: 'run1', status: 'running', pct: 40 }),
+    managedTask({ id: 'pause1', status: 'paused', pct: 60 }),
+    managedTask({ id: 'done1', status: 'completed', pct: 100 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\Downloads\a.bin', size: 1024 } }
+      : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const buttons = (id: string, attr: string) =>
+      findAll(rowById(tree, id), (el) => el.props?.['data-dsh-smart-dl'] === attr).length
+
+    assert.equal(buttons('run1', 'pause'), 1, '运行中的行必须有暂停按钮')
+    assert.equal(buttons('run1', 'cancel'), 1, '运行中的行仍有取消')
+    assert.equal(buttons('pause1', 'retry'), 1, '已暂停的行必须有重试（= 继续）')
+    assert.equal(buttons('pause1', 'pause'), 0, '已暂停的行不该再出现暂停')
+    assert.equal(buttons('pause1', 'cancel'), 0, '已暂停的行不该出现取消')
+    assert.equal(buttons('done1', 'pause'), 0, '完成的行不该出现暂停')
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：点暂停只发 op pause，不带 confirm，绝不发 delete / forget', async () => {
+  const { request } = serve([managedTask({ id: 'run1', status: 'running', pct: 40 })])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\Downloads\a.bin', size: 1024 } }
+      : body.op === 'pause'
+        ? { ok: true, value: { paused: true } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    clickRowAction(tree, 'run1', 'pause', '暂停')
+    await settle()
+    await settle()
+
+    const pauses = manage.calls.filter((c) => c.op === 'pause')
+    assert.equal(pauses.length, 1, '只发一次 pause')
+    assert.equal(pauses[0].taskId, 'run1')
+    assert.ok(!Object.hasOwn(pauses[0], 'confirm'), 'pause 不是不可逆操作，不该带 confirm')
+    assert.equal(
+      manage.calls.filter((c) => c.op === 'delete' || c.op === 'forget').length,
+      0,
+      '暂停绝不能顺带删除记录或文件',
+    )
+    assert.match(textOf(await renderManagerSettled(panel)), /pauseRequested/)
+  } finally {
+    panel.dispose()
+  }
+})
+
+test('管理器：重试全部失败按钮 → 对每一条 failed 行顺序发 retry', async () => {
+  const { request } = serve([
+    managedTask({ id: 'fail1', status: 'failed', pct: 10 }),
+    managedTask({ id: 'fail2', status: 'failed', pct: 20 }),
+    managedTask({ id: 'done1', status: 'completed', pct: 100 }),
+  ])
+  const manage = manageStub((body) =>
+    body.op === 'inspect'
+      ? { ok: true, value: { presence: 'present', outPath: 'D:\Downloads\a.bin', size: 1024 } }
+      : body.op === 'retry'
+        ? { ok: true, value: { started: true } }
+        : { ok: true, value: {} },
+  )
+  const panel = mountPanel(request)
+  try {
+    panel.render()
+    await settle()
+    replaceManage(panel, manage.fn)
+    const tree = await renderManagerSettled(panel)
+    const btn = findAll(tree, (el) => el.props?.['data-dsh-smart-dl'] === 'retry-all')
+    assert.equal(btn.length, 1, '工具栏应有「重试全部失败」按钮')
+    ;(btn[0].props as { onClick: () => void }).onClick()
+    await settle()
+    await settle()
+
+    const retries = manage.calls.filter((c) => c.op === 'retry')
+    assert.equal(retries.length, 2, '两条 failed 各发一次 retry（completed 不发）')
+    assert.deepEqual(
+      retries.map((c) => c.taskId).sort(),
+      ['fail1', 'fail2'],
+    )
+    assert.match(textOf(await renderManagerSettled(panel)), /retryAllStarted/)
+  } finally {
+    panel.dispose()
+  }
+})

@@ -87,6 +87,8 @@ function statusFrom(pct, msg, state) {
         return 'failed';
     if (state === 'cancelled')
         return 'cancelled';
+    if (state === 'paused')
+        return 'paused';
     if (state === 'running')
         return 'running';
     // 无 state（0.5.0 之前的进度文件）：按文案与百分比兜底

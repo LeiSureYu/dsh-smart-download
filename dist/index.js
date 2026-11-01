@@ -19,7 +19,7 @@ import { recordThroughput } from './throughput-cache.js';
 import { downloadGate, GATE_CAPACITY } from './gate.js';
 import { checkProxyParam, resolveProxy } from './proxy.js';
 import { describeMismatch, describeSkip, normalizeContentEncoding, verifySize, } from './verify.js';
-import { isRunning, parseRetryRequest, registerRunningTask, setRetryHandler, unregisterRunningTask, } from './tasks.js';
+import { isRunning, PAUSE_ABORT_REASON, parseRetryRequest, registerRunningTask, setRetryHandler, unregisterRunningTask, } from './tasks.js';
 export const name = 'dsh-smart-dl';
 export const inject = ['tools'];
 /**
@@ -732,11 +732,20 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
      * 判定顺序是刻意的：两个信号同时成立时「用户按了取消」是更准确的原因（超时只是
      * 兜底），先判超时会让用户以为自己没按过取消。
      */
-    const abortOutcome = () => ctx.exec.signal.aborted || itemSignal.aborted
-        ? 'cancelled'
-        : timeoutSignal?.aborted === true
-            ? 'timeout'
-            : 'failed';
+    /**
+     * 这一条被中止时的原因分类（1.8.0 起含 paused）。
+     *
+     * 判定顺序是刻意的：暂停用 abort(reason) 的哨兵精确匹配 —— 普通取消不带
+     * reason（reason 是 AbortError DOMException），绝不会撞上；两个信号同时
+     * 成立时「用户按了取消」仍优先于超时兜底。
+     */
+    const abortOutcome = () => itemSignal.reason === PAUSE_ABORT_REASON || ctx.exec.signal.reason === PAUSE_ABORT_REASON
+        ? 'paused'
+        : ctx.exec.signal.aborted || itemSignal.aborted
+            ? 'cancelled'
+            : timeoutSignal?.aborted === true
+                ? 'timeout'
+                : 'failed';
     /**
      * 中止（取消 / 超时）的唯一收口：写**一次**终态记录，返回要抛出的错误。
      *
@@ -747,6 +756,13 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
     let abortRecorded;
     const finishAborted = (err) => {
         abortRecorded ??= (async () => {
+            if (abortOutcome() === 'paused') {
+                // 半包与旁车指纹照常保留：继续 = 对 paused 行的重试，由既有
+                // planResume() 指纹核对兜底（与「失败后续传」完全同一条路径）。
+                reporter.paused('已暂停：可从下载管理器继续');
+                await reporter.awaitFlush();
+                throw new DownloadPausedError('已暂停：下载被用户暂停');
+            }
             if (abortOutcome() === 'timeout') {
                 reporter.fail(timeoutMessage);
                 await reporter.awaitFlush();
@@ -1348,6 +1364,14 @@ class DownloadTimeoutError extends Error {
 class DownloadCancelledError extends Error {
 }
 /**
+ * 暂停专用的错误类型（1.8.0）。
+ *
+ * 与取消同理：暂停既不是「失败」也不是「取消」——它在面板上是第三个状态，
+ * runBatch 据此给该条目打 `paused: true`，同批其余条目照常跑。
+ */
+class DownloadPausedError extends Error {
+}
+/**
  * 解析单条目超时（毫秒）。
  *
  * 与 maxBandwidth 同一套做法：非法值在**发起任何请求之前**抛错 —— aria2 / curl 对
@@ -1497,7 +1521,12 @@ async function runBatch(targets, ctx, limit) {
                 const message = err instanceof Error ? err.message : String(err);
                 // 与单条目路径的中止判定同语义：signal 已 abort 时这条是「取消」而不是
                 // 「失败」，不能混成一个状态。**超时例外**：它只终止这一条、整批信号并没有
-                // abort，因此必须记成失败（用户没有按取消）。
+                // abort，因此必须记成失败（用户没有按取消）。**暂停例外同理**：暂停的
+                // 那一条记 paused，既不是取消也不是失败（1.8.0）。
+                if (err instanceof DownloadPausedError) {
+                    results[index] = { ...toFailedItem(target, message, false), paused: true };
+                    continue;
+                }
                 const cancelled = err instanceof DownloadTimeoutError
                     ? false
                     : err instanceof DownloadCancelledError || ctx.exec.signal.aborted;
@@ -1534,7 +1563,9 @@ export function startRetry(taskId, session) {
     const task = readDownloadStatus(1, taskId, session).tasks[0];
     if (!task)
         return { started: false, taskId, reason: 'unknown' };
-    if (task.status !== 'failed' && task.status !== 'cancelled') {
+    // paused（1.8.0）与 failed / cancelled 同列：继续 = 在原记录上从断点重新发起，
+    // 复用与失败重试完全相同的一条代码路径（planResume 指纹核对兜底）。
+    if (task.status !== 'failed' && task.status !== 'cancelled' && task.status !== 'paused') {
         return { started: false, taskId, reason: 'not-retryable' };
     }
     const record = readTaskRecord(taskId, session);

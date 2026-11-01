@@ -95,7 +95,7 @@ async function run(args: Record<string, unknown>): Promise<Record<string, unknow
 /** 轮询直到任务达到期望状态（终态判定来自与 download_status 同一份读取端）。 */
 async function waitForStatus(
   taskId: string,
-  expected: Array<'running' | 'completed' | 'failed' | 'cancelled'>,
+  expected: Array<'running' | 'completed' | 'failed' | 'cancelled' | 'paused'>,
   timeoutMs = 15000,
 ): Promise<{ status: string; pct: number }> {
   const deadline = Date.now() + timeoutMs

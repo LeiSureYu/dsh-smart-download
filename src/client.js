@@ -147,6 +147,7 @@ window.__ModuleLoader__.load({
 			'completed': '已完成',
 			'failed': '失败',
 			'cancelled': '已取消',
+			'paused': '已暂停',
 			'eta': '剩余 {eta}',
 			'untitled': '未命名任务',
 			'entry': '下载面板',
@@ -204,6 +205,12 @@ window.__ModuleLoader__.load({
 			'cancel': '取消下载',
 			'cancelling': '正在取消…',
 			'cancelRequested': '已请求取消，正在停止下载…',
+			/* ---- 1.8.0 暂停 / 继续 ---- */
+			'pause': '暂停',
+			'pausing': '正在暂停…',
+			'pauseRequested': '已暂停，半包已保留；点「重试」即可从断点继续',
+			'retryAll': '重试全部失败',
+			'retryAllStarted': '已对全部可重试的失败项发起重试',
 			'cancelUnknown': '找不到这条任务，可能记录已被删除',
 			'cancelNotRunning': '这条任务已经不在运行中',
 			'retry': '重试',
@@ -211,7 +218,7 @@ window.__ModuleLoader__.load({
 			'retryStarted': '已重新开始下载',
 			'retryRunning': '这条任务正在下载中，无需重试',
 			'retryUnknown': '找不到这条任务，可能记录已被删除',
-			'retryNotRetryable': '只有失败或已取消的任务可以重试',
+			'retryNotRetryable': '只有失败、已取消或已暂停的任务可以重试',
 			'retryNoRequest': '这条记录没有保存原始下载信息（可能来自旧版本），请重新调用 smart_download',
 			'retryUnavailable': '当前宿主没有提供重试能力，请重新调用 smart_download',
 			'actionFailed': '操作失败',
@@ -280,6 +287,12 @@ window.__ModuleLoader__.load({
 			'cancel': 'Cancel download',
 			'cancelling': 'Cancelling…',
 			'cancelRequested': 'Cancellation requested; stopping the download…',
+			/* ---- 1.8.0 pause / resume ---- */
+			'pause': 'Pause download',
+			'pausing': 'Pausing…',
+			'pauseRequested': 'Paused; partial file kept — press "Retry" to resume from the breakpoint',
+			'retryAll': 'Retry failed',
+			'retryAllStarted': 'Retry started for every retryable failure',
 			'cancelUnknown': 'That task could not be found; its record may have been deleted',
 			'cancelNotRunning': 'That task is no longer running',
 			'retry': 'Retry',
@@ -287,7 +300,7 @@ window.__ModuleLoader__.load({
 			'retryStarted': 'Download restarted',
 			'retryRunning': 'That task is already downloading; no retry is needed',
 			'retryUnknown': 'That task could not be found; its record may have been deleted',
-			'retryNotRetryable': 'Only failed or cancelled tasks can be retried',
+			'retryNotRetryable': 'Only failed, cancelled or paused tasks can be retried',
 			'retryNoRequest': 'This record has no saved request information (it may predate retry support); call smart_download again',
 			'retryUnavailable': 'The host does not provide retry support; call smart_download again',
 			'actionFailed': 'Action failed',
@@ -418,6 +431,9 @@ window.__ModuleLoader__.load({
 						return 'var(--dsw-alias-label-error, #dc2626)';
 					case 'cancelled':
 						return 'var(--dsw-alias-label-secondary, #8a8f98)';
+					case 'paused':
+						// 固定琥珀：暂停既非失败（红）也非取消（灰），一眼区分「等会儿继续」
+						return '#d97706';
 					default:
 						// running 及其它：主色（进行中）
 						return 'var(--dsw-alias-label-primary, #2563eb)';
@@ -1473,6 +1489,7 @@ window.__ModuleLoader__.load({
 			presence,
 			onReveal,
 			onDelete,
+			onPause,
 			onCancel,
 			onRetry,
 			busy,
@@ -1505,7 +1522,9 @@ window.__ModuleLoader__.load({
 			// 其余状态不渲染按钮，而不是渲染一个永远置灰的按钮：管理器里每条
 			// 记录都要扫一眼，恒定无效的控件只是噪声。
 			const canCancel = task.status === 'running';
-			const canRetry = task.status === 'failed' || task.status === 'cancelled';
+			const canPause = task.status === 'running';
+			const canRetry =
+				task.status === 'failed' || task.status === 'cancelled' || task.status === 'paused';
 			const isBusy = busy === true;
 			// 只允许一条行级动作在途。别的行在这期间必须**禁用**，否则点击会被
 			// `acting !== null` 静默吞掉（看起来像按钮坏了）。但只有当前行显示
@@ -1726,6 +1745,32 @@ window.__ModuleLoader__.load({
 						},
 						t('deleteRecord'),
 					),
+					canPause
+						? react.createElement(
+								'button',
+								{
+									type: 'button',
+									'data-dsh-smart-dl': 'pause',
+									'aria-label': t('pause'),
+									disabled: blocked,
+									title: isBusy ? t('pausing') : t('pause'),
+									onClick: () => {
+										if (typeof onPause === 'function') onPause(task);
+									},
+									style: {
+										cursor: blocked ? 'default' : 'pointer',
+										fontSize: 12,
+										padding: '4px 10px',
+										borderRadius: 6,
+										border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.24))',
+										background: 'transparent',
+										color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+										opacity: blocked ? 0.45 : 1,
+									},
+								},
+								isBusy ? t('pausing') : t('pause'),
+							)
+						: null,
 					canCancel
 						? react.createElement(
 								'button',
@@ -1970,7 +2015,9 @@ window.__ModuleLoader__.load({
 			/** 任务属于哪个筛选桶。未知状态一律归到「全部」以外的其它桶之外。 */
 			const bucketOf = (task) => {
 				if (task.status === 'completed') return 'done';
-				if (task.status === 'failed' || task.status === 'cancelled') return 'problem';
+				// paused 归入「失败/取消」桶：它是需要用户介入的未完成任务，
+				// 和失败/取消出现在同一个「要看一眼」的清单里。
+				if (task.status === 'failed' || task.status === 'cancelled' || task.status === 'paused') return 'problem';
 				return 'running';
 			};
 
@@ -2164,6 +2211,31 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
+			 * 暂停一条正在跑的任务（1.8.0）。
+			 *
+			 * 不发 confirm：暂停是可逆操作（半包与指纹保留，「重试」即继续）。
+			 * 成功只代表 Host 已发出带暂停 reason 的 abort；paused 终态由下一次
+			 * 状态轮询呈现。
+			 */
+			const pauseTask = async (task) => {
+				if (acting !== null) return;
+				setActing({ id: task.id, op: 'pause' });
+				try {
+					const result = await manage({ op: 'pause', taskId: task.id });
+					const value = result && result.ok ? result.value : null;
+					if (value && value.paused === true) {
+						setNotice(t('pauseRequested'));
+					} else {
+						setNotice(cancelFailureText(value, t));
+					}
+				} catch {
+					setNotice(t('actionFailed'));
+				} finally {
+					setActing(null);
+				}
+			};
+
+			/**
 			 * 重试一条失败 / 已取消的任务。
 			 *
 			 * 同样不发 `confirm`：它只会在**原有记录**上重新发起下载，
@@ -2185,6 +2257,29 @@ window.__ModuleLoader__.load({
 				} finally {
 					setActing(null);
 				}
+			};
+
+			/**
+			 * 重试全部失败项（1.8.0）：对当前任务列表里所有
+			 * failed / cancelled / paused 的行顺序调用既有单行 retry。
+			 *
+			 * 为什么客户端循环而不是服务端批量 op：startRetry 的白名单与
+			 * 元数据校验逐条生效，N 次调用没有第二种语义；批量 op 反而要重造
+			 * 一套聚合错误报告。顺序执行保证「行级动作在途互斥」的既有纪律。
+			 */
+			const retryAllFailed = async () => {
+				if (acting !== null) return;
+				const targets = tasks.filter(
+					(task) => task.status === 'failed' || task.status === 'cancelled' || task.status === 'paused',
+				);
+				if (targets.length === 0) {
+					setNotice(t('retryAllNone'));
+					return;
+				}
+				for (const task of targets) {
+					await retryTask(task);
+				}
+				setNotice(t('retryAllStarted'));
 			};
 
 			return react.createElement(
@@ -2260,6 +2355,27 @@ window.__ModuleLoader__.load({
 							`${t(labelKey)} ${counts[key]}`,
 						);
 					}),
+					react.createElement(
+						'button',
+						{
+							key: 'retry-all',
+							type: 'button',
+							'data-dsh-smart-dl': 'retry-all',
+							onClick: () => {
+								if (typeof retryAllFailed === 'function') retryAllFailed();
+							},
+							style: {
+								cursor: 'pointer',
+								fontSize: 12,
+								padding: '4px 10px',
+								borderRadius: 999,
+								border: '1px solid var(--dsw-alias-label-primary, #2563eb)',
+								color: 'var(--dsw-alias-label-primary, #2563eb)',
+								background: 'transparent',
+							},
+						},
+						t('retryAll'),
+					),
 					react.createElement('input', {
 						key: 'search',
 						type: 'search',
@@ -2433,7 +2549,8 @@ window.__ModuleLoader__.load({
 								onToggle: toggleChecked,
 								onReveal: revealTask,
 								onDelete: (row) => setPending(row.id),
-								onCancel: cancelTask,
+								onPause: pauseTask,
+							onCancel: cancelTask,
 								onRetry: retryTask,
 								busy: acting !== null && acting.id === task.id,
 								actionsDisabled: acting !== null,

@@ -26,7 +26,7 @@ import {
   resolveTaskProgressDir,
 } from './progress.js'
 import type { ProgressSession } from './progress.js'
-import { cancelRunningTask, getRetryHandler, isKnownTask } from './tasks.js'
+import { cancelRunningTask, getRetryHandler, isKnownTask, pauseRunningTask } from './tasks.js'
 import type { RetryStartResult } from './tasks.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
@@ -382,9 +382,18 @@ export interface ManageCancelResult {
   state?: string
 }
 
+/** `op:'pause'` 的返回形状（1.8.0）：与 cancel 同构，语义换成暂停。 */
+export interface ManagePauseResult {
+  paused: boolean
+  taskId: string
+  reason?: 'not-running' | 'unknown'
+  /** 记录里的状态（没在跑时给出，便于面板显示「它其实已经完成了」） */
+  state?: string
+}
+
 /** 已校验的管理请求。 */
 export interface ManageRequest {
-  op: 'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'retry'
+  op: 'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'pause' | 'retry'
   taskId: string
   confirm: boolean
   session?: ProgressSession
@@ -412,6 +421,7 @@ export function readManagePayload(
     op !== 'delete' &&
     op !== 'reveal' &&
     op !== 'cancel' &&
+    op !== 'pause' &&
     op !== 'retry'
   ) {
     return {
@@ -707,6 +717,33 @@ export function cancelManagedTask(
 }
 
 /**
+ * `op:'pause'`：暂停当前 Host 进程里正在跑的那一条（1.8.0）。
+ *
+ * 与 cancel 同一条纪律：只对本进程有效，「没在跑」不是错误而是如实回答。
+ * 终态 paused 由子进程退出后 `finishAborted` 写入（半包与指纹保留，
+ * 管理器的「重试/继续」对 paused 行放行）。
+ */
+export function pauseManagedTask(
+  taskId: string,
+  session?: ProgressSession,
+): ManagePauseResult {
+  if (pauseRunningTask(taskId) === 'paused') {
+    // 与 cancel 同一取舍：这里只表示「暂停请求已被接受」，paused 终态由
+    // 下一次轮询呈现。
+    return { paused: true, taskId }
+  }
+  const task = findTask(taskId, session)
+  if (!task) {
+    return {
+      paused: false,
+      taskId,
+      reason: isKnownTask(taskId) ? 'not-running' : 'unknown',
+    }
+  }
+  return { paused: false, taskId, reason: 'not-running', state: task.status }
+}
+
+/**
  * `op:'retry'`：以同一个 taskId 重新发起一条已失败 / 已取消的下载（1.6.0）。
  *
  * 真正的实现由插件入口通过 `setRetryHandler` 注入（rpc.ts 不 import index.ts，
@@ -895,6 +932,8 @@ export function registerStatusRpc(ctx: Context): void {
       // cancel / retry 必须在 delete 的 confirm 分支之前分派：它们不需要
       // confirm，且绝不能因为调用方多带了一个 confirm:true 就落到删除产物的
       // 路径上（那是不可逆操作）。
+      // pause 与 cancel 同组：不需要 confirm，也绝不能落到删除产物分支。
+      if (op === 'pause') return ok(pauseManagedTask(taskId, session))
       if (op === 'cancel') return ok(cancelManagedTask(taskId, session))
       if (op === 'retry') return ok(await retryManagedTask(taskId, session))
 

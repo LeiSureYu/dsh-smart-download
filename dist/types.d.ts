@@ -269,6 +269,8 @@ export interface BatchItemResult {
     success: boolean;
     /** 是否因整批取消而未完成（与失败区分；成功条目不会带上它） */
     cancelled?: boolean;
+    /** 是否因用户暂停而未完成（1.8.0）；成功条目不会带上它 */
+    paused?: boolean;
     /** 失败 / 取消原因（逐条可见，失败条目必有） */
     error?: string;
     /** 实际使用的下载方式（有结论时出现） */
@@ -515,5 +517,9 @@ export interface ProgressRecord {
      */
     request?: RetryRequest;
 }
-/** 进度状态，取值与 dsh-task-progress 的协议一致 */
-export type ProgressState = 'running' | 'done' | 'failed' | 'cancelled';
+/**
+ * 进度状态，取值与 dsh-task-progress 的协议一致。
+ * `paused` 是 1.8.0 新增的本插件扩展：dsh-task-progress 的读取端不认识它时
+ * 按 running 处理（外观退化，轨道二正确显示），见 PLAN-1.8.md D1。
+ */
+export type ProgressState = 'running' | 'done' | 'failed' | 'cancelled' | 'paused';

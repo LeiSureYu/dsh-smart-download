@@ -59,6 +59,29 @@ export function isRunning(taskId) {
     return running.has(taskId);
 }
 /**
+ * 暂停专用中止原因（1.8.0）。
+ *
+ * 为什么用 abort(reason)：暂停与取消是**同一个物理动作**（终止子进程），差别
+ * 只在终态落点。`AbortSignal.any` 会把 reason 原样传播给合并信号，
+ * `finishAborted`（src/index.ts）据此把终态写成 paused 而不是 cancelled ——
+ * 不需要第二条信号通道。哨兵串保持唯一：reason 的其它取值（AbortError /
+ * TimeoutError 一类 DOMException）绝不能撞上它。
+ */
+export const PAUSE_ABORT_REASON = 'dsh-smart-dl:paused';
+/**
+ * 请求暂停一条正在跑的任务。
+ *
+ * 与 cancelRunningTask 是同一个物理动作；差别只在 reason —— 进度终态会写成
+ * paused（半包与旁车指纹照常保留，重试/继续时由既有指纹核对兜底）。
+ */
+export function pauseRunningTask(taskId) {
+    const entry = running.get(taskId);
+    if (!entry)
+        return 'not-running';
+    entry.controller.abort(PAUSE_ABORT_REASON);
+    return 'paused';
+}
+/**
  * 请求取消一条正在跑的任务。
  *
  * 幂等：重复调用只会再次 abort 同一个 controller（AbortController 的 abort

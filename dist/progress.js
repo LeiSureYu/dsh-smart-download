@@ -545,6 +545,15 @@ export class ProgressReporter {
         this.report(pct, msg, undefined, undefined, 'cancelled');
     }
     /**
+     * 标记暂停（1.8.0）：与取消是同一个物理动作（终止子进程、半包与旁车指纹
+     * 原样保留），差别只在终态语义 —— 取消是「我不要了」，暂停是「我等会儿还要，
+     * 从断点继续」。管理器的「重试/继续」按钮据此放行。
+     */
+    paused(msg = '已暂停') {
+        const pct = this.lastPct >= 0 ? this.lastPct : 0;
+        this.report(pct, msg, undefined, undefined, 'paused');
+    }
+    /**
      * 删除本任务的两条进度文件。
      *
      * 刻意**不**在下载结束时自动调用：面板依赖这些文件渲染「已完成 / 失败」回执，

@@ -89,9 +89,17 @@ export interface ManageCancelResult {
     /** 记录里的状态（没在跑时给出，便于面板显示「它其实已经完成了」） */
     state?: string;
 }
+/** `op:'pause'` 的返回形状（1.8.0）：与 cancel 同构，语义换成暂停。 */
+export interface ManagePauseResult {
+    paused: boolean;
+    taskId: string;
+    reason?: 'not-running' | 'unknown';
+    /** 记录里的状态（没在跑时给出，便于面板显示「它其实已经完成了」） */
+    state?: string;
+}
 /** 已校验的管理请求。 */
 export interface ManageRequest {
-    op: 'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'retry';
+    op: 'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'pause' | 'retry';
     taskId: string;
     confirm: boolean;
     session?: ProgressSession;
@@ -224,6 +232,14 @@ export declare function forgetManagedTask(taskId: string, session?: ProgressSess
  * 「已结束」与「未知 id」。
  */
 export declare function cancelManagedTask(taskId: string, session?: ProgressSession): ManageCancelResult;
+/**
+ * `op:'pause'`：暂停当前 Host 进程里正在跑的那一条（1.8.0）。
+ *
+ * 与 cancel 同一条纪律：只对本进程有效，「没在跑」不是错误而是如实回答。
+ * 终态 paused 由子进程退出后 `finishAborted` 写入（半包与指纹保留，
+ * 管理器的「重试/继续」对 paused 行放行）。
+ */
+export declare function pauseManagedTask(taskId: string, session?: ProgressSession): ManagePauseResult;
 /**
  * `op:'retry'`：以同一个 taskId 重新发起一条已失败 / 已取消的下载（1.6.0）。
  *

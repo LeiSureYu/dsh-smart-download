@@ -1,0 +1,31 @@
+{
+  "name": "@leisureyu/dsh-aria2-ohos-arm64",
+  "version": "1.37.0",
+  "description": "Bundled aria2c binary for HarmonyOS / OpenHarmony arm64 (aarch64-linux-ohos; built from official source in this repo's CI)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeiSureYu/dsh-smart-download.git",
+    "directory": "packages/aria2-ohos-arm64"
+  },
+  "type": "commonjs",
+  "os": [
+    "ohos"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/aria2c",
+    "README.md"
+  ],
+  "keywords": [
+    "aria2",
+    "aria2c",
+    "ohos",
+    "openharmony",
+    "harmonyos",
+    "arm64",
+    "binary"
+  ],
+  "license": "GPL-2.0-or-later"
+}

@@ -215,6 +215,7 @@ test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正
     'darwin-x64',
     'linux-arm64',
     'linux-x64',
+    'ohos-arm64',
     'win32-arm64',
     'win32-x64',
   ])
@@ -231,11 +232,17 @@ test('ARIA2_TARGETS 覆盖全部受支持平台，且子包名 / 二进制名正
   assert.equal(ARIA2_TARGETS['darwin-x64']?.bin, 'bin/aria2c')
   assert.equal(ARIA2_TARGETS['darwin-arm64']?.pkg, '@leisureyu/dsh-aria2-darwin-arm64')
   assert.equal(ARIA2_TARGETS['darwin-arm64']?.bin, 'bin/aria2c')
+  // ohos（1.9.1）：OpenHarmony / HarmonyOS 的 Node 运行时报告
+  // process.platform === 'ohos'；子包等 CI 构建配方落地后发布，
+  // 在那之前 require.resolve 失败，由 PATH / curl 兜底（见 harmonyos.test.ts）
+  assert.equal(ARIA2_TARGETS['ohos-arm64']?.pkg, '@leisureyu/dsh-aria2-ohos-arm64')
+  assert.equal(ARIA2_TARGETS['ohos-arm64']?.bin, 'bin/aria2c')
 })
 
 test('aria2TargetFor：Windows 用 .exe，Linux / macOS 用无后缀二进制', () => {
   assert.equal(aria2TargetFor('win32', 'x64')?.bin, 'bin/aria2c.exe')
   assert.equal(aria2TargetFor('win32', 'arm64')?.bin, 'bin/aria2c.exe')
+  assert.equal(aria2TargetFor('ohos', 'arm64')?.bin, 'bin/aria2c')
   assert.equal(aria2TargetFor('linux', 'x64')?.bin, 'bin/aria2c')
   assert.equal(aria2TargetFor('linux', 'arm64')?.bin, 'bin/aria2c')
   assert.equal(aria2TargetFor('darwin', 'x64')?.bin, 'bin/aria2c')

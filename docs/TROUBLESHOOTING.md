@@ -234,6 +234,15 @@ aria2c --version
 `--version` 退出码为 0。注意这只是可执行性检查，**不是**来源或哈希验证 —— 请只使用可信
 包管理器安装的 aria2。
 
+**鸿蒙（HarmonyOS / OpenHarmony）**：1.9.1 起插件识别 `ohos` 运行时，但随包
+ohos-arm64 子包尚未发布（见 [COMPATIBILITY.md](./COMPATIBILITY.md)），缺省就是
+curl 单线程，这是预期行为而非故障。要多线程：把自建的 `aria2c` 绝对路径写进
+`DSH_SMARTDL_ARIA2_PATH`（OHOS 应用沙箱的 PATH 不含侧载目录，优先用这个变量），
+或放进 DSH 宿主能看到的 `PATH`。若 `reason` 里出现
+`DSH_SMARTDL_ARIA2_PATH 指定的二进制不可用`，说明该变量已设置但路径没通过
+`--version` 验证 —— 核对路径是否指向文件本体、是否与 DSH 宿主架构一致
+（鸿蒙设备是 arm64），修正后重启 DSH。
+
 ## Linux 上 `aria2c: Permission denied`
 
 tarball 里的二进制缺少可执行位。本项目的发布流水线在 Linux runner 上打包，并对

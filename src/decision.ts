@@ -7,6 +7,7 @@
  * - 本插件先探测，再按文件大小分档决定并发，条件不满足就回退 curl。
  */
 import type { ConcurrencyLevel, Decision, ProbeResult } from './types.js'
+import { ARIA2_PATH_OVERRIDE_ENV } from './downloader.js'
 import { readThroughput } from './throughput-cache.js'
 
 /**
@@ -201,11 +202,20 @@ export function decide(
   if (!aria2Available) {
     const platform = env.platform ?? process.platform
     const arch = env.arch ?? process.arch
+    // 显式指定的二进制不可用时，reason 必须指向真正的嫌疑（1.9.1）：
+    // 此时「子包未安装」是误导 —— 用户配置的路径没通过验证才是事实。
+    // getAria2Path() 在覆盖被拒绝时不回落其它来源（否则配置错误会被静默
+    // 掩盖），因此走到这里的 ohos / 各平台用户需要被告知去核对环境变量。
+    const overrideEnv = process.env[ARIA2_PATH_OVERRIDE_ENV]
+    const overrideHint =
+      typeof overrideEnv === 'string' && overrideEnv.trim() !== ''
+        ? `；DSH_SMARTDL_ARIA2_PATH 指定的二进制不可用，请核对该路径`
+        : ''
     return {
       method: 'curl',
       concurrency: 1,
       fellback: true,
-      reason: `未找到 aria2 二进制（当前平台 ${platform}-${arch} 不受支持或子包未安装）`,
+      reason: `未找到 aria2 二进制（当前平台 ${platform}-${arch} 不受支持或子包未安装）${overrideHint}`,
     }
   }
 

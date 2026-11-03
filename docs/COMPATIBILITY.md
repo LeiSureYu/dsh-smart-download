@@ -11,6 +11,11 @@
 结论已被这一新事实推翻，历史核对记录保留在下方作为「为什么选择自构建而非
 第三方」的依据。
 
+**HarmonyOS（鸿蒙）自 1.9.1 起「可用但未完整」**：插件识别 `ohos` 运行时并在
+其上开箱工作（回退 curl 单线程；PATH 或 `DSH_SMARTDL_ARIA2_PATH` 自备 aria2c
+即可多线程），随包 ohos-arm64 子包在路线图上 —— 与 macOS 1.3 → 1.7.0 完全相同
+的两阶段节奏（见下节末尾）。
+
 ## 平台矩阵
 
 | 平台 | 架构 | 插件可用 | 多线程（aria2） | 二进制子包 | 说明 |
@@ -21,19 +26,63 @@
 | Linux | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-linux-arm64` | 同上 |
 | macOS | x64 | ✅ | ✅ | `@leisureyu/dsh-aria2-darwin-x64` | 本仓库 CI 自构建（1.7.0 起），见下 |
 | macOS | arm64 | ✅ | ✅ | `@leisureyu/dsh-aria2-darwin-arm64` | 同上，Apple Silicon 原生构建 |
+| HarmonyOS | arm64 | ✅（1.9.1 起） | 🟡 需自备 aria2c | `@leisureyu/dsh-aria2-ohos-arm64`（尚未发布） | OpenHarmony 运行时，见下节 |
 
 **「插件可用」与「多线程可用」是两件事。** 六个受支持组合（Windows / Linux / macOS）各对应独立
 npm 子包，子包用 `os` / `cpu` 字段声明适用平台；包管理器在不匹配的平台上会**直接跳过安装**，
 不会报错。`src/downloader.ts` 的 `getAria2Path()` 按以下顺序定位 aria2：
 
-1. 尝试 `require.resolve` 随包二进制子包；
-2. 子包不可用时，在 `PATH` 上查找 `aria2c`（Windows 按 `PATHEXT` 展开）；
-3. 对找到的候选执行一次 `aria2c --version`，退出码为 0 才采用；
-4. 两条路径都失败才返回 `null`，由 `decide()` 回退到 `curl`，并在返回结果的 `reason`
+1. 环境变量 `DSH_SMARTDL_ARIA2_PATH` 显式指定的二进制（1.9.1 起；**验证失败时不
+   回落其它来源** —— 自动换一个来源会把配置错误静默掩盖掉，直接返回 `null` 回退
+   curl，`decide()` 的 reason 会提示核对环境变量）；
+2. 尝试 `require.resolve` 随包二进制子包；
+3. 子包不可用时，在 `PATH` 上查找 `aria2c`（Windows 按 `PATHEXT` 展开）；
+4. 对找到的候选执行一次 `aria2c --version`，退出码为 0 才采用；
+5. 所有路径都失败才返回 `null`，由 `decide()` 回退到 `curl`，并在返回结果的 `reason`
    里写明「未找到 aria2 二进制（当前平台 … 不受支持或子包未安装）」。
 
 因此**没有随包子包的平台不会装出一个坏掉的插件**，只会装出一个单线程下载器；
-如果用户在 `PATH` 上自备了可用的 aria2，则仍可多线程。
+如果用户在 `PATH` 上自备了可用的 aria2（或用 `DSH_SMARTDL_ARIA2_PATH` 显式指定），
+则仍可多线程。
+
+### HarmonyOS：1.9.1 的阶段性适配
+
+1.9.1 做的是「让插件在鸿蒙上被正确识别并开箱工作」，不是「随包二进制完整支持」。
+拆成两阶段的原因与 macOS 完全同构：卡点不在代码，在**缺一个可信来源、可复现
+构建的 OHOS aria2 二进制**；而代码不先认识 `ohos` 平台，子包发布那天插件也用不上。
+
+**运行时事实（1.9.1 依赖的假设，均有生态先例）**：
+
+- OpenHarmony / HarmonyOS 的 Node 运行时报告 `process.platform === 'ohos'`、
+  `process.arch === 'arm64'`。npm 生态已按该值分发 OHOS 预编译产物
+  （如 lightningcss 的 `aarch64-unknown-linux-ohos` 目标、napi-rs 的 ohos 平台），
+  npm 子包的 `os: ["ohos"]` 字段按同一语义匹配。
+- HarmonyOS NEXT 的内核不是 Linux，linux-arm64 的 musl 静态 aria2 **不能**复用，
+  必须以 `aarch64-linux-ohos` 目标独立构建 —— 这是 ohos 需要独立子包的理由。
+- DSH 若以 Linux 兼容环境（虚拟机 / 容器）形态跑在鸿蒙 PC 上，则
+  `process.platform` 是 `linux`，走既有 linux-arm64 子包，无需本节任何改动；
+  本节只覆盖「DSH 原生跑在 OHOS Node 运行时」的形态。
+
+**1.9.1 落地的部分**：
+
+- `ARIA2_TARGETS` 新增 `ohos-arm64` → `@leisureyu/dsh-aria2-ohos-arm64`；子包
+  发布并进入主包 optionalDependencies 的那天，解析零改动生效。
+- 回退链在鸿蒙上原样成立：随包子包（暂缺）→ PATH 上的 `aria2c` → curl，
+  且每一级降级都在 reason 里显式写明。
+- 新增 `DSH_SMARTDL_ARIA2_PATH`（全平台）：OHOS 应用沙箱的 PATH 不含侧载
+  目录，「把自建 aria2c 放上 PATH」常常不可行，该变量给出第三条路。
+- 断点续传、校验、镜像、代理、后台模式等纯 Node 逻辑不依赖平台，鸿蒙上行为
+  与其它平台一致；RPC daemon 的 POSIX 生命周期绑定（`--stop-with-pid`）对
+  OHOS 运行时同样适用。
+
+**尚未落地（后续版本）**：
+
+- 随包 ohos-arm64 二进制：由本仓库 CI 用 OpenHarmony SDK 原生工具链从 aria2
+  官方源码构建（darwin 同款信任模型，附 SLSA provenance）。构建配方涉及
+  zlib / openssl 等 OHOS 目标的交叉编译，配方验证通过之前不会发布任何二进制
+  —— 与 macOS 1.3 时代「宁可搁置也不发不可信二进制」的门槛一致。
+- 「在文件夹中显示」：OHOS 没有统一的 `xdg-open` 等价命令，该按钮在鸿蒙上
+  会如实报告启动失败（既有 `openWithCommand` 契约），不影响下载本身。
 
 ### macOS：从「搁置」到「CI 自构建」（1.7.0 起）
 

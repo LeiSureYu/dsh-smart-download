@@ -11,6 +11,53 @@
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-11-04
+
+**鸿蒙（HarmonyOS / OpenHarmony）适配第一阶段：插件在 `process.platform === 'ohos'`
+的运行时上被正式识别，回退链在鸿蒙上开箱可用；同时所有平台新增
+`DSH_SMARTDL_ARIA2_PATH`，允许显式指定 aria2 二进制。**
+
+**First stage of HarmonyOS / OpenHarmony adaptation: the plugin recognizes
+`process.platform === 'ohos'` runtimes and its fallback chain works out of the
+box there; all platforms additionally gain `DSH_SMARTDL_ARIA2_PATH` to point at
+an explicit aria2 binary.**
+
+### 新增 / Added
+
+- **`ohos-arm64` 目标**（`src/downloader.ts`）：OpenHarmony 的 Node 运行时报告
+  `process.platform === 'ohos'`（npm 生态先例：lightningcss、napi-rs 均按该值
+  分发 OHOS 预编译产物；HarmonyOS NEXT 内核不是 Linux，linux-arm64 的 musl
+  静态 aria2 不能复用），映射表新增 `ohos-arm64` →
+  `@leisureyu/dsh-aria2-ohos-arm64`。**子包本体尚未发布**：随包二进制走
+  darwin 同款信任模型（本仓库 CI 用 OHOS SDK 从官方源码构建），构建配方
+  落地后随后续版本发布；在那之前 require.resolve 必然失败，由既有链条
+  兜底 —— 鸿蒙上开箱可用（curl 单线程），PATH 上的 aria2c 仍可多线程，
+  不会装出一个坏掉的插件。
+- **`DSH_SMARTDL_ARIA2_PATH` 环境变量**（所有平台）：显式指定 aria2 二进制，
+  优先于随包子包与 PATH。为鸿蒙而设（OHOS 应用沙箱的 PATH 不含侧载目录，
+  「自建 aria2c 放上 PATH」常常不可行），也是所有平台的通用逃生门。
+  指定的二进制同样要过 `--version` 验证；**验证失败时返回 null 且不回落
+  其它来源** —— 自动换一个来源会把配置错误静默掩盖掉（用户以为在用自己
+  指定的二进制，实际在用别的），回退 curl 并在 reason 里如实提示核对
+  环境变量，才是显式失败。
+
+### 变更 / Changed
+
+- aria2 定位顺序从「子包 → PATH」变为「`DSH_SMARTDL_ARIA2_PATH` → 子包 →
+  PATH」；三处来源共用同一条 `--version` 判定（抽为 `verifyAria2Binary`），
+  行为对未设置该变量的用户完全不变。
+- `decide()` 的「未找到 aria2 二进制」reason 在设置了
+  `DSH_SMARTDL_ARIA2_PATH` 时追加指向该变量的提示 —— 覆盖被拒绝时，
+  「子包未安装」是误导。
+
+### 测试 / Tests
+
+- 新增 `test/harmonyos.test.ts`（10 例：ohos-arm64 映射 / ohos-x64 不编造 /
+  覆盖解析语义 / 覆盖优先级 / 无效覆盖不回落 / 目录与空白边界 / reason
+  提示）；`test/downloader.test.ts` 的映射表断言同步更新。
+- 基线：全量 `pnpm test` 通过 —— **691 例（688 通过 / 3 跳过 / 0 失败）**；
+  `pnpm check` 通过。
+
 ## [1.9.0] - 2026-11-02
 
 **aria2 下载路径升级为常驻 RPC daemon：暂停/继续变成原地语义（亚秒级），进度从

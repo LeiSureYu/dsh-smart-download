@@ -19,6 +19,15 @@ const require = createRequire(import.meta.url);
  * darwin 的两个子包（1.7.0 起）由本仓库 CI 从官方源码构建 —— aria2 官方不发
  * macOS 二进制，第三方候选过不了可信门槛，见 scripts/build-aria2-darwin.sh
  * 与 docs/COMPATIBILITY.md。
+ *
+ * `ohos-arm64`（1.9.1 起）：OpenHarmony / HarmonyOS 的 Node 运行时报告
+ * `process.platform === 'ohos'`（npm 生态的既有先例：lightningcss、napi-rs
+ * 都按这个值分发 OHOS 预编译产物；HarmonyOS NEXT 内核不是 Linux，不能复用
+ * linux-arm64 的 musl 静态二进制）。映射表先落位 —— 子包一旦发布并进入
+ * optionalDependencies，这段代码零改动生效；在那之前，ohos 上 require.resolve
+ * 必然失败，由既有链条（PATH 上的 aria2c → curl）兜底，插件在鸿蒙上开箱可用
+ * 但只有单线程。随包子包走 darwin 同款信任模型（本仓库 CI 用 OHOS SDK 从官方
+ * 源码构建），构建配方落地后随后续版本发布，见 docs/COMPATIBILITY.md。
  */
 export const ARIA2_TARGETS = Object.freeze({
     'win32-x64': { pkg: '@leisureyu/dsh-aria2-win32-x64', bin: 'bin/aria2c.exe' },
@@ -27,6 +36,7 @@ export const ARIA2_TARGETS = Object.freeze({
     'linux-arm64': { pkg: '@leisureyu/dsh-aria2-linux-arm64', bin: 'bin/aria2c' },
     'darwin-x64': { pkg: '@leisureyu/dsh-aria2-darwin-x64', bin: 'bin/aria2c' },
     'darwin-arm64': { pkg: '@leisureyu/dsh-aria2-darwin-arm64', bin: 'bin/aria2c' },
+    'ohos-arm64': { pkg: '@leisureyu/dsh-aria2-ohos-arm64', bin: 'bin/aria2c' },
 });
 /**
  * 查询给定平台 / 架构对应的 aria2 子包描述。
@@ -36,8 +46,46 @@ export function aria2TargetFor(platform, arch) {
     return ARIA2_TARGETS[`${platform}-${arch}`] ?? null;
 }
 /**
+ * 显式指定的 aria2 二进制环境变量（1.9.1，鸿蒙适配）。
+ *
+ * 为什么需要它：随包子包覆盖不到的平台（当前的鸿蒙 ohos-arm64 就在等待
+ * CI 构建配方落地），用户把自建 / 侧载的 aria2c 放上 PATH 并不总是可行
+ * （OHOS 应用沙箱的 PATH 不含侧载目录），这条环境变量给出第三个来源。
+ * 它也是所有平台的通用逃生门 —— 与 `DSH_SMARTDL_REVEAL_CMD` 同一套接缝风格。
+ */
+export const ARIA2_PATH_OVERRIDE_ENV = 'DSH_SMARTDL_ARIA2_PATH';
+/**
+ * 读取环境变量里显式指定的 aria2 路径（去除首尾空白；未设置 / 空串返回 null）。
+ * 抽成纯函数便于单测覆盖解析语义（空白视为未设置，而不是当成相对路径）。
+ */
+export function aria2PathOverride(value = process.env[ARIA2_PATH_OVERRIDE_ENV]) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    return trimmed === '' ? null : trimmed;
+}
+/**
+ * 验证一个候选路径确实是能执行的 aria2：文件存在 + `--version` 退出码 0。
+ * findAria2OnPath 与环境变量覆盖共用同一条判定，两处才不会漂移。
+ */
+function verifyAria2Binary(candidate) {
+    try {
+        if (!statSync(candidate).isFile())
+            return false;
+    }
+    catch {
+        return false;
+    }
+    const check = spawnSync(candidate, ['--version'], {
+        windowsHide: true,
+        timeout: 5000,
+        encoding: 'utf-8',
+    });
+    return check.status === 0;
+}
+/**
  * 定位随插件分发的 aria2 二进制。
- * 先按当前平台 / 架构选择子包；子包不存在时再查 PATH 上的 `aria2c`。
+ * 解析顺序：显式环境变量 → 随包子包 → PATH 上的 `aria2c`。
  *
  * 为什么必须查 PATH（1.5.0）：随包子包不可用时（macOS 用户没装新子包的旧版本、
  * 或镜像源未同步），Homebrew 安装的 `aria2c` 完全可用。此前 darwin 在第一步就
@@ -47,9 +95,18 @@ export function aria2TargetFor(platform, arch) {
  * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在
  * 「已经开始下载」之后；先验证则能在探测前就决定回退 curl，错误路径更短。
  *
+ * 为什么环境变量被拒绝时不回落到子包 / PATH（1.9.1）：自动换一个来源会把
+ * 配置错误静默掩盖掉 —— 用户以为在用自己指定的二进制，实际在用别的。
+ * 返回 null 让调用方回退 curl，失败是显式的（decide() 的 reason 会提示
+ * 检查该环境变量），而不是换一个来源悄悄继续。
+ *
  * @returns 可执行的 aria2 路径；找不到或验证失败时返回 null（调用方回退 curl）
  */
 export function getAria2Path() {
+    const override = aria2PathOverride();
+    if (override !== null) {
+        return verifyAria2Binary(override) ? override : null;
+    }
     const target = aria2TargetFor(process.platform, process.arch);
     if (target) {
         try {
@@ -84,19 +141,7 @@ export function findAria2OnPath(envPath = process.env.PATH) {
                 ? exts.map((ext) => joinPath(dir, name + ext.toLowerCase()))
                 : [joinPath(dir, name)];
             for (const candidate of candidates) {
-                try {
-                    if (!statSync(candidate).isFile())
-                        continue;
-                }
-                catch {
-                    continue;
-                }
-                const check = spawnSync(candidate, ['--version'], {
-                    windowsHide: true,
-                    timeout: 5000,
-                    encoding: 'utf-8',
-                });
-                if (check.status === 0)
+                if (verifyAria2Binary(candidate))
                     return candidate;
             }
         }

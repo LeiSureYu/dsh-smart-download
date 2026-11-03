@@ -4,13 +4,13 @@
 [![npm downloads](https://img.shields.io/npm/dm/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](./LICENSE)
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20HarmonyOS-0078D4)
 
 简体中文 · [English](./README.en.md)
 
 > 给 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai)装一个内置 aria2 的下载器:
 > 大文件自动多线程、不支持就自动回退 curl、断了能续传、照官方文档核对摘要。
-> **Windows / Linux / macOS 六平台完整支持**。
+> **Windows / Linux / macOS 六平台完整支持；HarmonyOS（鸿蒙）1.9.1 起可用。**
 
 ![进度面板](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
@@ -115,19 +115,26 @@ smart_download({ "url": "https://example.com/big.iso", "background": true })
 | 变量 | 作用 |
 | --- | --- |
 | `DSH_SMARTDL_MIRRORS` | 覆盖自动镜像候选表（逗号分隔，顺序即优先级）。 |
+| `DSH_SMARTDL_ARIA2_PATH` | 显式指定 aria2 二进制路径，优先于随包子包与 PATH（验证失败则回退 curl，不回落其它来源）。 |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` | 未传 `proxy` 参数时的代理来源。 |
 | `NO_PROXY` | 命中的主机直连（对显式 `proxy` 参数同样生效）。 |
 | `DSH_PROGRESS_DIR` / `DSH_DOWNLOAD_PROGRESS_DIR` | 覆盖两条进度轨道的目录。 |
 
 ## 支持平台
 
-| 平台 | 架构 | 子包 |
-| --- | --- | --- |
-| Windows | x64 / arm64 | `@leisureyu/dsh-aria2-win32-*` |
-| Linux | x64 / arm64 | `@leisureyu/dsh-aria2-linux-*` |
-| macOS | x64 / arm64 | `@leisureyu/dsh-aria2-darwin-*`（本仓库 CI 从官方源码构建） |
+| 平台 | 架构 | 子包 | 状态 |
+| --- | --- | --- | --- |
+| Windows | x64 / arm64 | `@leisureyu/dsh-aria2-win32-*` | ✅ 完整支持 |
+| Linux | x64 / arm64 | `@leisureyu/dsh-aria2-linux-*` | ✅ 完整支持 |
+| macOS | x64 / arm64 | `@leisureyu/dsh-aria2-darwin-*` | ✅ 完整支持（本仓库 CI 从官方源码构建） |
+| HarmonyOS | arm64 | `@leisureyu/dsh-aria2-ohos-arm64` | 🟡 1.9.1 起可用；随包子包在路线图上，当前多线程需 PATH 自备 aria2c 或 `DSH_SMARTDL_ARIA2_PATH` |
 
-六个平台均为完整支持（随包 aria2 多线程）。安装时包管理器按 `os` / `cpu` 自动只装当前平台的那一个子包。
+Windows / Linux / macOS 六个组合均为完整支持（随包 aria2 多线程），安装时包管理器按
+`os` / `cpu` 自动只装当前平台的那一个子包。鸿蒙的 OpenHarmony Node 运行时报告
+`process.platform === 'ohos'`，与 Linux 二进制不兼容（内核不同，musl 静态二进制
+不能复用），因此走独立子包：1.9.1 先落位运行时识别与回退链（开箱 curl 单线程，
+PATH 上有 aria2c 则自动多线程），随包二进制将由本仓库 CI 用 OHOS SDK 从官方源码
+构建后发布 —— 与 macOS 子包同一信任模型，详见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)。
 
 ## 工作原理
 
@@ -162,7 +169,8 @@ smart_download(url, …)
 
 - **被 Defender 拦截？** 未签名 `aria2c.exe` 的启发式告警，把项目 `node_modules` 加入白名单即可。
 - **下载速度没提升？** 服务器不支持 Range 或文件太小，已自动回退 curl；`reason` 字段写明原因。
-- **提示找不到 aria2？** 六平台均有子包；镜像源未同步时切官方 npm 源重装。
+- **提示找不到 aria2？** Windows / Linux / macOS 六组合均有子包（镜像源未同步时切官方 npm 源重装）；鸿蒙当前靠 PATH 或 `DSH_SMARTDL_ARIA2_PATH` 自备 aria2c，缺省回退 curl。
+- **鸿蒙上怎么开多线程？** 1.9.1 起插件在鸿蒙开箱可用（curl 单线程）。多线程两条路：把自建的 `aria2c` 路径填进 `DSH_SMARTDL_ARIA2_PATH`，或放进 PATH；随包 ohos-arm64 子包在路线图上。
 - **GitHub 下载慢？** 传 `mirror: "auto"`。
 - **摘要怎么核对？** 把官方文档里的摘要原样传给 `sha256`，四种常见写法都认。
 - **重跑报退出码 33 / 36？** 33 = HTTP range error（服务器忽略/未接受你发的 Range），36 = bad download resume（无法从断点续传）。33 不代表服务器永久不支持 Range；删除半包后重跑会全量重下。

@@ -4,14 +4,14 @@
 [![npm downloads](https://img.shields.io/npm/dm/@leisureyu/dsh-smart-dl.svg)](https://www.npmjs.com/package/@leisureyu/dsh-smart-dl)
 [![license](https://img.shields.io/npm/l/@leisureyu/dsh-smart-dl.svg)](./LICENSE)
 [![Publish](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml/badge.svg)](https://github.com/LeiSureYu/dsh-smart-download/actions/workflows/publish.yml)
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20HarmonyOS-0078D4)
 
 [简体中文](./README.md) · English
 
 > A downloader for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai) with
 > bundled aria2: automatic multi-connection for large files, curl fallback,
 > resumable downloads, checksum verification against the official docs.
-> **All six platforms fully supported — Windows / Linux / macOS.**
+> **All six platforms fully supported — Windows / Linux / macOS. HarmonyOS available since 1.9.1.**
 
 ![Progress panel](https://raw.githubusercontent.com/LeiSureYu/dsh-smart-download/main/docs/progress-pill.png)
 
@@ -113,19 +113,21 @@ smart_download({ "url": "https://example.com/big.iso", "background": true })
 | Variable | Effect |
 | --- | --- |
 | `DSH_SMARTDL_MIRRORS` | Overrides the built-in mirror candidate list. |
+| `DSH_SMARTDL_ARIA2_PATH` | Explicit path to an aria2 binary; takes precedence over the bundled subpackage and PATH (falls back to curl on failed verification, never to another source). |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` | Proxy source when `proxy` is not passed. |
 | `NO_PROXY` | Matching hosts connect directly (applies to an explicit `proxy` too). |
 | `DSH_PROGRESS_DIR` / `DSH_DOWNLOAD_PROGRESS_DIR` | Override the two progress-track directories. |
 
 ## Supported platforms
 
-| Platform | Architectures | Subpackage |
-| --- | --- | --- |
-| Windows | x64 / arm64 | `@leisureyu/dsh-aria2-win32-*` |
-| Linux | x64 / arm64 | `@leisureyu/dsh-aria2-linux-*` |
-| macOS | x64 / arm64 | `@leisureyu/dsh-aria2-darwin-*` (built from official source in this repo's CI) |
+| Platform | Architectures | Subpackage | Status |
+| --- | --- | --- | --- |
+| Windows | x64 / arm64 | `@leisureyu/dsh-aria2-win32-*` | ✅ Full support |
+| Linux | x64 / arm64 | `@leisureyu/dsh-aria2-linux-*` | ✅ Full support |
+| macOS | x64 / arm64 | `@leisureyu/dsh-aria2-darwin-*` | ✅ Full support (built from official source in this repo's CI) |
+| HarmonyOS | arm64 | `@leisureyu/dsh-aria2-ohos-arm64` | 🟡 Available since 1.9.1; bundled subpackage is on the roadmap — multi-connection needs an aria2c on PATH or `DSH_SMARTDL_ARIA2_PATH` for now |
 
-All six combinations are fully supported (bundled aria2, multi-connection). The package manager installs only the subpackage matching the current platform.
+All six Windows / Linux / macOS combinations are fully supported (bundled aria2, multi-connection). The package manager installs only the subpackage matching the current platform. The OpenHarmony Node runtime reports `process.platform === 'ohos'` and is not Linux-binary compatible (different kernel — the musl static build cannot be reused), so it gets its own subpackage: 1.9.1 lands runtime recognition and the fallback chain (curl single-connection out of the box, automatic multi-connection when an aria2c is on PATH); the bundled binary will be built in this repo's CI with the OHOS SDK from official source — same trust model as the macOS subpackage. See [COMPATIBILITY.md](./docs/COMPATIBILITY.md).
 
 ## How it works
 
@@ -160,7 +162,8 @@ Every skip, fallback and failure states its reason in the result and progress �
 
 - **Blocked by Defender?** Heuristic warning on the unsigned `aria2c.exe`; add the project's `node_modules` to the exclusions.
 - **No speed-up?** The server does not support Range, or the file is small — already fell back to curl; `reason` explains.
-- **"aria2 not found"?** All six platforms have subpackages; if a mirror did not sync them, switch to the official npm registry.
+- **"aria2 not found"?** All six Windows / Linux / macOS combinations have subpackages (if a mirror did not sync them, switch to the official npm registry); on HarmonyOS, provide your own aria2c via PATH or `DSH_SMARTDL_ARIA2_PATH` — otherwise it falls back to curl.
+- **Multi-connection on HarmonyOS?** Since 1.9.1 the plugin works out of the box there (curl single-connection). Two routes to multi-connection: put a self-built `aria2c` path into `DSH_SMARTDL_ARIA2_PATH`, or onto PATH; the bundled ohos-arm64 subpackage is on the roadmap.
 - **GitHub downloads slow?** Pass `mirror: "auto"`.
 - **How to verify a checksum?** Pass the digest from the official docs as `sha256`; four common notations accepted.
 - **More** → [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)

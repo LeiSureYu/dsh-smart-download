@@ -212,7 +212,7 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 都由测试断言字面量。
 
 `reason` / `verifySkipped` / `mirrorSkipped` / `diskCheckSkipped` 都是给模型读的诊断文案：含中文与平台串
-（例如 `未找到 aria2 二进制（当前平台 darwin-arm64 不受支持或子包未安装）`），
+（例如 `未找到 aria2 二进制（当前平台 ohos-arm64 不受支持或子包未安装）`），
 **不保证跨版本稳定**。程序化判断请用 `success` / `method` / `fellback` / `mirrored`
 以及 `sha256` / `checksum` / `skipped` 是否存在。
 
@@ -227,14 +227,19 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 ## 平台与二进制的对应
 
 `ARIA2_TARGETS`（`src/downloader.ts`）把 `${process.platform}-${process.arch}`
-映射到四个 npm 子包。子包用 `os` / `cpu` 字段声明适用平台，npm / pnpm 在不匹配的
-平台上直接跳过安装。`getAria2Path()` 先尝试 `require.resolve` 定位子包内的二进制；
-解析不到时再在 `PATH` 上查找 `aria2c`（Windows 会按 `PATHEXT` 展开），并对候选执行
-一次 `--version` 验证。只有两者都失败才返回 `null`，由 `decide()` 回退 curl。
+映射到七个平台目标：Windows / Linux / macOS 各 x64 + arm64 六个子包，加上
+1.9.1 起的 `ohos-arm64`（OpenHarmony / HarmonyOS 运行时；随包子包在 CI 构建
+配方落地后发布）。子包用 `os` / `cpu` 字段声明适用平台，npm / pnpm 在不匹配的
+平台上直接跳过安装。`getAria2Path()` 按「`DSH_SMARTDL_ARIA2_PATH` 显式指定 →
+子包 `require.resolve` → `PATH` 上的 `aria2c`（Windows 按 `PATHEXT` 展开）」
+解析，每个候选都过一次 `--version` 验证；显式指定的二进制验证失败时**不回落**
+其它来源（直接返回 `null`，避免配置错误被静默掩盖）。只有全部失败才返回
+`null`，由 `decide()` 回退 curl。
 
-因此未列入 `ARIA2_TARGETS` 的平台（当前是 macOS）不再是「永远走 curl」：
-`PATH` 上有可用的 `aria2c` 时同样会多线程下载，没有时插件仍可用，只是走 curl
-单线程。详见 [COMPATIBILITY.md](./COMPATIBILITY.md)。
+因此未列入随包分发的平台（当前是鸿蒙 ohos-arm64）不再是「永远走 curl」：
+`PATH` 上有可用的 `aria2c`（或 `DSH_SMARTDL_ARIA2_PATH` 指向了可用二进制）时
+同样会多线程下载，没有时插件仍可用，只是走 curl 单线程。两阶段适配的完整
+记录见 [COMPATIBILITY.md](./COMPATIBILITY.md)。
 
 ## 相关文档
 

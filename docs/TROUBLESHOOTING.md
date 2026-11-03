@@ -206,7 +206,7 @@ SHA-256 或 SHA-512；`checksum` 成功后返回实际算出的 `checksum` 与
 | `文件仅 N KB，多线程无收益` | 小于 1MB | 预期行为 |
 | `无法获取 Content-Length / Content-Range` | 探测拿不到大小 | 目标服务器问题，curl 能下完 |
 
-确认当前平台（`win32-x64` / `win32-arm64` / `linux-x64` / `linux-arm64` / `darwin-*`）：
+确认当前平台（`win32-x64` / `win32-arm64` / `linux-x64` / `linux-arm64` / `darwin-*` / `ohos-arm64`）：
 
 ```bash
 node -e "console.log(process.platform + '-' + process.arch)"

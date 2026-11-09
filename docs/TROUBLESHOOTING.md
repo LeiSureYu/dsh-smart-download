@@ -256,6 +256,17 @@ chmod 755 packages/aria2-linux-*/bin/aria2c
 
 Windows 上打包 Linux 二进制会把它记成 `0644`，装完直接调用就会失败 —— 发布必须在 Linux 上做。
 
+## macOS 上 aria2 启动即崩（`OSSL_PROVIDER_load 'legacy' failed`）
+
+1.9.1 及更早的 darwin 子包（1.37.0）会这样：随包二进制静态链的 brew OpenSSL 把
+legacy provider 放在 `ossl-modules` 动态模块里，模块搜索路径烘焙了 brew 安装前缀，
+用户机器上解析不到，aria2 启动时直接 throw。1.9.2 起的子包（1.37.1）改为 CI 自建
+OpenSSL（legacy provider 编进 libcrypto，`OPENSSL_MODULES=/nonexistent` 下也必须能
+启动），升级即可；Windows / Linux 不受影响。
+
+另有 darwin 1.37.0 的 tarball 执行位丢失形态（`Permission denied`，Issue #17），
+1.9.2 起由子包 package.json 的 `bin` 字段在安装时兜底补回，见上一节。
+
 ## 杀毒软件报 `aria2c.exe`
 
 对 `node_modules` 里未签名二进制的常见启发式告警。二进制均未做修改：Windows x64 取自 aria2

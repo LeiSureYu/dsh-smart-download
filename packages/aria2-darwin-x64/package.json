@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-aria2-darwin-x64",
-  "version": "1.37.0",
+  "version": "1.37.1",
   "description": "Bundled aria2c binary for macOS x64 (built from official source in this repo's CI)",
   "repository": {
     "type": "git",

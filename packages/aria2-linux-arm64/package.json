@@ -1,6 +1,6 @@
 {
   "name": "@leisureyu/dsh-aria2-linux-arm64",
-  "version": "1.37.0",
+  "version": "1.37.1",
   "description": "Bundled static aria2c binary for Linux arm64",
   "repository": {
     "type": "git",

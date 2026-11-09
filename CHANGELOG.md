@@ -11,6 +11,19 @@
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-11-10
+
+**Issue #17 双缺陷修复：① 子包 `bin` 字段从安装侧兜底补回可执行位；② darwin
+静态构建改为自建 OpenSSL（legacy provider 内建），修掉「补上执行位后启动即
+崩」；另按原报告建议为随包二进制加 `--version` 探针。darwin 用户从本版本起
+才能真正用上随包 aria2。**
+
+**Issue #17's two defects fixed: ① subpackage `bin` fields restore the exec
+bit at install time; ② the darwin static build now compiles its own OpenSSL
+with the legacy provider built in, fixing the crash that followed the exec-bit
+restoration; plus the bundled-binary probe suggested in the original report.
+darwin users can finally use the bundled aria2 from this release.**
+
 ### 修复 / Fixed
 
 - **子包 `bin` 字段：安装侧补回可执行位**（`packages/aria2-{darwin,linux,ohos}-*/package.json`）：
@@ -35,6 +48,49 @@
   other packages' bin links in end-user projects. The two win32 subpackages
   deliberately stay without `bin` — Windows has no exec bit, and npm would
   emit a broken shim for a PE binary.*
+
+- **darwin 静态构建缺 OpenSSL legacy provider：补上执行位后启动即崩**（`scripts/build-aria2-darwin.sh`）：
+  aria2 1.37.0 启动时 `Platform::setUp` 无条件 `OSSL_PROVIDER_load("legacy")`，
+  失败即 throw（`Platform.cc:123-125`，致命）。OpenSSL 3 把 legacy provider
+  （RC4/MD4，BT MSE 加密握手要用）做成独立 DSO 模块（`providers/build.info`：
+  非 `no-module` 时 `legacyprov.c` 构建为 `ossl-modules/legacy.dylib`，不在
+  libcrypto 里）。旧做法链 brew 的 `libcrypto.a`：模块搜索路径烘焙了 brew
+  安装前缀 —— CI runner 上恰好装着 brew，`--version` + HTTPS 冒烟都能过；
+  用户机器上解析不到该路径，启动即崩。这是「CI 绿但用户必挂」的完整解释。
+  现改为从 pin 过的官方源码自建 OpenSSL 3.5.4（SHA256 pin，与 aria2 同一
+  信任模型），`no-shared no-module` 把 `legacyprov.c` 直接编进 libcrypto，
+  二进制对 ossl-modules 零依赖；`--openssldir=/etc/ssl` 与 aria2
+  `--with-ca-bundle=/etc/ssl/cert.pem` 让证书链在用户机器上可解析
+  （OPENSSLDIR 烘焙的是运行时默认 CA 路径，指到构建临时目录会让冒烟证书
+  验证秒败 —— spike 实测）。新增防线：libcrypto.a 内必须有 legacyprov 目标
+  文件；`OPENSSL_MODULES=/nonexistent` 下 `--version` 必须干净通过（零 DSO
+  依赖的显式证明）。darwin 双架构 CI 构建全绿实证。
+
+- **随包二进制探针**（`src/downloader.ts`，原报告建议 3）：`getAria2Path()`
+  对 `require.resolve` 得到的随包路径先过与 override / PATH 同一条
+  `verifyAria2Binary` 判定（`--version`，5s 超时），不过则落回 PATH
+  （Homebrew 等用户自装来源）—— resolve 成功 ≠ 能跑，坏子包不再让每次
+  下载先吃一次失败才退化 curl。override 语义不变（坏了返回 null 不回落，
+  保持显式失败）。
+
+  *darwin static build now compiles OpenSSL 3.5.4 from a pinned official
+  tarball with `no-shared no-module`, so the legacy provider is built into
+  libcrypto and the binary no longer depends on ossl-modules at runtime;
+  OPENSSLDIR is pinned to `/etc/ssl` (plus an explicit
+  `--with-ca-bundle=/etc/ssl/cert.pem` for aria2) so certificate resolution
+  works on user machines. `getAria2Path()` now verifies the bundled binary
+  with the same `--version` check used for PATH lookups and falls back to
+  PATH when it is broken.*
+
+### 测试 / Tests
+
+- 新增 `test/downloader.test.ts` 3 例（随包 resolve 成功但二进制损坏 →
+  PATH 基线 / resolve 抛错 → PATH 基线 / 可用随包优先于 PATH）。基线：
+  全量 `pnpm test` **694 例（691 过 / 3 跳过 / 0 失败）**，`pnpm check`
+  通过；darwin 双架构 spike（自建 OpenSSL + 三层断言 + 真实 HTTPS 冒烟）
+  通过。
+- 子包版本：darwin x64/arm64 与 linux x64/arm64 升至 **1.37.1**（bin 字段
+  + darwin 新二进制随包发布）；win32 两个子包二进制未变，维持 1.37.0。
 
 ## [1.9.1] - 2026-11-04
 

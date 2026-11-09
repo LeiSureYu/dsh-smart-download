@@ -386,10 +386,16 @@ test('取消文案（aria2 路径）：随包 aria2 的绝对路径收敛成 ari
     t.skip('本机无 aria2 子包，跳过 aria2 取消文案用例')
     return
   }
-  // 前提断言：随包 aria2 确实是带分隔符的绝对路径、且真的落在 node_modules 下 ——
-  // 否则「文案里不出现 node_modules」这条断言会因为命令本身干净而空转
+  // 前提：getAria2Path() 返回的是随包子包路径（node_modules 下）—— 否则
+  // 「文案里不出现 node_modules」这条断言会因为命令本身干净而空转。
+  // 随包子包装不上时（发布分支的鸡生蛋窗口：optionalDependencies 指向
+  // 尚未发布的新子包版本；或用户环境按 1.9.2 起的契约落回 PATH），跳过
+  // 而不是失败 —— 此时前提本身不成立，不是被测行为的回归。
+  if (!/node_modules/i.test(aria2Path)) {
+    t.skip('随包子包未安装（getAria2Path 落回 PATH），node_modules 前提不成立')
+    return
+  }
   assert.match(aria2Path, /[\\/]/, '前提：随包 aria2 的路径是带分隔符的绝对路径')
-  assert.match(aria2Path, /node_modules/i, '前提：该路径确实在 node_modules 下（否则测不到泄漏）')
 
   const server = await startThrottledServer(4 * 1024 * 1024, { chunk: 32 * 1024, delayMs: 50 })
   const out = path.join(os.tmpdir(), `dsh-cancel-aria2-${Date.now()}.bin`)

@@ -146,14 +146,24 @@ function verifyAria2Binary(candidate: string): boolean {
  * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在
  * 「已经开始下载」之后；先验证则能在探测前就决定回退 curl，错误路径更短。
  *
+ * 为什么随包二进制也要过同一条 `--version` 判定（1.9.2，Issue #17）：resolve
+ * 成功 ≠ 能跑 —— 子包可能装了但二进制是坏的（darwin 1.37.0 先是 tarball 里
+ * 644 没执行位，补上执行位后又因静态链的 OpenSSL 缺 legacy provider 启动即
+ * 崩）。坏二进制若不拦截，每次下载都要先吃一次失败才退化 curl；先验证、
+ * 不过就落回 PATH（Homebrew 等用户自装来源），坏子包从此不再拖累探测。
+ *
  * 为什么环境变量被拒绝时不回落到子包 / PATH（1.9.1）：自动换一个来源会把
  * 配置错误静默掩盖掉 —— 用户以为在用自己指定的二进制，实际在用别的。
  * 返回 null 让调用方回退 curl，失败是显式的（decide() 的 reason 会提示
  * 检查该环境变量），而不是换一个来源悄悄继续。
  *
+ * @param resolveBundled 随包模块解析函数，默认 `require.resolve`；测试经此
+ *   注入「resolve 成功但二进制损坏 / 子包未安装」等场景，不必真实安装子包。
  * @returns 可执行的 aria2 路径；找不到或验证失败时返回 null（调用方回退 curl）
  */
-export function getAria2Path(): string | null {
+export function getAria2Path(
+  resolveBundled: (mod: string) => string = (mod) => require.resolve(mod),
+): string | null {
   const override = aria2PathOverride()
   if (override !== null) {
     return verifyAria2Binary(override) ? override : null
@@ -161,7 +171,8 @@ export function getAria2Path(): string | null {
   const target = aria2TargetFor(process.platform, process.arch)
   if (target) {
     try {
-      return require.resolve(`${target.pkg}/${target.bin}`)
+      const bundled = resolveBundled(`${target.pkg}/${target.bin}`)
+      if (verifyAria2Binary(bundled)) return bundled
     } catch {
       // 子包没装：继续查 PATH，而不是直接放弃（macOS / 用户自行安装的场景）
     }

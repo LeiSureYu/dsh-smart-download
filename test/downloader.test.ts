@@ -303,6 +303,36 @@ test('findAria2OnPath：空 PATH 返回 null；PATH 上有可执行的 aria2c �
   }
 })
 
+test('getAria2Path：随包 resolve 成功但二进制跑不起来 -> 不采用，落回 PATH 基线（Issue #17 缺陷形态）', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-aria2-broken-bundle-'))
+  try {
+    // resolve 得到但 spawnSync 必然非零：文本文件冒充二进制
+    const broken = path.join(dir, 'aria2c')
+    writeFileSync(broken, 'definitely not an aria2c binary')
+    const baseline = findAria2OnPath()
+    assert.equal(
+      getAria2Path(() => broken),
+      baseline,
+      '坏随包二进制必须落回 PATH（两者皆无则同为 null）',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('getAria2Path：随包 resolve 抛错（子包未安装）-> 落回 PATH 基线（既有语义不回归）', () => {
+  const baseline = findAria2OnPath()
+  const result = getAria2Path(() => {
+    throw new Error('Cannot find module')
+  })
+  assert.equal(result, baseline)
+})
+
+test('getAria2Path：随包二进制可用时优先于 PATH（node 自身 --version 退出码 0，能过验证）', () => {
+  const result = getAria2Path(() => process.execPath)
+  assert.equal(result, process.execPath, '可用的随包二进制必须优先于 PATH')
+})
+
 /* ------------------------------ runProcess ------------------------------ */
 
 test('runProcess: 子进程正常退出 -> resolve', async () => {

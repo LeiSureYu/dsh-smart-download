@@ -8,11 +8,12 @@
 # （FerroDownload/aria2-static-builds）在发布方可信度、构建证明、可复现性三条上
 # 全不满足（PLAN-P2-PLATFORM.md §A.2⑤，2026-10-12 核对）。本脚本把信任模型从
 # 「相信某个第三方发布者」换成「相信本仓库的 CI」：
-#   - 源码 pin 官方 release tarball 的 SHA256（下方 ARIA2_TARBALL_SHA256，
-#     2026-10-31 从官方 release 取回自算）；
-#   - 产物做两层正向断言：`otool -L` 只允许系统库（链接进 /opt/homebrew 的
-#     二进制在用户机器上跑不起来），且 `--version` 与一次真实的 HTTPS 下载
-#     都必须成功；
+#   - aria2 与 OpenSSL 源码都 pin 官方 release tarball 的 SHA256（下方
+#     ARIA2_TARBALL_SHA256 / OPENSSL_TARBALL_SHA256，均为官方 release 取回自算）；
+#   - 产物做三层正向断言：`otool -L` 只允许系统库（链接进 /opt/homebrew 的
+#     二进制在用户机器上跑不起来）；`--version` 与一次真实的 HTTPS 下载都必须
+#     成功；且在 OpenSSL 模块目录不可达时也必须能干净启动（legacy provider
+#     必须内建，见下方「为什么不用 brew 的 openssl@3」）；
 #   - workflow 侧（spike-darwin.yml / publish.yml）配 SLSA provenance。
 #
 # 用法：scripts/build-aria2-darwin.sh <packages/aria2-darwin-x64|...-arm64 的输出目录>
@@ -28,7 +29,7 @@ ARIA2_TARBALL_SHA256="a75c8534902ff1a64a23d7a47c033032329002553634251a89d53a9cb8
 OUT_DIR="${1:?用法: build-aria2-darwin.sh <输出目录，如 packages/aria2-darwin-arm64>}"
 
 # 把落盘目录**现在**就规范化成绝对路径（实测教训，spike #3，勿改回去）：
-# 步骤 3 会 cd 进 $WORK/aria2-$VERSION 做 configure/make，而构建结束时
+# 步骤 4 会 cd 进 $WORK 做构建，而构建结束时
 # 有 `trap 'rm -rf "$WORK"'`。若末尾的 mkdir/cp 用相对路径，产物会落进
 # $WORK 里、脚本自己的验证也照常通过（全绿），然后随 $WORK 一起被删除
 # —— 下一个步骤拿到的就是「构建绿但产物消失」。
@@ -38,7 +39,7 @@ ARCH="$(uname -m)"
 case "$ARCH" in
   arm64)  SUBPKG_ARCH="arm64" ;;
   x86_64) SUBPKG_ARCH="x64" ;;
-  *) echo "::error::无法识别的架构：$ARCH（期望 arm64 / x86_64）"; exit 1 ;;
+  *) echo "::error::无法识别的架构：${ARCH}（期望 arm64 / x86_64）"; exit 1 ;;
 esac
 echo "=== building aria2 $VERSION for darwin-$SUBPKG_ARCH ==="
 
@@ -48,32 +49,22 @@ echo "=== building aria2 $VERSION for darwin-$SUBPKG_ARCH ==="
 # require 的 './…' 前缀会把它当相对路径拼成 './/Users/…' 直接炸（spike #5 实测）。
 DECLARED_CPU="$(node -p "JSON.parse(require('fs').readFileSync('$OUT_DIR/package.json','utf8')).cpu[0]")"
 if [ "$DECLARED_CPU" != "$SUBPKG_ARCH" ]; then
-  echo "::error::runner 架构（$SUBPKG_ARCH）与子包声明（$DECLARED_CPU）不一致 —— 检查 workflow 的 runs-on 标签"
+  echo "::error::runner 架构（${SUBPKG_ARCH}）与子包声明（${DECLARED_CPU}）不一致 —— 检查 workflow 的 runs-on 标签"
   exit 1
 fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# ---------- 1. 依赖：pkg-config + openssl@3（静态 .a） ----------
-# runner 镜像自带 brew；openssl@3 可能已预装（幂等）。装的是静态归档也要的
-# 头文件与 .a；绝不链接 brew 的动态库（见下方 otool 断言）。
+# ---------- 1. 依赖：pkg-config ----------
+# runner 镜像自带 brew；本脚本只负责编译，不承担包管理职责。
 if ! command -v brew >/dev/null 2>&1; then
   echo "::error::未找到 brew —— 本脚本只设计给 GitHub 的 macOS runner"
   exit 1
 fi
-brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
 brew list --versions pkg-config >/dev/null 2>&1 || brew install pkg-config
-OPENSSL_PREFIX="$(brew --prefix openssl@3)"
-# 正向断言：静态归档必须真的存在 —— 这是「openssl 链进二进制」的前提
-for lib in libssl.a libcrypto.a; do
-  if [ ! -f "$OPENSSL_PREFIX/lib/$lib" ]; then
-    echo "::error::$OPENSSL_PREFIX/lib/$lib 不存在 —— brew 的 openssl@3 未提供静态归档"
-    exit 1
-  fi
-done
 
-# ---------- 2. 下载源码并核对 SHA256 ----------
+# ---------- 2. 下载 aria2 源码并核对 SHA256 ----------
 TARBALL="$WORK/aria2-$VERSION.tar.bz2"
 ok=0
 for i in 1 2 3 4 5 6; do
@@ -86,12 +77,75 @@ done
 [ "$ok" = "1" ] || { echo "::error::下载 aria2 源码失败"; exit 1; }
 echo "$ARIA2_TARBALL_SHA256  $TARBALL" | shasum -a 256 -c -
 
-# ---------- 3. 构建 ----------
+# ---------- 3. 构建静态 OpenSSL（legacy provider 内建，Issue #17 缺陷②） ----------
+# 为什么不用 brew 的 openssl@3 静态归档（1.9.2 前的老做法，改动前务必读）：
+# OpenSSL 3 把 legacy provider（RC4/MD4 等 legacy 算法，aria2 的 BT MSE 加密
+# 握手要用）做成独立的 DSO 模块 —— providers/build.info 里 `$disabled{module}`
+# 为假时 legacyprov.c 走 MODULES 构建成 ossl-modules/legacy.dylib，**不在**
+# libcrypto 里。brew 的 libcrypto.a 烘焙了 brew 安装前缀的模块搜索路径，
+# CI runner 上恰好装着 brew 所以冒烟能过；用户机器上解析不到该路径，
+# aria2 启动时 Platform::setUp 的 `OSSL_PROVIDER_load(nullptr, "legacy")`
+# 返回 null 直接 throw（aria2 1.37.0 Platform.cc:123-125，致命）——
+# Issue #17 实报的「补上执行位后 OSSL_PROVIDER_load 'legacy' failed」。
+# 解决：从 pin 过的官方源码自建 OpenSSL，`no-module`（3.5 的选项名，
+# 旧版叫 no-modules；Configure 会连带 disable dynamic-engine 与 fips）
+# 使 providers/build.info 走 $disabled{module} 分支，把 legacyprov.c 直接
+# 编进 libcrypto；`no-shared` 只产出静态归档 —— 二进制对 ossl-modules
+# 零依赖，任何机器可跑。信任模型与 aria2 一致：官方 release tarball +
+# SHA256 pin + 信任本仓库 CI。
+OPENSSL_VERSION="3.5.4"
+# https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
+# 的 SHA256，2026-11-10 下载自算。
+OPENSSL_TARBALL_SHA256="967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99"
+OSL_INSTALL="$WORK/openssl-install"
+
+OSL_TARBALL="$WORK/openssl-$OPENSSL_VERSION.tar.gz"
+ok=0
+for i in 1 2 3; do
+  if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 600 \
+      "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" \
+      -o "$OSL_TARBALL"; then ok=1; break; fi
+  echo "openssl attempt $i failed, retrying in 5s…"; sleep 5
+done
+[ "$ok" = "1" ] || { echo "::error::下载 OpenSSL 源码失败"; exit 1; }
+echo "$OPENSSL_TARBALL_SHA256  $OSL_TARBALL" | shasum -a 256 -c -
+
+tar xzf "$OSL_TARBALL" -C "$WORK"
+cd "$WORK/openssl-$OPENSSL_VERSION"
+case "$SUBPKG_ARCH" in
+  arm64) OSL_TARGET="darwin64-arm64-cc" ;;
+  x64)   OSL_TARGET="darwin64-x86_64-cc" ;;
+esac
+./Configure "$OSL_TARGET" no-shared no-module no-docs no-tests \
+  --prefix="$OSL_INSTALL" --openssldir=/etc/ssl \
+  > "$WORK/openssl-configure.log" 2>&1 || { tail -50 "$WORK/openssl-configure.log"; exit 1; }
+# 为什么 --openssldir=/etc/ssl：OPENSSLDIR 会被烘焙进 libcrypto，作为运行时
+# 默认 CA 路径（aria2 走 SSL_CTX_set_default_verify_paths()，LibsslTLSContext.cc:278）。
+# 旧构建烘焙 brew 前缀（runner 上恰好有 cert.pem 符号链接，用户机器上没有）；
+# 指到 $WORK 则构建结束即消失（spike 实测：HTTPS 冒烟三连挂，证书验证秒败）。
+# /etc/ssl/cert.pem 是 macOS 自带的系统 CA bundle（10.12+ 均存在），用户机器有效。
+make -j"$(sysctl -n hw.ncpu)" > "$WORK/openssl-make.log" 2>&1 || { tail -50 "$WORK/openssl-make.log"; exit 1; }
+make install_sw > "$WORK/openssl-install.log" 2>&1 || { tail -50 "$WORK/openssl-install.log"; exit 1; }
+for lib in libssl.a libcrypto.a; do
+  if [ ! -f "$OSL_INSTALL/lib/$lib" ]; then
+    echo "::error::$OSL_INSTALL/lib/$lib 不存在 —— OpenSSL 构建不完整"; exit 1
+  fi
+done
+# 正向断言：legacyprov 必须真的编进了 libcrypto.a（而不是作为 DSO 模块）。
+# no-module 生效时 legacyprov.c 归入 libcrypto 源列表；若该开关失效/被上游
+# 改名，归档里不会有它的目标文件 —— 在构建阶段就失败，不等用户机器上炸。
+# （最终行为由冒烟断言 ③ 的 OPENSSL_MODULES=/nonexistent 兜底验证。）
+if ! ar t "$OSL_INSTALL/lib/libcrypto.a" | grep -q 'legacyprov'; then
+  echo "::error::libcrypto.a 内找不到 legacyprov 目标文件 —— legacy provider 未编进静态归档"
+  exit 1
+fi
+
+# ---------- 4. 构建 aria2 ----------
 tar xjf "$TARBALL" -C "$WORK"
 cd "$WORK/aria2-$VERSION"
 
 # 依赖策略：只保留「HTTP(S) 下载」这一条路需要的东西。
-#   - TLS：openssl（静态归档，与 win/linux 平台的 aria2 行为一致）；
+#   - TLS：openssl（上方自建的静态归档，与 win/linux 平台的 aria2 行为一致）；
 #     显式 --without-gnutls / --without-appletls，不让 configure 的 check 顺序
 #     决定后端 —— 后端不同，行为就可能不同。
 #   - 关掉 metalink（libxml2/libexpat）、SFTP（libssh2）、异步 DNS（libcares）、
@@ -101,9 +155,9 @@ cd "$WORK/aria2-$VERSION"
 #     而本插件的探测强制 accept-encoding: identity、下载端也不请求压缩。
 #   - --enable-static --disable-shared：依赖以 .a 链入；系统库
 #     （libSystem/libc++）无法静态，由下方 otool 断言兜底。
-export OPENSSL_CFLAGS="-I$OPENSSL_PREFIX/include"
-# 直接指到 .a 文件：linker 默认偏好 .dylib，指目录会让它链上 brew 的动态库
-export OPENSSL_LIBS="$OPENSSL_PREFIX/lib/libssl.a $OPENSSL_PREFIX/lib/libcrypto.a"
+export OPENSSL_CFLAGS="-I$OSL_INSTALL/include"
+# 直接指到 .a 文件：linker 默认偏好 .dylib，指目录会让它链上动态库
+export OPENSSL_LIBS="$OSL_INSTALL/lib/libssl.a $OSL_INSTALL/lib/libcrypto.a"
 # aria2 在 __APPLE__ 下无条件使用 Security.framework 的 SecRandomCopyBytes
 # （SimpleRandomizer.cc，源码级 #if 分支，configure 的探测覆盖不到它）。
 # 实测（spike #1，2026-10-31）：不挂框架时链接期报
@@ -113,6 +167,7 @@ export LIBS="-framework Security"
 
 ./configure \
   --enable-static --disable-shared \
+  --with-ca-bundle=/etc/ssl/cert.pem \
   --without-gnutls --without-appletls \
   --without-libxml2 --without-libexpat --without-libz \
   --without-sqlite3 --without-libssh2 --without-libcares \
@@ -127,7 +182,7 @@ make -j"$(sysctl -n hw.ncpu)" > "$WORK/make.log" 2>&1 || { tail -50 "$WORK/make.
 BIN="$WORK/aria2-$VERSION/src/aria2c"
 [ -f "$BIN" ] || { echo "::error::make 完成但找不到 src/aria2c"; exit 1; }
 
-# ---------- 4. strip + 重新 ad-hoc 签名 ----------
+# ---------- 5. strip + 重新 ad-hoc 签名 ----------
 # arm64 上内核拒绝运行无签名二进制；clang 链接时自动打的 ad-hoc 签名会被
 # strip 破坏，因此 strip 之后必须重签（ad-hoc 签名 = 本机可运行，不做发布分发
 # 意义上的签名——npm 安装路径不经过 Gatekeeper，没有公证需求）。
@@ -135,7 +190,7 @@ strip "$BIN"
 codesign --force --sign - "$BIN"
 codesign --verify "$BIN"
 
-# ---------- 5. 正向断言 ①：动态库只有系统 ----------
+# ---------- 6. 正向断言 ①：动态库只有系统 ----------
 # 链进了 /opt/homebrew / /usr/local 的库 = 在没有 brew 的用户机器上直接崩。
 # 系统路径有两处：/usr/lib/（libSystem 等）与 /System/Library/（各系统
 # framework，包括 aria2 必需的 Security.framework）—— 两处都在每一台 macOS 上
@@ -150,8 +205,21 @@ fi
 echo "--- otool -L（应全部是系统库：/usr/lib/ 与 /System/Library/）---"
 otool -L "$BIN"
 
-# ---------- 6. 正向断言 ②：能运行 + 真的能 HTTPS 下载 ----------
+# ---------- 7. 正向断言 ②③：能运行 + 无模块目录也能启动 + 真的能 HTTPS 下载 ----------
 "$BIN" --version | head -2
+
+# 正向断言 ③（Issue #17 缺陷②的回归门）：把 OpenSSL 模块目录指到不存在的
+# 路径再启动。legacy provider 若仍是 DSO 模块（缺陷②形态），Platform::setUp
+# 会 throw、退出码非零 —— CI runner 上装着 brew，普通 --version 冒烟测不出
+# 用户机器的故障，必须显式断言「零 DSO 依赖」。
+VER_LOG="$WORK/version-modules-missing.log"
+if ! OPENSSL_MODULES=/nonexistent-ossl-modules "$BIN" --version > "$VER_LOG" 2>&1 \
+   || grep -q "OSSL_PROVIDER_load" "$VER_LOG"; then
+  echo "::error::二进制在 OpenSSL 模块目录不可达时无法干净启动（legacy provider 未内建？）"
+  cat "$VER_LOG"
+  exit 1
+fi
+echo "--- OPENSSL_MODULES=/nonexistent --version OK（legacy provider 内建，零 DSO 依赖）---"
 
 SMOKE="$WORK/smoke-npm.json"
 SMOKE_URL="https://registry.npmjs.org/dsh-task-progress"
@@ -162,13 +230,22 @@ for i in 1 2 3; do
       -d "$WORK" -o smoke-npm.json "$SMOKE_URL" > "$WORK/smoke.log" 2>&1; then
     ok=1; break
   fi
-  echo "smoke attempt $i failed:"; tail -5 "$WORK/smoke.log"; sleep 3
+  echo "smoke attempt $i failed:"; tail -30 "$WORK/smoke.log"; sleep 3
 done
-[ "$ok" = "1" ] || { echo "::error::HTTPS 下载冒烟失败（$SMOKE_URL）"; exit 1; }
+[ "$ok" = "1" ] || {
+  echo "::error::HTTPS 下载冒烟失败（${SMOKE_URL}）"
+  echo "--- 对照组：同机 curl 访问同一 URL（区分网络侧与二进制侧）---"
+  if curl -fsSI --max-time 15 "$SMOKE_URL" > /dev/null; then
+    echo "curl OK —— 网络侧正常，问题在二进制（多半是 CA 路径 / TLS 后端）"
+  else
+    echo "curl 也失败 —— 网络侧问题，与本次构建无关"
+  fi
+  exit 1
+}
 [ -s "$SMOKE" ] || { echo "::error::冒烟下载产物为空"; exit 1; }
 echo "--- smoke download OK ($(wc -c < "$SMOKE") bytes from $SMOKE_URL) ---"
 
-# ---------- 7. 落位 ----------
+# ---------- 8. 落位 ----------
 mkdir -p "$OUT_DIR/bin"
 cp "$BIN" "$OUT_DIR/bin/aria2c"
 chmod 755 "$OUT_DIR/bin/aria2c"

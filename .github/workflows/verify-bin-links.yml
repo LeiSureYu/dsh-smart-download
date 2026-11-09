@@ -24,7 +24,7 @@ jobs:
           # 1. 取已发布的 linux-x64@1.37.0 子包 tarball（含真实二进制）
           npm pack @leisureyu/dsh-aria2-linux-x64@1.37.0
           T=$(ls *.tgz)
-          mkdir pkg && tar -xzf "$T" -C pkg
+          mkdir pkg && tar -xzf "$T" -C pkg --strip-components=1
 
           # 2. 复现 Issue #17 形态：bin/aria2c 置为 644，并注入本次修复的 bin 字段
           chmod 644 pkg/bin/aria2c

@@ -18,6 +18,9 @@
     "bin/aria2c",
     "README.md"
   ],
+  "bin": {
+    "dsh-aria2c": "bin/aria2c"
+  },
   "keywords": [
     "aria2",
     "aria2c",

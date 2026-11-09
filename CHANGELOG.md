@@ -11,6 +11,31 @@
 
 ## [Unreleased]
 
+### 修复 / Fixed
+
+- **子包 `bin` 字段：安装侧补回可执行位**（`packages/aria2-{darwin,linux,ohos}-*/package.json`）：
+  Issue #17 报的是 `@leisureyu/dsh-aria2-darwin-arm64@1.37.0` 的 tarball 里
+  `bin/aria2c` 为 `-rw-r--r--`，解包即 `Permission denied`。发布流水线自 1.9.1
+  起已在 `npm pack` 前重新 `chmod 755` 并对 tarball 正向断言，但那只覆盖「本仓库
+  自己打出来的包」；一旦 tarball 在别的环节或镜像链路丢失权限位，安装侧仍无兜底。
+  现在 5 个 POSIX 子包（darwin x64/arm64、linux x64/arm64、ohos arm64）在
+  `package.json` 声明 `"bin": { "dsh-aria2c": "bin/aria2c" }`，npm / pnpm 安装时按
+  bin 字段把目标文件补成 755。命令名用 `dsh-aria2c` 而非通用名 `aria2c`，避免在
+  用户项目 `node_modules/.bin` 里与其他包的 bin 冲突。发布流水线的 `publish_pkg_dir`
+  同步新增断言，缺失该字段直接 `::error::` 中止，防止后续回退。
+  **win32 两个子包故意不声明**：Windows 没有可执行位语义，而 npm 会把 bin 目标
+  当作脚本生成 `.cmd` / `.ps1` shim —— PE 二进制进 bin 只会得到一个依赖 `sh`
+  的坏 shim，`getAria2Path()` 本就走 `require.resolve` 直取路径，不需要它。
+
+  *Subpackage `bin` field as an install-time exec-bit fallback: the 5 POSIX
+  subpackages now declare `"bin": { "dsh-aria2c": "bin/aria2c" }`, so npm/pnpm
+  restore mode 755 on install even if the tarball loses it; the publish job
+  asserts the field and fails loudly when missing. The command name is the
+  namespaced `dsh-aria2c` (not the generic `aria2c`) to avoid clashing with
+  other packages' bin links in end-user projects. The two win32 subpackages
+  deliberately stay without `bin` — Windows has no exec bit, and npm would
+  emit a broken shim for a PE binary.*
+
 ## [1.9.1] - 2026-11-04
 
 **鸿蒙（HarmonyOS / OpenHarmony）适配第一阶段：插件在 `process.platform === 'ohos'`

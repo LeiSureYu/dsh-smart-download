@@ -369,6 +369,22 @@ jobs:
               fi
             fi
 
+            # 正向断言：非 win32 子包必须在 package.json 里声明 bin.dsh-aria2c。
+            # npm / pnpm 安装时会按 bin 字段把目标文件补成 755 —— tarball 里的
+            # 权限位一旦被某个打包环节或镜像链路抹掉（Issue #17 的 644 形态），
+            # 这是唯一的安装侧兜底，不依赖发布流水线自己记得 chmod。
+            # 命令名取 dsh-aria2c 而非通用名 aria2c，避免在用户项目的
+            # node_modules/.bin 里与其他提供同名 bin 的包冲突。
+            # win32 故意不声明：Windows 没有可执行位语义，且 npm 会把 bin 目标
+            # 当脚本生成 .cmd / .ps1 shim —— PE 二进制进 bin 只会得到坏 shim。
+            if [[ "$name" != *win32* ]]; then
+              binfield=$(node -p "(require('./$dir/package.json').bin||{})['dsh-aria2c']||''")
+              if [[ "$binfield" != "bin/aria2c" ]]; then
+                echo "::error::$name 的 package.json 缺少 bin.dsh-aria2c = bin/aria2c（安装时无法补回执行位）"
+                return 1
+              fi
+            fi
+
             publish_tarball "$name" "$ver" "$PACK_DIR/$tgz"
           }
 

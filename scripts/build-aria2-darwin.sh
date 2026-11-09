@@ -39,7 +39,7 @@ ARCH="$(uname -m)"
 case "$ARCH" in
   arm64)  SUBPKG_ARCH="arm64" ;;
   x86_64) SUBPKG_ARCH="x64" ;;
-  *) echo "::error::无法识别的架构：$ARCH（期望 arm64 / x86_64）"; exit 1 ;;
+  *) echo "::error::无法识别的架构：${ARCH}（期望 arm64 / x86_64）"; exit 1 ;;
 esac
 echo "=== building aria2 $VERSION for darwin-$SUBPKG_ARCH ==="
 
@@ -49,7 +49,7 @@ echo "=== building aria2 $VERSION for darwin-$SUBPKG_ARCH ==="
 # require 的 './…' 前缀会把它当相对路径拼成 './/Users/…' 直接炸（spike #5 实测）。
 DECLARED_CPU="$(node -p "JSON.parse(require('fs').readFileSync('$OUT_DIR/package.json','utf8')).cpu[0]")"
 if [ "$DECLARED_CPU" != "$SUBPKG_ARCH" ]; then
-  echo "::error::runner 架构（$SUBPKG_ARCH）与子包声明（$DECLARED_CPU）不一致 —— 检查 workflow 的 runs-on 标签"
+  echo "::error::runner 架构（${SUBPKG_ARCH}）与子包声明（${DECLARED_CPU}）不一致 —— 检查 workflow 的 runs-on 标签"
   exit 1
 fi
 
@@ -117,8 +117,13 @@ case "$SUBPKG_ARCH" in
   x64)   OSL_TARGET="darwin64-x86_64-cc" ;;
 esac
 ./Configure "$OSL_TARGET" no-shared no-module no-docs no-tests \
-  --prefix="$OSL_INSTALL" --openssldir="$OSL_INSTALL/ssl" \
+  --prefix="$OSL_INSTALL" --openssldir=/etc/ssl \
   > "$WORK/openssl-configure.log" 2>&1 || { tail -50 "$WORK/openssl-configure.log"; exit 1; }
+# 为什么 --openssldir=/etc/ssl：OPENSSLDIR 会被烘焙进 libcrypto，作为运行时
+# 默认 CA 路径（aria2 走 SSL_CTX_set_default_verify_paths()，LibsslTLSContext.cc:278）。
+# 旧构建烘焙 brew 前缀（runner 上恰好有 cert.pem 符号链接，用户机器上没有）；
+# 指到 $WORK 则构建结束即消失（spike 实测：HTTPS 冒烟三连挂，证书验证秒败）。
+# /etc/ssl/cert.pem 是 macOS 自带的系统 CA bundle（10.12+ 均存在），用户机器有效。
 make -j"$(sysctl -n hw.ncpu)" > "$WORK/openssl-make.log" 2>&1 || { tail -50 "$WORK/openssl-make.log"; exit 1; }
 make install_sw > "$WORK/openssl-install.log" 2>&1 || { tail -50 "$WORK/openssl-install.log"; exit 1; }
 for lib in libssl.a libcrypto.a; do
@@ -162,6 +167,7 @@ export LIBS="-framework Security"
 
 ./configure \
   --enable-static --disable-shared \
+  --with-ca-bundle=/etc/ssl/cert.pem \
   --without-gnutls --without-appletls \
   --without-libxml2 --without-libexpat --without-libz \
   --without-sqlite3 --without-libssh2 --without-libcares \
@@ -224,9 +230,18 @@ for i in 1 2 3; do
       -d "$WORK" -o smoke-npm.json "$SMOKE_URL" > "$WORK/smoke.log" 2>&1; then
     ok=1; break
   fi
-  echo "smoke attempt $i failed:"; tail -5 "$WORK/smoke.log"; sleep 3
+  echo "smoke attempt $i failed:"; tail -30 "$WORK/smoke.log"; sleep 3
 done
-[ "$ok" = "1" ] || { echo "::error::HTTPS 下载冒烟失败（$SMOKE_URL）"; exit 1; }
+[ "$ok" = "1" ] || {
+  echo "::error::HTTPS 下载冒烟失败（${SMOKE_URL}）"
+  echo "--- 对照组：同机 curl 访问同一 URL（区分网络侧与二进制侧）---"
+  if curl -fsSI --max-time 15 "$SMOKE_URL" > /dev/null; then
+    echo "curl OK —— 网络侧正常，问题在二进制（多半是 CA 路径 / TLS 后端）"
+  else
+    echo "curl 也失败 —— 网络侧问题，与本次构建无关"
+  fi
+  exit 1
+}
 [ -s "$SMOKE" ] || { echo "::error::冒烟下载产物为空"; exit 1; }
 echo "--- smoke download OK ($(wc -c < "$SMOKE") bytes from $SMOKE_URL) ---"
 

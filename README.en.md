@@ -187,12 +187,13 @@ pnpm build       # outputs dist/
 pnpm check       # typecheck
 ```
 
-Pushing a `v*` tag triggers the release: binary jobs for all three platforms (macOS is built from the official source, with SLSA provenance) → tests → subpackages first, then the main package.
+Pushing a `v*` tag triggers the release: binary jobs for all three platforms (macOS builds OpenSSL and aria2 from the official source, with SLSA provenance) → tests → subpackages first, then the main package. Publishing uses npm trusted publishing (OIDC); brand-new packages fall back to the `NPM_TOKEN` secret, since OIDC cannot bootstrap a first publish.
 
 ## Third-party components & license
 
 - Plugin code: MIT
 - Bundled aria2 1.37.0: GPL-2.0-or-later. Sources: Windows x64 from the official release, Linux from [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build), Windows arm64 from [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64), macOS built in this repository's CI from the official source (see [COMPATIBILITY.md](./docs/COMPATIBILITY.md)).
+- The macOS binary additionally statically links OpenSSL 3.5.4 built in this repository's CI from the pinned official source (Apache-2.0; aria2 ships an OpenSSL linking exception), bundled since 1.9.2.
 
 ## Disclaimer
 

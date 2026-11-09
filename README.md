@@ -195,12 +195,13 @@ pnpm build       # 输出 dist/
 pnpm check       # 类型检查
 ```
 
-推送 `v*` tag 即触发发布:三个平台的二进制 job（macOS 从官方源码自构建，附 SLSA provenance）→ 测试 → 先发子包、再发主包。
+推送 `v*` tag 即触发发布:三个平台的二进制 job（macOS 从官方源码自构建 OpenSSL 与 aria2，附 SLSA provenance）→ 测试 → 先发子包、再发主包。发布走 npm trusted publishing（OIDC）；新包首次发布 OIDC 无法引导，回退仓库密钥 `NPM_TOKEN`。
 
 ## 第三方组件与许可
 
 - 本插件代码：MIT
 - 随包分发的 aria2 1.37.0：GPL-2.0-or-later。来源:Windows x64 取官方发布包，Linux 取 [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build)，Windows arm64 取 [minnyres/aria2-windows-arm64](https://github.com/minnyres/aria2-windows-arm64)，macOS 由本仓库 CI 从官方源码构建（来源与哈希见 [COMPATIBILITY.md](./docs/COMPATIBILITY.md)）。
+- macOS 二进制另静态链入本仓库 CI 自建的 OpenSSL 3.5.4（官方源码 + SHA256 pin，Apache-2.0；aria2 自带 OpenSSL 链接例外），1.9.2 起随包分发。
 
 ## 声明
 

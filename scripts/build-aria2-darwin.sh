@@ -87,10 +87,12 @@ echo "$ARIA2_TARBALL_SHA256  $TARBALL" | shasum -a 256 -c -
 # aria2 启动时 Platform::setUp 的 `OSSL_PROVIDER_load(nullptr, "legacy")`
 # 返回 null 直接 throw（aria2 1.37.0 Platform.cc:123-125，致命）——
 # Issue #17 实报的「补上执行位后 OSSL_PROVIDER_load 'legacy' failed」。
-# 解决：从 pin 过的官方源码自建 OpenSSL，`no-modules` 使 legacyprov.c 直接
-# 编进 libcrypto（providers/build.info 的 $disabled{module} 分支），
-# `no-shared` 只产出静态归档 —— 二进制对 ossl-modules 零依赖，任何机器可跑。
-# 信任模型与 aria2 一致：官方 release tarball + SHA256 pin + 信任本仓库 CI。
+# 解决：从 pin 过的官方源码自建 OpenSSL，`no-module`（3.5 的选项名，
+# 旧版叫 no-modules；Configure 会连带 disable dynamic-engine 与 fips）
+# 使 providers/build.info 走 $disabled{module} 分支，把 legacyprov.c 直接
+# 编进 libcrypto；`no-shared` 只产出静态归档 —— 二进制对 ossl-modules
+# 零依赖，任何机器可跑。信任模型与 aria2 一致：官方 release tarball +
+# SHA256 pin + 信任本仓库 CI。
 OPENSSL_VERSION="3.5.4"
 # https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
 # 的 SHA256，2026-11-10 下载自算。
@@ -114,16 +116,9 @@ case "$SUBPKG_ARCH" in
   arm64) OSL_TARGET="darwin64-arm64-cc" ;;
   x64)   OSL_TARGET="darwin64-x86_64-cc" ;;
 esac
-./Configure "$OSL_TARGET" no-shared no-modules no-docs no-tests \
+./Configure "$OSL_TARGET" no-shared no-module no-docs no-tests \
   --prefix="$OSL_INSTALL" --openssldir="$OSL_INSTALL/ssl" \
   > "$WORK/openssl-configure.log" 2>&1 || { tail -50 "$WORK/openssl-configure.log"; exit 1; }
-# 正向断言：legacy provider 必须被编进 libcrypto（而不是 DSO 模块）。
-# no-modules 生效时 Makefile 不含 ossl-modules 目标；若该开关被上游改名/失效，
-# 在这里就失败，而不是等到用户机器上才炸。
-if grep -qE 'ossl-modules|legacy\.dylib' Makefile 2>/dev/null; then
-  echo "::error::OpenSSL 构建仍包含 ossl-modules 目标 —— no-modules 未生效，legacy provider 会是 DSO"
-  exit 1
-fi
 make -j"$(sysctl -n hw.ncpu)" > "$WORK/openssl-make.log" 2>&1 || { tail -50 "$WORK/openssl-make.log"; exit 1; }
 make install_sw > "$WORK/openssl-install.log" 2>&1 || { tail -50 "$WORK/openssl-install.log"; exit 1; }
 for lib in libssl.a libcrypto.a; do
@@ -131,6 +126,14 @@ for lib in libssl.a libcrypto.a; do
     echo "::error::$OSL_INSTALL/lib/$lib 不存在 —— OpenSSL 构建不完整"; exit 1
   fi
 done
+# 正向断言：legacyprov 必须真的编进了 libcrypto.a（而不是作为 DSO 模块）。
+# no-module 生效时 legacyprov.c 归入 libcrypto 源列表；若该开关失效/被上游
+# 改名，归档里不会有它的目标文件 —— 在构建阶段就失败，不等用户机器上炸。
+# （最终行为由冒烟断言 ③ 的 OPENSSL_MODULES=/nonexistent 兜底验证。）
+if ! ar t "$OSL_INSTALL/lib/libcrypto.a" | grep -q 'legacyprov'; then
+  echo "::error::libcrypto.a 内找不到 legacyprov 目标文件 —— legacy provider 未编进静态归档"
+  exit 1
+fi
 
 # ---------- 4. 构建 aria2 ----------
 tar xjf "$TARBALL" -C "$WORK"

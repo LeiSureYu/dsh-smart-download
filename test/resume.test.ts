@@ -15,6 +15,8 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   clearMarker,
+  discardAria2Partial,
+  hasAria2ControlFile,
   localFileSize,
   normalizeEtag,
   planResume,
@@ -262,4 +264,32 @@ test('planResume: 删文件时连带清掉 aria2 控制文件 .aria2', () => {
   assert.equal(existsSync(p), false)
   assert.equal(existsSync(ctrl), false)
   assert.equal(existsSync(`${p}.part.json`), false)
+})
+
+/* ------ aria2 分片半包的安全闸（1.9.3：curl 接手 aria2 残局前必须先丢弃） ------ */
+
+test('hasAria2ControlFile：控制文件在 -> true；不在 / 是目录 -> false', () => {
+  const p = path.join(tmpRoot, 'half.bin')
+  assert.equal(hasAria2ControlFile(p), false, '什么都没有时必须返回 false')
+  writeFileSync(p, 'x')
+  writeFileSync(`${p}.aria2`, 'control')
+  assert.equal(hasAria2ControlFile(p), true, '控制文件存在 = aria2 写过分片')
+  rmSync(`${p}.aria2`)
+  mkdirSync(`${p}.aria2`, { recursive: true })
+  assert.equal(hasAria2ControlFile(p), false, '同名的目录不是控制文件')
+})
+
+test('discardAria2Partial：删半包与控制文件，保留旁车指纹', () => {
+  const p = path.join(tmpRoot, 'half.bin')
+  writeFileSync(p, Buffer.alloc(2048, 0x51))
+  writeFileSync(`${p}.aria2`, 'control')
+  putMarker(p, { v: 1, length: 4096 })
+  discardAria2Partial(p)
+  assert.equal(existsSync(p), false, '分片半包必须整体丢弃（内部有空洞，curl 不能续）')
+  assert.equal(existsSync(`${p}.aria2`), false, '控制文件必须连带删除')
+  // 旁车指纹描述的是远端资源，与本地半包无关：半包没了之后 planResume 走
+  // 「本地无文件，从头下载」，指纹不参与判定，留着无害（下次 writeMarker 重写）
+  assert.equal(existsSync(`${p}.part.json`), true, '旁车指纹应保留')
+  // 对不存在的路径重复调用必须静默（force 语义），不抛错
+  assert.doesNotThrow(() => discardAria2Partial(p))
 })

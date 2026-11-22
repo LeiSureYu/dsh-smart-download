@@ -3,9 +3,11 @@ import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { probeUrl } from './probe.js';
-import { downloadWithAria2, downloadWithCurl, getAria2Path, } from './downloader.js';
+import { downloadWithAria2, downloadWithCurl, getAria2Path, isTransientDownloadError, } from './downloader.js';
+import { downloadWithAria2Rpc } from './download-rpc.js';
+import { aria2RpcMode, DaemonUnavailableError } from './rpc-daemon.js';
 import { decide } from './decision.js';
-import { isSafeTaskId, ProgressReporter, readTaskRecord } from './progress.js';
+import { isSafeTaskId, ProgressReporter, readTaskRecord, STALE_RUNNING_RECORD_MS, sweepStaleRunningRecords, } from './progress.js';
 import { applyMirror, isAutoMirror } from './mirror.js';
 import { resolveAutoMirror } from './auto-mirror.js';
 import { buildRequestHeaders } from './headers.js';
@@ -14,10 +16,10 @@ import { checkDownloadUrl, deriveFilenameFromUrl, FALLBACK_FILENAME, filenameFro
 import { checkDiskSpace, describeInsufficientSpace } from './disk.js';
 import { registerStatusRpc } from './rpc.js';
 import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './status.js';
-import { clearMarker, localFileSize, planResume, writeMarker } from './resume.js';
+import { clearMarker, discardAria2Partial, hasAria2ControlFile, localFileSize, planResume, writeMarker, } from './resume.js';
 import { recordThroughput } from './throughput-cache.js';
 import { downloadGate, GATE_CAPACITY } from './gate.js';
-import { checkProxyParam, resolveProxy } from './proxy.js';
+import { checkProxyParam, redactProxySecret, resolveProxy } from './proxy.js';
 import { describeMismatch, describeSkip, normalizeContentEncoding, verifySize, } from './verify.js';
 import { DownloadCancelledError, DownloadPausedError, isRunning, PAUSE_ABORT_REASON, parseRetryRequest, registerRunningTask, setRetryHandler, unregisterRunningTask, } from './tasks.js';
 export { DownloadCancelledError, DownloadPausedError } from './tasks.js';
@@ -33,6 +35,34 @@ export const inject = ['tools'];
  */
 class IntegrityError extends Error {
 }
+/**
+ * 「连接中断但字节已完整」转成功时的完成文案（1.9.3，Issue #21）。
+ *
+ * 为什么必须自成一案：下载工具的退出码非零历史上**必然**记失败，而 Issue #21
+ * 实测出反例 —— 传输尾部断开（curl 56 / 18）时字节可能已经全部落盘（用户的
+ * 239 MB 文件 SHA-256 与上游 LFS oid 完全一致，却被记成「100% 失败」）。这条
+ * 文案就是让面板与模型能区分「真的失败」与「连接断了、但东西是全的」。
+ */
+const DISK_COMPLETE_DONE_MSG = '下载完成（连接中断，但落盘字节已完整）';
+/**
+ * 自动续传重试成功时的完成文案（1.9.3，Issue #21）。
+ *
+ * 与 curl 回退的「下载完成（curl 回退）」同一风格：完成文案必须说明这次下载
+ * 与普通完成有什么不同 —— 这次是失败之后**自动**从断点续传完成的，用户在
+ * 面板上看到时不会奇怪「为什么多等了几秒」。
+ */
+const AUTO_RESUME_DONE_MSG = '下载完成（自动续传）';
+/**
+ * 自动续传重试前的等待时长（毫秒）。
+ *
+ * 为什么是 3 秒：进入这条路径前 curl 自己已经用 `--retry 3 --retry-delay 2`
+ * 重试过三轮（约 6 秒）都失败了，说明故障不是亚秒级抖动；但 Issue #21 的
+ * 场景（代理中继重连）通常在数秒内自愈。3 秒让「探测 → 失败 → 重试」的整条
+ * 链路有约 10 秒的自愈窗口，又不至于把一次注定失败的下载拖到不可接受。
+ */
+const TRANSIENT_RETRY_BACKOFF_MS = 3000;
+/** 自动续传重试前的运行中说明（写进进度轨道，用户知道在等什么） */
+const TRANSIENT_RETRY_NOTE = `连接中断，${Math.round(TRANSIENT_RETRY_BACKOFF_MS / 1000)} 秒后自动续传…`;
 /**
  * `download_status` 在没有任何任务时的固定文案。
  *
@@ -99,6 +129,7 @@ const BATCH_LABEL_OK = '[ok]';
 const BATCH_LABEL_SKIPPED = '[skipped]';
 const BATCH_LABEL_FAILED = '[failed]';
 const BATCH_LABEL_CANCELLED = '[cancelled]';
+const BATCH_LABEL_PAUSED = '[paused]';
 /**
  * 摘要校验通过时的模型可见标记。
  *
@@ -129,7 +160,13 @@ function renderBatch(value) {
             const label = item.skipped === true ? BATCH_LABEL_SKIPPED : BATCH_LABEL_OK;
             return `${label} ${item.url}${via}${path}${verifiedNote(item)}`;
         }
-        const label = item.cancelled === true ? BATCH_LABEL_CANCELLED : BATCH_LABEL_FAILED;
+        // paused 必须先于 cancelled 判定：1.0.0 修过「取消与失败混为一谈」，1.8.0
+        // 引入的第三个终态不能在文案上退化回 [failed]（那会诱使调用方把它当错误重试）。
+        const label = item.paused === true
+            ? BATCH_LABEL_PAUSED
+            : item.cancelled === true
+                ? BATCH_LABEL_CANCELLED
+                : BATCH_LABEL_FAILED;
         return `${label} ${item.url}${item.error ? `: ${item.error}` : ''}`;
     });
     return [head, ...lines].join('\n');
@@ -164,6 +201,16 @@ function renderOutcome(value) {
         : `Download ${value.success ? 'succeeded' : 'failed'}${value.method ? ` via ${value.method}` : ''}${value.fellback && value.reason ? ` (fallback: ${value.reason})` : ''}${value.mirrored ? ' (via mirror)' : ''}${value.verifySkipped ? ` (${value.verifySkipped})` : ''}${verifiedNote(value)}${value.diskCheckSkipped ? ` (${value.diskCheckSkipped})` : ''}${value.mirrorSkipped ? ` (${value.mirrorSkipped})` : ''}`;
 }
 export function apply(ctx) {
+    // 启动清扫（1.9.3）：宿主崩溃 / 被杀会留下永远 running 的轨道二记录 —— 面板
+    // 显示下载中、删除被 R8 拒、重试被 not-retryable 拒。上一次宿主的进程内注册
+    // 表已随进程消失，超过阈值没有更新的 running 记录只可能是残迹（误伤活任务由
+    // 活进程的下一条进度写盘自愈：last-write-wins）。静默执行，失败不阻断加载。
+    try {
+        sweepStaleRunningRecords();
+    }
+    catch {
+        /* 清扫是清理性质的功能，绝不阻断启动 */
+    }
     // 浏览器端进度面板的数据源；纯 CLI profile 下没有 connection 服务时静默跳过。
     registerStatusRpc(ctx);
     // manage 端点的 retry 由这里注入：rpc.ts 不 import index.ts（会成环），
@@ -326,6 +373,10 @@ export function apply(ctx) {
                                         output: { type: 'string' },
                                         success: { type: 'boolean' },
                                         cancelled: { type: 'boolean' },
+                                        // 1.8.0：用户从管理器暂停某一条时该条目带 paused: true
+                                        // （既非成功也非取消）。同一处陷阱：runBatch 会真的发出
+                                        // 这个字段，schema 不声明的话整批结果会被宿主校验拒掉。
+                                        paused: { type: 'boolean' },
                                         error: { type: 'string' },
                                         method: { type: 'string' },
                                         path: { type: 'string' },
@@ -501,6 +552,9 @@ export function apply(ctx) {
                                 outPath: { type: 'string' },
                                 size: { type: 'number' },
                                 fileMtimeMs: { type: 'number' },
+                                // 1.9.3（Issue #21）：产物当前的落盘字节数（0 = 没有可读文件）。
+                                // 同一处陷阱：没有这行，核对过磁盘的任务会让 tool 输出校验失败。
+                                diskSize: { type: 'integer' },
                                 updatedAt: { type: 'number' },
                             },
                         },
@@ -607,6 +661,14 @@ function preflight(item, ctx) {
     const checked = checkDownloadUrl(item.url);
     if (!checked.ok) {
         throw new Error(`拒绝下载：${checked.reason}`);
+    }
+    // 0a. output 的原始字符串同样不许有控制字符（1.9.3）：带自定义请求头时
+    // aria2 走 stdin input-file，`  out=<basename>` 一行一行解析 —— basename
+    // 并不吞掉 `\n`，`output: "x\n  header=..."` 就能往本次下载注入任意
+    // per-download 选项（实测 header 注入成功）。路径里带控制字符本身就不是
+    // 合法意图，门口拦下。
+    if (item.output !== undefined && /[\u0000-\u001f\u007f]/.test(item.output)) {
+        throw new Error('拒绝下载：output 含有控制字符 —— 无法作为安全的输出路径');
     }
     // 0b. 期望摘要：不合法就地拒绝。等到下载完才发现「没法校验」，
     // 等于白下几百 MB 之后才告诉调用方参数写错了。
@@ -959,7 +1021,7 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
         ...(mirrorSkipped ? { mirrorSkipped } : {}),
         // 代理（1.7.0）：只有确实走了代理时才出现该字段 —— 「没配代理」是常态，
         // 常态不占字段位（与 mirror / mirrorSkipped 同一口径）。
-        ...(proxy !== undefined ? { proxy } : {}),
+        ...(proxy !== undefined ? { proxy: redactProxySecret(proxy) } : {}),
         success: true,
         path: outputPath,
         method,
@@ -996,7 +1058,7 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
             mirrored,
             ...(mirrorPrefix ? { mirror: mirrorPrefix } : {}),
             ...(mirrorSkipped ? { mirrorSkipped } : {}),
-            ...(proxy !== undefined ? { proxy } : {}),
+            ...(proxy !== undefined ? { proxy: redactProxySecret(proxy) } : {}),
             success: true,
             path: outputPath,
             ...sizeField,
@@ -1040,6 +1102,120 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
     // 下载失败时刻意保留，成功完成时才清除。
     if (probe.contentLength !== undefined)
         writeMarker(outputPath, probe);
+    // 2.5 失败定案收口（1.9.3，Issue #21）：「传输失败」不再直接等于「字节没下全」。
+    //
+    // Issue #21 实测：代理中继在传输尾部断开，curl 先报 56（此时 239 MB 已全部
+    // 落盘，SHA-256 与上游 LFS oid 一致），随后 --retry 的重连全部撞上已死的中继
+    // 端口报 7，最终以 7 收场。此前的失败分支不看磁盘，把这种「连接断了、但东西
+    // 是全的」的任务记成 failed，而且是永远 —— 记录不会再被复核。
+    //
+    // curl 失败的终局收成一条路径（aria2 回退失败与 curl 直连失败共用），顺序刻意：
+    //   ① 落盘字节已完整 → 按成功收尾（先于重试：字节都全了，重试毫无意义）；
+    //   ② 瞬时连接故障（退出码表见 downloader.ts）→ 退避后**自动续传一次**；
+    //   ③ 仍然失败 → 按失败定案，但记录带上落盘字节真相（已落盘 X / 应为 Y）。
+    // 取消 / 超时 / 暂停在进入这条路径之前已被 finishAborted 收走，语义不变。
+    // 「来源信息」跟走全程：无论哪条出路 method 恒为 curl，fellback / reason
+    // 保留调用点的语义（aria2 回退而来的下载，成功后依然要说清它是回退来的）。
+    /**
+     * 失败记录的落盘事实补充（Issue #21 建议 1）。
+     *
+     * 失败任务的百分比只是断连瞬间的快照，面板上「57% 失败」回答不了「盘上到底
+     * 有多少」—— 把字节真相写进失败文案，用户与模型不用再手工 stat 一遍。
+     * 文件不存在（比如第一次建连就失败）时不加尾巴，保持原文案干净。
+     */
+    const describeDiskBytes = () => {
+        const local = localFileSize(outputPath);
+        if (local === null || local <= 0)
+            return '';
+        const expectedBytes = expectedSize ?? probe.contentLength;
+        if (expectedBytes === undefined) {
+            return `已落盘 ${local} 字节（远端未声明长度，无法判断是否完整）`;
+        }
+        // local === expectedBytes 的情形永远走不到这里（①已按成功收尾）；
+        // local > expectedBytes 同样如实记录，不擅自声明完整。
+        const resumeHint = local < expectedBytes ? '，半包与旁车指纹已保留，可续传' : '';
+        return `已落盘 ${local} / ${expectedBytes} 字节${resumeHint}`;
+    };
+    /**
+     * 「字节已完整」判定与收尾：与成功路径的 assertIntegrity 用**同一**把尺子
+     * （verifySize + 同样的基准来源与压缩编码豁免），因此这里的「完整」与正常
+     * 完成路径宣称的「完整」永远是同一个结论。非 ok（含 skipped：没有基准可比）
+     * 返回 null —— 不确定的事不冒充确定，失败语义原样保留。
+     */
+    const settleCompleteFromDisk = async (via) => {
+        const outcome = verifySize(localFileSize(outputPath), expectedSize ?? probe.contentLength, expectedSize !== undefined ? undefined : probe.contentEncoding);
+        if (outcome.kind !== 'ok')
+            return null;
+        // 字节完整：按完成收尾。终态记录必须由这里显式写出（与 finishCurlSuccess
+        // 同一条纪律）—— assertIntegrity 只在「哈希已校验」或「跳过了字节数校验」
+        // 时才自己写 done，「字节对、没给摘要」这条最常见的路它什么都不写，不补
+        // 这一行的话记录会永远停在最后一次运行中状态。给了摘要时 assertIntegrity
+        // 会再写一条带「已校验」的完成记录覆盖它，与成功路径的行为一致。
+        reporter.done(DISK_COMPLETE_DONE_MSG);
+        await reporter.awaitFlush();
+        // 走与成功路径完全相同的完整性校验（调用方给了摘要时这是唯一的内容级证据）。
+        // 摘要不符时 assertIntegrity 已写失败终态并抛 IntegrityError，这里直接透传：
+        // 内容不对是字节本身的问题，换一次连接不会改变服务器给的字节，重试毫无
+        // 意义 —— 让「内容不对」盖过「连接断了」。
+        const integrity = await assertIntegrity(DISK_COMPLETE_DONE_MSG);
+        clearMarker(outputPath);
+        return successResult('curl', via.fellback, via.reason, integrity);
+    };
+    /** curl 成功的统一收尾（直接成功 / aria2 回退成功 / 自动续传成功共用一条尾巴）。 */
+    const finishCurlSuccess = async (doneMsg, via) => {
+        reporter.done(doneMsg);
+        // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
+        // 否则 download_status / 轨道一读取方会看到上一次的中间状态。
+        await reporter.awaitFlush();
+        const integrity = await assertIntegrity();
+        clearMarker(outputPath);
+        return successResult('curl', via.fellback, via.reason, integrity);
+    };
+    /**
+     * curl 失败的终局收口：① 字节完整 → 成功；② 瞬时故障 → 退避后自动续传一次；
+     * ③ 仍失败 → 定案失败（记录带落盘真相）。
+     *
+     * 自动续传恰好一次：重试调用发生在本函数体内，重试自身再失败直接落入 ③，
+     * 不存在递归。重试复用本次运行的 planResume 结论 —— 旁车指纹在开工前已经与
+     * 远端核对过，两次尝试之间远端资源不会变化，续传语义与首次尝试完全一致。
+     */
+    const settleCurlFailure = async (firstErr, via) => {
+        // ① 先看磁盘（先于重试）：字节都全了，连接错误只是收尾噪声。
+        const settled = await settleCompleteFromDisk(via);
+        if (settled !== null)
+            return settled;
+        let err = firstErr;
+        // ② 瞬时连接故障：退避后自动续传一次（Issue #21 建议 2）。等待进度保持
+        //    当前百分比（note，不归零）—— 半包还在，当前进度就是真实进度。
+        if (isTransientDownloadError(err)) {
+            reporter.note(TRANSIENT_RETRY_NOTE);
+            await delayAbortable(TRANSIENT_RETRY_BACKOFF_MS, signal);
+            // 等待期间被取消 / 超时：按中止收口，不再开子进程。
+            if (abortOutcome() !== 'failed')
+                return await finishAborted(err);
+            try {
+                await downloadWithCurl(requestedUrl, outputPath, signal, reporter, resume, requestHeaders, ctx.maxBandwidthBytes, proxy);
+                return await finishCurlSuccess(AUTO_RESUME_DONE_MSG, via);
+            }
+            catch (retryErr) {
+                if (abortOutcome() !== 'failed')
+                    return await finishAborted(retryErr);
+                err = retryErr;
+                // 重试可能已经把字节送完才断（Issue #21 的原始形态）：再给磁盘核对一次机会。
+                const retrySettled = await settleCompleteFromDisk(via);
+                if (retrySettled !== null)
+                    return retrySettled;
+            }
+        }
+        // ③ 失败定案：保留 0.9.0 以来的文案规则（失败文案是**真正**抛出的那个错误），
+        //    并把落盘事实补进记录。抛出的错误保持原样 —— 记录与结果里已经各有一份
+        //    带落盘真相的文案，错误对象再包一层只会让测试与调用方更难匹配。
+        const message = err instanceof Error ? err.message : String(err);
+        const diskNote = describeDiskBytes();
+        reporter.fail(diskNote === '' ? message : `${message}（${diskNote}）`);
+        await reporter.awaitFlush();
+        throw err;
+    };
     // 3. 决策：按文件大小与 aria2 可用性选择方式 / 并发
     const aria2Path = getAria2Path();
     // 第 4 个入参是**历史吞吐缓存**：P1-2 的读侧。必须在这里传进去 —— t24 之前漏了它，
@@ -1048,16 +1224,60 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
     // 键用 `requestedUrl`（镜像已解析后的地址）：缓存按主机 + 端口分桶，而写入侧
     // （recordObservedThroughput）用的也是同一个地址 —— 读写两边必须同键，否则永远命中不了。
     const decision = decide(probe, aria2Path !== null, {}, { url: requestedUrl });
-    // 4. aria2 路径
     if (decision.method === 'aria2' && aria2Path) {
-        reporter.report(0, `启动 aria2（${decision.concurrency} 连接）…`);
-        try {
-            const observation = await downloadWithAria2(aria2Path, requestedUrl, outputPath, decision.concurrency, signal, reporter, 
+        // 4. aria2 路径（2.0.0 起默认 RPC 优先，spawn 为 daemon 层失败的后备）
+        //
+        // 降级矩阵（DSH_SMARTDL_ARIA2_RPC，详见 rpc-daemon.ts 的 aria2RpcMode）：
+        // - auto（缺省）：RPC → daemon 层失败（起不来 / 失联）→ spawn 从 .aria2 控制
+        //   文件断点接续一次 → 仍失败走 curl；
+        // - on：RPC only —— daemon 层失败按 aria2 失败处理（走 curl，不再动 spawn），
+        //   调试 RPC 路径用；
+        // - off：spawn only（2.0.0 之前的行为）。
+        // aria2 级下载错误（404 / 磁盘满等确定性错误）在两种模式下都直接走 curl：
+        // spawn 重试同一个错误只会白费一遍 `-m 3` 内部重试。
+        //
+        // 这是 1.9.0 的既定设计，但 1.9.0–1.9.3 的两个 RPC 模块从未被 import（勘误见
+        // CHANGELOG / rpc-daemon.ts 文件头）—— 2.0.0 在修复审计发现的三个隐患之后
+        // 才接线：daemon 崩溃检测、secret 下 argv、pause/remove 的完成竞态。
+        const runAria2 = async () => {
+            const mode = aria2RpcMode();
+            const spawnDownload = () => downloadWithAria2(aria2Path, requestedUrl, outputPath, decision.concurrency, signal, reporter, 
             // `resume` 必须显式传（1.2.0 修正）：此前这里漏传、走的是默认值
             // true，等于 `planResume()` 的结论对 aria2 完全不起作用。它至今
             // 没暴露成缺陷，只是因为「判定不能续传时必然先删掉本地半包」，
             // 于是 `-c` 恰好落在一个不存在的文件上 —— 这是巧合，不是设计。
             resume, requestHeaders, ctx.maxBandwidthBytes, proxy);
+            if (mode === 'off')
+                return spawnDownload();
+            try {
+                return await downloadWithAria2Rpc({
+                    url: requestedUrl,
+                    outputPath,
+                    concurrency: decision.concurrency,
+                    signal,
+                    reporter,
+                    resume,
+                    headers: requestHeaders,
+                    maxDownloadLimitBytes: ctx.maxBandwidthBytes,
+                    proxy,
+                });
+            }
+            catch (err) {
+                // 暂停 / 取消是终态语义，不是「daemon 层失败」——原样上抛
+                if (err instanceof DownloadPausedError || err instanceof DownloadCancelledError)
+                    throw err;
+                // auto 模式下只有 daemon 层失败才值得动用 spawn（.aria2 控制文件在盘上，
+                // spawn 的 -c 会从断点接续）；aria2 级下载错误重试 spawn 没有意义
+                if (err instanceof DaemonUnavailableError && mode === 'auto') {
+                    reporter.note('aria2 RPC daemon 不可用，回退 spawn 方式续传…');
+                    return spawnDownload();
+                }
+                throw err;
+            }
+        };
+        reporter.report(0, `启动 aria2（${decision.concurrency} 连接）…`);
+        try {
+            const observation = await runAria2();
             reporter.done();
             // 进度写盘已异步化（src/progress.ts），终态记录必须落盘后再返回，
             // 否则 download_status / 轨道一读取方会看到上一次的中间状态。
@@ -1085,28 +1305,45 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
                 throw err;
             // aria2 失败，降级到 curl
             reporter.report(0, 'aria2 失败，回退 curl…');
+            // ⚠️ aria2 的半包不能被 curl 续传（1.9.3 实测坐实，改动前务必先读）：
+            // aria2 分片写入 —— 未完成分片之间是零字节空洞，文件长度只反映写得最远的
+            // 分片。实测：64MB 8 连接中途硬杀，落盘 92% 但内部有 35MB 空洞。curl 的
+            // -C - 只看长度，接着这种半包续传会拼出「长度对、内容错」的文件，与 0.6.0
+            // 的续传教训同类，且字节数校验拦不住（长度恰好对）。判据是 .aria2 控制
+            // 文件的存在性：在 = aria2 真的写过分片，必须整体丢弃后全量重下（只有
+            // aria2 能按分片续它，而走到回退说明 aria2 刚刚失败）；不在 = aria2 一个
+            // 字节都没碰，磁盘上仍是 planResume 批准过的连续前缀，维持原 resume 决定。
+            // 见 src/resume.ts 的 discardAria2Partial。
+            let curlResume = resume;
+            if (hasAria2ControlFile(outputPath)) {
+                discardAria2Partial(outputPath);
+                curlResume = false;
+                // 此刻半包真的没了，0% 是准确值（与 note() 的「不归零」不冲突：
+                // 那里保的是还在盘上的半包，这里删的就是半包）
+                reporter.report(0, 'aria2 半包为分片写入（内部有空洞），curl 无法安全续传，已删除后全量重下');
+            }
             // 必须传合并后的 signal：这里原来传的是 ctx.exec.signal，导致
             // 条目级取消与 timeoutMs 在 aria2 → curl 回退这一路径上完全失效。
             try {
-                await downloadWithCurl(requestedUrl, outputPath, signal, reporter, resume, requestHeaders, ctx.maxBandwidthBytes, proxy);
-                reporter.done('下载完成（curl 回退）');
-                await reporter.awaitFlush();
-                const integrity = await assertIntegrity();
-                clearMarker(outputPath);
-                return successResult('curl', true, `aria2 失败: ${aria2Message}`, integrity);
+                await downloadWithCurl(requestedUrl, outputPath, signal, reporter, curlResume, requestHeaders, ctx.maxBandwidthBytes, proxy);
+                return await finishCurlSuccess('下载完成（curl 回退）', {
+                    fellback: true,
+                    reason: `aria2 失败: ${aria2Message}`,
+                });
             }
             catch (curlErr) {
-                // 失败文案必须是**真正**抛出的那个错误：curl 也失败时，用户要看到
-                // 的是 curl 的失败原因；aria2 的原因已经在上面作为回退理由记录了。
-                // 0.9.0 之前这里传的是 aria2Message，进度里写着 aria2 的错，抛出的
-                // 却是 curlErr —— 排查时会对不上。
-                const curlMessage = curlErr instanceof Error ? curlErr.message : String(curlErr);
                 // 取消 → cancelled、超时 → failed（超时不是用户取消）；两者都不再回退。
                 if (abortOutcome() !== 'failed')
                     return await finishAborted(curlErr);
-                reporter.fail(curlMessage);
-                await reporter.awaitFlush();
-                throw curlErr;
+                // 失败文案必须是**真正**抛出的那个错误：curl 也失败时，用户要看到
+                // 的是 curl 的失败原因；aria2 的原因已经在上面作为回退理由记录了。
+                // 0.9.0 之前这里传的是 aria2Message，进度里写着 aria2 的错，抛出的
+                // 却是 curlErr —— 排查时会对不上。终局收口（落盘核对 / 自动续传 /
+                // 带落盘真相的失败定案）与 curl 直连路径共用同一条 settleCurlFailure。
+                return await settleCurlFailure(curlErr, {
+                    fellback: true,
+                    reason: `aria2 失败: ${aria2Message}`,
+                });
             }
         }
     }
@@ -1114,19 +1351,19 @@ async function downloadOneStarted(item, ctx, pre, proxy) {
     reporter.report(0, `使用 curl：${decision.reason}`);
     try {
         await downloadWithCurl(requestedUrl, outputPath, signal, reporter, resume, requestHeaders, ctx.maxBandwidthBytes, proxy);
-        reporter.done();
-        await reporter.awaitFlush();
-        const integrity = await assertIntegrity();
-        clearMarker(outputPath);
-        return successResult('curl', decision.fellback, decision.reason, integrity);
+        return await finishCurlSuccess('下载完成', {
+            fellback: decision.fellback,
+            reason: decision.reason,
+        });
     }
     catch (err) {
         // 取消 → cancelled、超时 → failed（超时不是用户取消，见 finishAborted）
         if (abortOutcome() !== 'failed')
             return await finishAborted(err);
-        reporter.fail(err instanceof Error ? err.message : String(err));
-        await reporter.awaitFlush();
-        throw err;
+        return await settleCurlFailure(err, {
+            fellback: decision.fellback,
+            reason: decision.reason,
+        });
     }
 }
 /**
@@ -1388,6 +1625,38 @@ function parseTimeoutMs(raw) {
     return value;
 }
 /**
+ * 可中止的退避等待（1.9.3，自动续传用）。
+ *
+ * resolve 不代表「时间到了」，也可能代表「已中止」—— 调用方在等待结束后必须
+ * 用 abortOutcome() 复核再继续，不能把 resolve 当成「可以开工」的信号。
+ *
+ * 为什么不用 timers/promises 的 AbortSignal-aware 计时器：那些方案在 abort 时
+ * 以 **reject** 结束，调用方还得区分「超时拒绝」与「用户取消」两种拒绝；这里
+ * 把中止折叠成普通 resolve，让「继续 / 收口」的判定全部收在 abortOutcome()
+ * 一处（与探测、aria2、curl 三段的中止判定同一条规则）。
+ */
+function delayAbortable(ms, signal) {
+    return new Promise((resolve) => {
+        let timer;
+        const onAbort = () => {
+            if (timer !== undefined)
+                clearTimeout(timer);
+            resolve();
+        };
+        timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        // 与进度落盘的等待计时器同一纪律：不阻止进程退出（见 progress.ts 的 timeoutAfter）
+        timer.unref?.();
+        if (signal.aborted) {
+            onAbort();
+            return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
+/**
  * 把一次 aria2 观测写进吞吐缓存（P1-2 的**写入侧**；读侧见 src/decision.ts 的 `decide`）。
  *
  * 什么时候写 —— 判定规则，逐条都有理由：
@@ -1561,7 +1830,15 @@ export function startRetry(taskId, session) {
     // paused（1.8.0）与 failed / cancelled 同列：继续 = 在原记录上从断点重新发起，
     // 复用与失败重试完全相同的一条代码路径（planResume 指纹核对兜底）。
     if (task.status !== 'failed' && task.status !== 'cancelled' && task.status !== 'paused') {
-        return { started: false, taskId, reason: 'not-retryable' };
+        // running 的豁免（1.9.3）：不在本进程注册表（isRunning 已在上面排除）
+        // 且记录超过阈值没有更新 —— 这是宿主中断留下的残迹（或共享 DSH_HOME 的
+        // 另一个实例没来得及被启动清扫覆盖），重试 = 从半包继续，与 failed 的
+        // 续传完全同一条路径；没过期的 running 才是真的还在跑。
+        const staleRunning = task.status === 'running' &&
+            !isRunning(taskId) &&
+            Date.now() - task.updatedAt > STALE_RUNNING_RECORD_MS;
+        if (!staleRunning)
+            return { started: false, taskId, reason: 'not-retryable' };
     }
     const record = readTaskRecord(taskId, session);
     const request = parseRetryRequest(record?.request, task.outPath);
@@ -1591,6 +1868,11 @@ export function startRetry(taskId, session) {
         ...(output === undefined ? {} : { output }),
         ...(request.sha256 === undefined ? {} : { sha256: request.sha256 }),
         ...(request.checksum === undefined ? {} : { checksum: request.checksum }),
+        // expectedSize 必须跟走（1.9.3 修正）：parseRetryRequest 持久化了它、
+        // RetryRequest 的类型注释也写着「重试时同样参与字节数校验」，但这里此前
+        // 没带上 —— 从管理器重试一条带 expectedSize 的任务会静默失去字节数校验
+        // （以及 2c-0 的远端长度对账），与首次下载的校验强度不一致。
+        ...(request.expectedSize === undefined ? {} : { expectedSize: request.expectedSize }),
         ...(request.ifExists === undefined ? {} : { ifExists: request.ifExists }),
     };
     const controller = new AbortController();

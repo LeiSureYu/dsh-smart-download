@@ -98,8 +98,9 @@ export interface ThroughputHistoryInput {
  * @param probe 探测结果
  * @param aria2Available 随包 aria2c 是否可定位
  * @param env 环境描述，缺省时取 `process.platform` / `process.arch`
- * @param history 可选的历史吞吐入参；**不给就与今天逐字段相同**（不读盘、不抬档）。
- *   注意缓存目前**还没有写入者**：写入点接在下载结束时（src/index.ts / src/downloader.ts），
- *   是紧随本项之后的独立任务。所以现在传了历史也只会命中「手工/测试写入的记录」。
+ * @param history 可选的历史吞吐入参；不给时完全不读盘（纯内存判定，便于单测）。
+ *   生产路径（src/index.ts 的 downloadOneStarted）总是传入：写入侧
+ *   `recordObservedThroughput`（1.3.0 接通）在每次成功的 aria2 下载后记录观测，
+ *   读侧据此抬档。显式传 undefined 可禁用历史抬档（测试与特殊部署用）。
  */
 export declare function decide(probe: ProbeResult, aria2Available: boolean, env?: DecideEnv, history?: ThroughputHistoryInput): Decision;

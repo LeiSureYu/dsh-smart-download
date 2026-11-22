@@ -354,16 +354,22 @@ test('limit 截断：total 报真实总数，tasks 被截断', () => {
   })
 })
 
-test('非法 limit（0 / 负数 / NaN）-> 退回默认值，不返回空', () => {
+test('limit 语义（1.9.3 修正）：显式数字按字面截断（0 -> 空列表），非数字才退回默认', () => {
   withDirs(({ taskDir }) => {
     for (let i = 0; i < DEFAULT_STATUS_LIMIT + 2; i++) {
       writeJsonl(taskDir, `dl-${i}`, [{ v: 1, task: `dl-${i}`, pct: i, msg: '下载中' }])
     }
-    for (const bad of [0, -1, Number.NaN]) {
+    // 参数文档写的是「Maximum number of tasks to return」：显式 0 / 负数按字面
+    // 截断成空列表，而不是被静默改写成默认的 10 条。total 仍是过滤后总数。
+    for (const bad of [0, -1]) {
       const snap = readDownloadStatus(bad)
-      assert.equal(snap.tasks.length, DEFAULT_STATUS_LIMIT, `limit=${bad} 应退回默认`)
+      assert.equal(snap.tasks.length, 0, `limit=${bad} 应返回空列表`)
       assert.equal(snap.total, DEFAULT_STATUS_LIMIT + 2)
     }
+    // 非数字（NaN）无法解释成条数：退回默认值
+    const nan = readDownloadStatus(Number.NaN)
+    assert.equal(nan.tasks.length, DEFAULT_STATUS_LIMIT, 'NaN 退回默认')
+    assert.equal(nan.total, DEFAULT_STATUS_LIMIT + 2)
   })
 })
 
@@ -784,5 +790,174 @@ test('batchId 过滤：老记录没有 batch 字段时收敛成空串，不参�
     assert.deepEqual(snap.tasks, [], 'batch 为空串的老记录不匹配任何批次 ID')
     const all = readDownloadStatus()
     assert.equal(all.tasks[0]?.batch, '')
+  })
+})
+
+/* ------------ 落盘核对（1.9.3，Issue #21）：记录与磁盘脱节的可视化 ------------ */
+
+test('diskSize：failed 记录的产物在记录之后被外部补完 -> 核对出当前字节数并标注文案', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 一条「57% 失败」的记录（Issue #21 的第二个文件形态），产物 57KB
+    const outPath = path.join(downloadDir, 'fake-out', 'half.bin')
+    mkdirSync(path.dirname(outPath), { recursive: true })
+    writeFileSync(outPath, Buffer.alloc(57_344, 0x41))
+    writeJsonl(taskDir, 'dl-stale', [
+      {
+        v: 1,
+        task: 'dl-stale',
+        state: 'failed',
+        pct: 57,
+        msg: '失败: curl 退出码 7：无法建立连接',
+        outPath,
+        size: 57_344,
+      },
+    ])
+    // 外部脚本随后把它补完了（这也是「写盘发生在记录之后」的唯一模拟方式）
+    writeFileSync(outPath, Buffer.alloc(100_352, 0x41))
+
+    const snap = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-stale')
+    const task = snap.tasks[0]
+    assert.ok(task)
+    // 状态保持 failed：读取端是纯只读的展示层，不改写历史（重试/删除交给管理端点）
+    assert.equal(task.status, 'failed')
+    assert.equal(task.size, 57_344, '记录里的 size 是终态快照，必须原样保留')
+    assert.equal(task.diskSize, 100_352, 'diskSize 必须是查询时刻的落盘真值')
+    assert.ok(
+      task.msg.includes('记录之后文件已增长到 100352 字节'),
+      `文案应标注「记录之后文件已增长」，实际：${task.msg}`,
+    )
+    assert.ok(task.msg.includes('可能已被外部补完'), '文案应给出「可能已被外部补完」的判断')
+  })
+})
+
+test('diskSize：记录与磁盘一致（未被动过）-> 核对出真值但不标注', () => {
+  withDirs(({ downloadDir }) => {
+    const outPath = path.join(downloadDir, 'fake-out', 'same.bin')
+    mkdirSync(path.dirname(outPath), { recursive: true })
+    writeFileSync(outPath, Buffer.alloc(4096, 0x42))
+    writeJson(downloadDir, 'dl-same', {
+      id: 'dl-same',
+      name: 'same.bin',
+      status: 'failed',
+      progress: 0.2,
+      updatedAt: Date.now(),
+      outPath,
+      size: 4096,
+    })
+    const task = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-same').tasks[0]
+    assert.ok(task)
+    assert.equal(task.diskSize, 4096)
+    assert.equal(
+      task.msg.includes('已增长'),
+      false,
+      '记录与磁盘一致时不得标注「已增长」',
+    )
+  })
+})
+
+test('diskSize：产物缺失 / completed 记录 / running 任务各有确定的收敛', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // ① failed 但文件已不在：diskSize 收敛成 0，不标注（没有「增长」可言）
+    writeJsonl(taskDir, 'dl-gone', [
+      {
+        v: 1,
+        task: 'dl-gone',
+        state: 'failed',
+        pct: 10,
+        msg: '失败: 连接中断',
+        outPath: path.join(downloadDir, 'fake-out', 'gone.bin'),
+        size: 1234,
+      },
+    ])
+    const gone = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-gone').tasks[0]
+    assert.ok(gone)
+    assert.equal(gone.diskSize, 0, '文件不存在时 diskSize 必须收敛成 0')
+    assert.equal(gone.msg.includes('已增长'), false)
+
+    // ② completed 记录 + 文件被外部改过：diskSize 照实核对，但不得标注
+    //    「可能已被外部补完」—— 对完成记录说这句话是自相矛盾的。
+    const donePath = path.join(downloadDir, 'fake-out', 'done.bin')
+    mkdirSync(path.dirname(donePath), { recursive: true })
+    writeFileSync(donePath, Buffer.alloc(999, 0x43))
+    writeJson(downloadDir, 'dl-done', {
+      id: 'dl-done',
+      name: 'done.bin',
+      status: 'completed',
+      progress: 1,
+      updatedAt: Date.now(),
+      outPath: donePath,
+      size: 888,
+    })
+    const done = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-done').tasks[0]
+    assert.ok(done)
+    assert.equal(done.diskSize, 999)
+    assert.equal(done.msg.includes('已增长'), false, 'completed 记录不得标注')
+
+    // ③ running 任务：尺寸本来就在变，核对没有意义，diskSize 恒为 0
+    const runPath = path.join(downloadDir, 'fake-out', 'running.bin')
+    writeFileSync(runPath, Buffer.alloc(2048, 0x44))
+    writeJson(downloadDir, 'dl-run', {
+      id: 'dl-run',
+      name: 'running.bin',
+      status: 'running',
+      progress: 0.5,
+      updatedAt: Date.now(),
+      outPath: runPath,
+      size: 1024,
+    })
+    const running = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-run').tasks[0]
+    assert.ok(running)
+    assert.equal(running.diskSize, 0, 'running 任务不做磁盘核对')
+  })
+})
+
+test('合并规则（1.9.3）：轨道二终态 + 轨道一 running -> 状态取终态（宿主中断后的残迹组合）', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    const outPath = path.join(downloadDir, 'fake-out', 'stale.bin')
+    mkdirSync(path.dirname(outPath), { recursive: true })
+    // 轨道一（会话目录里残留）：最后一行还是 running
+    writeJsonl(taskDir, 'dl-merged', [
+      { v: 1, task: 'dl-merged', pct: 57, msg: '下载中（curl）', outPath, size: 1000, state: 'running' },
+    ])
+    // 轨道二：启动清扫已改写为 failed
+    writeJson(downloadDir, 'dl-merged', {
+      id: 'dl-merged',
+      name: 'stale.bin',
+      status: 'failed',
+      progress: 0.57,
+      updatedAt: Date.now(),
+      outPath,
+      size: 1000,
+      msg: '宿主中断，任务已终止（半包保留，可在管理器重试续传）',
+    })
+    const task = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-merged').tasks[0]
+    assert.ok(task)
+    assert.equal(task.status, 'failed', '终态必须压过运行态（否则面板永远显示下载中）')
+    assert.equal(
+      task.msg,
+      '宿主中断，任务已终止（半包保留，可在管理器重试续传）',
+      '清扫写的原因文案要盖过轨道一的最后运行文案',
+    )
+    assert.equal(task.size, 1000)
+  })
+})
+
+test('合并规则（1.9.3）：轨道一终态 + 轨道二 running -> 状态同样取终态', () => {
+  withDirs(({ taskDir, downloadDir }) => {
+    // 反向组合：轨道一先写了终态、轨道二还停在 running（崩溃落在两次写盘之间）
+    writeJsonl(taskDir, 'dl-rev', [
+      { v: 1, task: 'dl-rev', pct: 100, msg: '失败: 网络中断', state: 'failed', outPath: 'x', size: 1 },
+    ])
+    writeJson(downloadDir, 'dl-rev', {
+      id: 'dl-rev',
+      name: 'rev.bin',
+      status: 'running',
+      progress: 0.5,
+      updatedAt: Date.now(),
+    })
+    const task = readDownloadStatus(DEFAULT_STATUS_LIMIT, 'dl-rev').tasks[0]
+    assert.ok(task)
+    assert.equal(task.status, 'failed')
+    assert.equal(task.msg, '失败: 网络中断', '终态轨道的文案优先于运行态轨道')
   })
 })

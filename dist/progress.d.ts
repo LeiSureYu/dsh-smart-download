@@ -1,5 +1,5 @@
 import type { ProgressState } from './types.js';
-import type { RetryRequest } from './tasks.js';
+import { type RetryRequest } from './tasks.js';
 /** 当前会话的定位信息，来自 `exec.agent.session.header`。 */
 export interface ProgressSession {
     /** 会话 ID，同时也是进度目录名 */
@@ -52,6 +52,15 @@ export interface DownloadTaskFile {
     fileMtimeMs?: number;
     /** 重试所需的最小请求信息，可选（1.6.0 新增）；见 `ProgressRecord.request`。 */
     request?: RetryRequest;
+    /**
+     * 给人看的状态说明，可选（1.9.3 新增）。
+     *
+     * 轨道二的历史格式里没有这个字段 —— 面板的状态说明一直来自轨道一的 JSONL，
+     * 只有轨道二存活时以任务名兜底。启动清扫（`sweepStaleRunningRecords`）写的
+     * 中断说明是第一个显式使用方：那条记录的轨道一在已消失的会话里，没有它，
+     * 用户看到的失败原因就是自己的文件名。
+     */
+    msg?: string;
 }
 /** 判定一个 taskId 是否可以安全地拼进文件名。 */
 export declare function isSafeTaskId(taskId: unknown): taskId is string;
@@ -92,6 +101,38 @@ export declare function removeTaskRecords(taskId: string, session?: ProgressSess
  * 抛错，调用方据此如实回 `no-request`。
  */
 export declare function readTaskRecord(taskId: string, session?: ProgressSession): DownloadTaskFile | undefined;
+/**
+ * 启动清扫的过期阈值（1.9.3）：running 记录超过这么久没有更新，视为宿主中断
+ * 留下的残迹。
+ *
+ * 为什么是 30 分钟：正常下载的进度写盘间隔是秒级（aria2 每秒一条摘要、curl
+ * 进度行连续），探测阶段也有首条记录；超过 30 分钟纹丝不动的 running 记录，
+ * 只可能是「写它的进程已经不在了」。阈值太短会误伤极端挂起的连接 —— 误伤是
+ * 可自愈的（活进程的下一条进度会把记录盖回 running，last-write-wins），但不
+ * 必要；太长则宿主崩溃后的残迹要等更久才被清掉。
+ */
+export declare const STALE_RUNNING_RECORD_MS: number;
+/**
+ * 启动清扫：把「永远 running」的轨道二记录改写为 failed（1.9.3）。
+ *
+ * 为什么需要它：宿主崩溃 / 被杀时，正在下载的任务的记录停在 running —— 进程内
+ * 注册表（tasks.ts）随进程消失，于是面板显示下载中、删除被 R8 拒、重试被
+ * not-retryable 拒、取消答 not-running，用户唯一能做的只有删记录（孤儿半包）。
+ * 本函数在插件 apply 时扫一遍轨道二，把超过 `STALE_RUNNING_RECORD_MS` 没有更新
+ * 的 running 记录改写成 failed（msg 写明中断原因）—— 面板恢复诚实，重试入口
+ * 恢复可用（续传由 planResume 的指纹核对兜底）。
+ *
+ * 多实例共享 DSH_HOME 的误伤由两条性质兜底：活进程的下一条进度写盘会把被误标
+ * 的记录盖回 running（last-write-wins，自愈）；manage 端点对「不在注册表且
+ * 过期」的 running 记录另有豁免，不会因此拒绝删除。
+ *
+ * 任何失败（目录读不到 / 单个文件写不进）都静默跳过：清扫是清理性质的功能，
+ * 绝不阻断插件加载。
+ *
+ * @param now 判定用的「现在」；测试注入固定值用
+ * @returns 被改写的 taskId 列表
+ */
+export declare function sweepStaleRunningRecords(now?: number): string[];
 export declare class ProgressReporter {
     /**
      * 写盘调用集中在这个对象上。
@@ -203,6 +244,14 @@ export declare class ProgressReporter {
      * @param timeoutMs 上限毫秒数，默认 2000；只有测试需要改，正常调用不传
      */
     awaitFlush(timeoutMs?: number): Promise<void>;
+    /**
+     * 以**当前进度**追加一条运行中说明（1.9.3）。
+     *
+     * 为什么不用 `report(0, msg)`：自动续传重试（Issue #21）发生在文件已有半包时，
+     * 把百分比归零会让面板从 57% 跳到 0% 再爬回来 —— 落盘字节一个都没少，进度条
+     * 却在说谎。半包还在，当前百分比就是真实进度。
+     */
+    note(msg: string): void;
     /** 标记完成 */
     done(msg?: string): void;
     /** 标记失败 */

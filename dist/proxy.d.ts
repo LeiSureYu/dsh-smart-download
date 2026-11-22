@@ -64,6 +64,19 @@ export declare function checkProxyParam(raw: string): {
     reason: string;
 };
 /**
+ * 把代理地址里的凭证脱敏后用于**展示**（1.9.3）。
+ *
+ * 为什么需要它：proxy 会出现在模型可见的工具结果里（结果对象的 `proxy` 字段），
+ * 而代理带 userinfo 是标准的企业配置（`HTTPS_PROXY=http://user:pass@corp:3128`），
+ * 其中环境变量派生的代理调用方甚至从未亲手输入 —— 把带密码的完整 URL 回显到
+ * 对话记录里是纯泄漏。argv 暴露面（aria2 `--all-proxy` / curl `-x` 需要完整值）
+ * 是另一个独立问题，这里先把「结果回显」这条堵上。
+ *
+ * 规则：无 userinfo 时原样返回（不做任何重塑）；有 userinfo 时整段替换成
+ * `***`（不区分 user 与 password —— 有凭据就整体脱敏）。
+ */
+export declare function redactProxySecret(proxy: string): string;
+/**
  * 判断目标主机是否命中 NO_PROXY 名单。
  *
  * 规则（与 curl 的 no_proxy 语义对齐，取其常用子集）：

@@ -524,6 +524,14 @@ export const EXIT_CODE_DESCRIPTIONS: Readonly<
   Record<DownloadMethod, Readonly<Record<number, ExitCodeDescription>>>
 > = Object.freeze({
   curl: Object.freeze({
+    // 7 的实测来源正是 Issue #21：代理中继死后，curl 的 --retry 全部撞上
+    // "Failed to connect … over proxy 127.0.0.1"，最终以 7 收场 —— 而文件可能
+    // 早已完整落盘。文案必须把「确认代理」放进下一步，而不是让用户对着
+    // 退出码去查手册。
+    7: {
+      reason: '无法建立连接：对端或代理拒绝 / 不可达（连接被拒或超时未通）',
+      next: '确认地址与代理是否可用；瞬时故障会退避后自动续传重试一次，半包与旁车指纹已保留',
+    },
     18: {
       reason: '传输不完整：只收到一部分数据，连接就被对端或中间设备断开',
       next: '可重试；半包与旁车指纹已保留，下次会先核对同源再续传',
@@ -578,6 +586,58 @@ export const EXIT_CODE_DESCRIPTIONS: Readonly<
     },
   }),
 })
+
+/**
+ * 值得「自动续传重试一次」的 curl 退出码（1.9.3，Issue #21）。
+ *
+ * 背景（Issue #21 实测）：代理中继在传输尾部断开时，curl 先报 56（此时字节可能
+ * 已经全部落盘），随后 `--retry` 的重连全部撞上已死的中继端口报 7，最终以 7 收场。
+ * 这类「对端 / 代理暂时不可达、传输中途被掐」的故障，隔一小段时间再续传是有机会
+ * 成功的 —— 而确定性失败（22 = HTTP 4xx/5xx、33/36 = Range 被拒）重试同样的地址
+ * 只会再失败一次，不进这张表。
+ *
+ * 逐条来源（curl 官方 man page，与上方 EXIT_CODE_DESCRIPTIONS 同源核对）：
+ * - 7  无法建立连接（对端 / 代理拒绝或不可达）；
+ * - 18 传输不完整（PARTIAL_FILE：连接在收完数据前被断开）；
+ * - 28 超时（操作在时限内未完成）；
+ * - 52 服务器空回复（EMPTY_REPLY：连接开了但什么都没给）；
+ * - 55 发送数据失败（couldnt_send）；
+ * - 56 接收数据失败（couldnt_recv：连接被重置 / 对端中途关闭）。
+ *
+ * 刻意**不含** 35（SSL 握手失败）：握手失败绝大多数是证书 / 协议套件一类的
+ * 确定性配置问题，重试极小概率改变结果；而 7/18/28/52/55/56 在「代理刚重连、
+ * 对端抖动」场景下实测可自愈。
+ */
+export const TRANSIENT_CURL_EXIT_CODES: ReadonlySet<number> = new Set([7, 18, 28, 52, 55, 56])
+
+/**
+ * 从 `describeExitCode` 生成的错误信息里解析退出码。
+ *
+ * 为什么解析自己的文案而不是改 `runProcess` 的签名传结构化错误：非零退出的
+ * 错误信息沿途要经过多层 catch（aria2 → curl 回退、批量编排、进度轨道），全部
+ * 改成自定义 Error 类型是一次大动干戈的重构；而这份文案是本仓库**唯一**的
+ * 生成源（`退出码 ${code}` 前缀固定），就地解析是最小的可靠接缝。
+ * 解析不出（spawn 失败的原始 Node 错误、取消文案、退出码 `未知`）返回 null。
+ */
+export function exitCodeFromMessage(message: string): number | null {
+  const match = /退出码 (\d+)/.exec(message)
+  if (!match) return null
+  const code = Number(match[1])
+  return Number.isInteger(code) ? code : null
+}
+
+/**
+ * 判定一次下载失败是否是「续传重试可能成功」的瞬时连接故障。
+ *
+ * 只认 curl 退出码（见 `TRANSIENT_CURL_EXIT_CODES`）：aria2 的终局失败必然已经
+ * 走过 curl 回退，终端错误是 curl 的；spawn 失败（ENOENT 等）与取消、完整性
+ * 校验失败都没有退出码，一律不算瞬时故障。
+ */
+export function isTransientDownloadError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  const code = exitCodeFromMessage(message)
+  return code !== null && TRANSIENT_CURL_EXIT_CODES.has(code)
+}
 
 /**
  * 从命令行取可执行文件名（去掉目录与 `.exe`）：用户不需要看到绝对路径。

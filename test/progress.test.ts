@@ -26,6 +26,8 @@ import {
   resolveDshHome,
   resolveDownloadProgressDir,
   resolveTaskProgressDir,
+  STALE_RUNNING_RECORD_MS,
+  sweepStaleRunningRecords,
   taskRecordFiles,
 } from '../src/progress.js'
 
@@ -676,4 +678,42 @@ test('taskRecordFiles / removeTaskRecords：只认普通文件，且 taskId 必�
 test('taskRecordFiles：目录（而不是文件）同名时不进候选（删不掉的目录不该被当作记录）', () => {
   mkdirSync(path.join(dlDir, 'task-dir.json'), { recursive: true })
   assert.deepEqual(taskRecordFiles('task-dir'), [], '目录不是记录文件')
+})
+
+/* -------- 启动清扫（1.9.3）：宿主中断留下的 running 残迹 -------- */
+
+/** 直接写一条轨道二记录（绕过 reporter，模拟「上一次宿主留下的」） */
+function writeTrack2(id: string, record: Record<string, unknown>): string {
+  mkdirSync(resolveDownloadProgressDir(), { recursive: true })
+  const file = path.join(resolveDownloadProgressDir(), `${id}.json`)
+  writeFileSync(
+    file,
+    JSON.stringify({ id, name: `${id}.bin`, updatedAt: Date.now(), ...record }, null, 2),
+    'utf-8',
+  )
+  return file
+}
+
+test('sweepStaleRunningRecords：过期 running 改写为 failed 并写明中断原因', () => {
+  const file = writeTrack2('dl-stale-1', {
+    status: 'running',
+    progress: 0.57,
+    updatedAt: Date.now() - STALE_RUNNING_RECORD_MS - 1000,
+  })
+  const swept = sweepStaleRunningRecords()
+  assert.deepEqual(swept, ['dl-stale-1'])
+  const after = JSON.parse(readFileSync(file, 'utf-8'))
+  assert.equal(after.status, 'failed')
+  assert.equal(after.progress, 0.57, '进度快照保留（面板显示中断时的百分比）')
+  assert.match(after.msg, /宿主中断/, '失败原因必须写明是宿主中断而不是静默改状态')
+})
+
+test('sweepStaleRunningRecords：新鲜 running / 终态 / 本进程在跑的都不动', () => {
+  writeTrack2('dl-fresh', { status: 'running', updatedAt: Date.now() - 60_000 })
+  writeTrack2('dl-done', { status: 'completed', updatedAt: Date.now() - STALE_RUNNING_RECORD_MS - 1 })
+  writeTrack2('dl-old-failed', { status: 'failed', updatedAt: Date.now() - STALE_RUNNING_RECORD_MS - 1 })
+  const swept = sweepStaleRunningRecords()
+  assert.deepEqual(swept, [], '只有过期 running 该被清扫')
+  const fresh = JSON.parse(readFileSync(path.join(resolveDownloadProgressDir(), 'dl-fresh.json'), 'utf-8'))
+  assert.equal(fresh.status, 'running', '新鲜 running 必须原样保留')
 })

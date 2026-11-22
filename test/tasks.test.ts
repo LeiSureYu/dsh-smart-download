@@ -156,3 +156,21 @@ test('parseRetryRequest：timeoutMs 必须落在 1000..1800000，越界整条拒
     '字符串不是合法数字，不能悄悄转换',
   )
 })
+
+test('parseRetryRequest：output 带控制字符 -> 整条不可重试（1.9.3 注入防线）', () => {
+  // 控制字符会成为 aria2 stdin input-file 的选项注入载体（basename 不吞换行）。
+  // 记录里出现这种 output 说明记录被改坏 / 被植入了奇怪的东西 —— 返回
+  // undefined（no-request），而不是丢掉路径换默认名继续跑。
+  const LF = String.fromCharCode(10)
+  const TAB = String.fromCharCode(9)
+  assert.equal(
+    parseRetryRequest({ url: 'https://a/b', output: 'C:\\x' + LF + '  header=Evil: 1' }),
+    undefined,
+  )
+  assert.equal(parseRetryRequest({ url: 'https://a/b', output: 'C:\\x' + TAB }), undefined)
+  // outPath（轨道二记录的产物路径）同样受检
+  assert.equal(parseRetryRequest({ url: 'https://a/b' }, 'C:\\x' + LF), undefined)
+  // 干净路径不受影响
+  const ok = parseRetryRequest({ url: 'https://a/b', output: 'C:\\x\\b.bin' })
+  assert.equal(ok?.output, 'C:\\x\\b.bin')
+})

@@ -30,10 +30,13 @@ import {
   buildCurlArgs,
   downloadWithAria2,
   downloadWithCurl,
+  exitCodeFromMessage,
   findAria2OnPath,
   getAria2Path,
+  isTransientDownloadError,
   runProcess,
   summarySpeedBytes,
+  TRANSIENT_CURL_EXIT_CODES,
 } from '../src/downloader.js'
 
 /* ------------------------------ 参数拼接 ------------------------------ */
@@ -911,4 +914,41 @@ test('buildCurlArgs 不带带宽上限 -> 命令行与 1.2.0 逐字节相同（�
   const baseline = buildCurlArgs('https://example.com/b.zip', 'b.zip', false)
   assert.deepEqual(withoutLimit, baseline)
   assert.equal(withoutLimit.includes('--limit-rate'), false, '不得凭空出现限速开关')
+})
+
+/* -------------------- 瞬时故障判定（1.9.3，Issue #21） -------------------- */
+
+test('exitCodeFromMessage: 从 describeExitCode 文案中解析退出码', () => {
+  assert.equal(exitCodeFromMessage('curl 退出码 7：无法建立连接'), 7)
+  assert.equal(exitCodeFromMessage('aria2c 退出码 18（信号 null）：传输不完整'), 18)
+  // 未知码分支：文案里仍是「退出码 N」，同样可解析
+  assert.equal(exitCodeFromMessage('curl 退出码 99'), 99)
+  // 解析不出：取消文案、spawn 原始错误、退出码「未知」
+  assert.equal(exitCodeFromMessage('下载已取消：curl 被 AbortSignal 终止'), null)
+  assert.equal(exitCodeFromMessage('spawn curl ENOENT'), null)
+  assert.equal(exitCodeFromMessage('curl 退出码 未知'), null)
+  assert.equal(exitCodeFromMessage(''), null)
+})
+
+test('isTransientDownloadError: 连接类退出码算瞬时，确定性失败与无退出码不算', () => {
+  // 瞬时集合（与 TRANSIENT_CURL_EXIT_CODES 一一核对）
+  for (const code of TRANSIENT_CURL_EXIT_CODES) {
+    assert.equal(
+      isTransientDownloadError(new Error(`curl 退出码 ${code}：细节`)),
+      true,
+      `退出码 ${code} 应判定为瞬时故障`,
+    )
+  }
+  // 确定性失败：HTTP 4xx/5xx、Range 被拒 —— 重试同样的地址不会改变结果
+  assert.equal(isTransientDownloadError(new Error('curl 退出码 22：HTTP 错误')), false)
+  assert.equal(isTransientDownloadError(new Error('curl 退出码 33：Range 未被接受')), false)
+  assert.equal(isTransientDownloadError(new Error('curl 退出码 36：无法续传')), false)
+  // aria2 的退出码不在 curl 瞬时集合里（终局失败必然已经过 curl 回退）
+  assert.equal(isTransientDownloadError(new Error('aria2c 退出码 1：未知错误')), false)
+  // 无退出码：spawn 失败、取消、完整性校验失败
+  assert.equal(isTransientDownloadError(new Error('spawn curl ENOENT')), false)
+  assert.equal(isTransientDownloadError(new Error('下载已取消')), false)
+  assert.equal(isTransientDownloadError('curl 退出码 56：字符串也认'), true)
+  assert.equal(isTransientDownloadError(null), false)
+  assert.equal(isTransientDownloadError(undefined), false)
 })

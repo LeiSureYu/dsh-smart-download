@@ -278,3 +278,32 @@ test('withConflictSuffix: 非法序号原样返回（不生成 "name (NaN).ext"�
     assert.equal(withConflictSuffix('a.zip', bad), 'a.zip', `index=${bad} 应原样返回`)
   }
 })
+
+test('checkDownloadUrl：原始字符串里的控制字符 / 首尾空白必须拒绝（1.9.3 注入防线）', () => {
+  // WHATWG URL 解析会静默删掉内嵌的 \n / \r / \t：解析层看不出注入，但原始
+  // 字符串会原样进入 aria2 的 stdin input-file（每行一个 URI / 选项）。
+  // 实测（随包 aria2 1.37.0）：内嵌 \n 可注入额外下载 URI 与 per-download
+  // 选项（dir= 可写绝对路径）。必须在门口拦下。
+  const cases = [
+    'http://a/x\nhttp://b/evil',
+    'http://a/x\n  dir=C:\injected\n  out=x.bin',
+    'http://a/x\ry',
+    'http://a/x\ty',
+    'http://a/x\u0000',
+    '  http://a/x',
+    'http://a/x ',
+  ]
+  for (const bad of cases) {
+    const r = checkDownloadUrl(bad)
+    assert.equal(r.ok, false, `应拒绝：${JSON.stringify(bad)}`)
+    if (!r.ok) {
+      assert.match(
+        r.reason,
+        /控制字符|首尾空白/,
+        `拒绝文案应点名原因：${JSON.stringify(bad)}`,
+      )
+    }
+  }
+  // 正常 URL 不受影响
+  assert.equal(checkDownloadUrl('https://example.com/a.bin').ok, true)
+})

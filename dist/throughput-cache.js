@@ -184,6 +184,42 @@ export function readThroughput(url, options = {}) {
     return { key, record };
 }
 /**
+ * 清扫目录里**所有**早于 TTL 的缓存文件（1.9.3 补）。
+ *
+ * 为什么不能只靠 readThroughput 顺手淘汰：那只在「同一台主机再次被下载」时
+ * 发生 —— 下过一次就再也没碰过的主机，它的缓存文件会永远留在磁盘上，文件头
+ * 的隐私口径（这台机器下过哪些主机的记录被持久化）与 24h TTL 承诺都只对
+ * 「会被再次下载的主机」成立。写入侧每次顺手扫一遍目录（缓存目录本来就小，
+ * readdir 成本可忽略），过期的条目无论是否还会被读到都会被清掉。
+ *
+ * mtime 判定而非解析 JSON：写入时 updatedAt 与 mtime 同步刷新，两者等价，
+ * 而解析会对损坏文件抛错（虽然也吞掉，但没必要）。
+ */
+function sweepExpired(dir, now) {
+    let entries;
+    try {
+        entries = fs.readdirSync(dir);
+    }
+    catch {
+        /* 目录不存在 / 不可读：本轮没有可清扫的东西 */
+        return;
+    }
+    for (const name of entries) {
+        if (!name.endsWith('.json'))
+            continue;
+        const file = path.join(dir, name);
+        try {
+            const st = fs.lstatSync(file);
+            if (st.isFile() && now - st.mtimeMs >= THROUGHPUT_TTL_MS) {
+                fs.unlinkSync(file);
+            }
+        }
+        catch {
+            /* 单个文件失败不影响其余条目 */
+        }
+    }
+}
+/**
  * 追加一次观测（下载结束时调用）。
  *
  * 任何失败都静默忽略：写不进去只是「下次没有历史」，绝不该让已经成功的下载变成失败。
@@ -217,4 +253,6 @@ export function recordThroughput(sample, options = {}) {
     catch {
         /* 缓存是优化：写失败只意味着下次没有历史（见文件头） */
     }
+    // 无论本次写入成败都顺手清一遍过期条目（见 sweepExpired 的注释）
+    sweepExpired(dir, now);
 }

@@ -13,7 +13,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import * as net from 'node:net'
-import { checkProxyParam, hostMatchesNoProxy, resolveProxy, validateProxyValue } from '../src/proxy.js'
+import {
+  checkProxyParam,
+  hostMatchesNoProxy,
+  redactProxySecret,
+  resolveProxy,
+  validateProxyValue,
+} from '../src/proxy.js'
 import { probeUrl } from '../src/probe.js'
 import { ProxyAgent } from 'undici'
 
@@ -247,4 +253,29 @@ test('集成：无代理时探测直连（不构造 dispatcher，请求直接到
   } finally {
     await new Promise<void>((resolve) => origin.close(() => resolve()))
   }
+})
+
+test('hostMatchesNoProxy：带端口的 IPv6 条目 [::1]:8080 必须命中（1.9.3 修正）', () => {
+  // 旧实现「剥首 [ 与尾 ]」会把 [::1]:8080 粘成 ::1]:8080，host:port 判定与
+  // 后缀匹配全部落空 —— 带端口的 IPv6 NO_PROXY 条目从不命中，流量绕过
+  // NO_PROXY 被塞进代理（curl 语义是直连）。
+  assert.equal(hostMatchesNoProxy('::1', '8080', '[::1]:8080'), true)
+  assert.equal(hostMatchesNoProxy('[::1]', '8080', '[::1]:8080'), true)
+  assert.equal(hostMatchesNoProxy('::1', '8080', '::1]:8080'), false, '损坏的条目不该命中')
+  // 无端口的 IPv6 条目维持原语义
+  assert.equal(hostMatchesNoProxy('::1', '8080', '[::1]'), true)
+  assert.equal(hostMatchesNoProxy('::1', '8080', '::1'), true)
+  // 端口不同仍不命中
+  assert.equal(hostMatchesNoProxy('::1', '9090', '[::1]:8080'), false)
+})
+
+test('redactProxySecret：带 userinfo 的代理在展示层脱敏，无凭据原样返回', () => {
+  // 字符串实现不重塑无凭据部分：scheme / 主机 / 路径逐字节保留
+  assert.equal(redactProxySecret('http://alice:secret@corp:3128'), 'http://***@corp:3128')
+  assert.equal(redactProxySecret('http://alice:secret@corp:3128/path'), 'http://***@corp:3128/path')
+  assert.equal(redactProxySecret('http://corp:3128'), 'http://corp:3128', '无凭据不得重塑')
+  assert.equal(redactProxySecret('http://corp:3128/path'), 'http://corp:3128/path')
+  // 解析失败的兜底：@ 前的凭据段整体抹掉
+  assert.equal(redactProxySecret('user:pass@not-a-url'), '***@not-a-url')
+  assert.equal(redactProxySecret('plain'), 'plain')
 })

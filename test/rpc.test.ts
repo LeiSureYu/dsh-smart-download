@@ -370,7 +370,9 @@ test('handler: limit 非法时回落到 DEFAULT_STATUS_LIMIT（而非静默用 0
     }
     const conn = stubConnection()
     const fetchHandler = handlerOf(conn)
-    for (const badLimit of ['abc', null, {}, -1, 0, NaN, Infinity]) {
+    // 1.9.3 起 limit 语义与参数文档对齐：非数字（'abc' / null / {} / NaN / Infinity）
+    // 回落到默认；显式 0 / 负数按字面截断成空列表（另行断言）。
+    for (const badLimit of ['abc', null, {}, NaN, Infinity]) {
       const res = await fetchHandler(
         rpcRequest({
           type: 'client-request',
@@ -1362,13 +1364,20 @@ test('manage forget：不带 session 删不掉会话隔离的轨道一记录（�
   })
 })
 
-test('manage forget：带 session 能删掉会话隔离的轨道一记录（修复点）', async () => {
+test('manage forget：客户端 session 指向的轨道一不再参与清理（1.9.3 安全加固）', async () => {
+  // 轨道一目录由客户端 payload 的 session.cwd 推导 —— 任意客户端字符串能把
+  // 清理动作指到任意目录。1.9.3 起 forget 只清理轨道二（服务端配置推导的
+  // 目录），客户端 session 传什么都不影响轨道一。
   await withSessionOnlyTrack1(async ({ session, taskId, jsonl }) => {
     const res = (await (
       await manageHandler()(manageRequest({ op: 'forget', taskId, session }))
     ).json()) as { result: { value: { recordRemoved: string[] } } }
-    assert.deepEqual(res.result.value.recordRemoved, [jsonl], '带 session 必须删掉轨道一的记录文件')
-    assert.equal(existsSync(jsonl), false, '记录文件必须真的没了')
+    assert.deepEqual(
+      res.result.value.recordRemoved,
+      [],
+      '客户端 session 指向的轨道一目录不得被 forget 清理',
+    )
+    assert.equal(existsSync(jsonl), true, '轨道一记录文件必须原样保留')
   })
 })
 
@@ -1618,4 +1627,53 @@ test('manage/cancel / retry：非法 taskId 被白名单拒绝', async () => {
       }
     }),
   )
+})
+
+test('manage/delete：过期 running 残迹（宿主中断）不再被 R8 拦下（1.9.3 豁免）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'crashed.bin', 'c'.repeat(24))
+      seedTask(downloadDir, 'dl-crashed', {
+        status: 'running',
+        progress: 0.5,
+        outPath: out,
+        size: 24,
+        updatedAt: Date.now() - 31 * 60 * 1000, // 超过 30 分钟阈值
+      })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-crashed', confirm: true })),
+      )
+      assert.equal(env.body.result?.ok, true)
+      const value = env.body.result?.value as { fileDeleted: boolean; reason?: string }
+      assert.equal(value.fileDeleted, true, '中断残迹的产物必须可删')
+      assert.equal(existsSync(out), false)
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
+})
+
+test('manage/delete：新鲜 running 依旧被 R8 拒（豁免只针对过期残迹）', async () => {
+  const products = tempDir()
+  await withDirs(async ({ downloadDir }) => {
+    try {
+      const out = seedProduct(products, 'live.bin', 'l'.repeat(24))
+      seedTask(downloadDir, 'dl-live', {
+        status: 'running',
+        progress: 0.5,
+        outPath: out,
+        size: 24,
+        updatedAt: Date.now(),
+      })
+      const env = await readEnvelope(
+        await manageHandler()(manageRequest({ op: 'delete', taskId: 'dl-live', confirm: true })),
+      )
+      const value = env.body.result?.value as { fileDeleted: boolean; reason?: string }
+      assert.equal(value.reason, 'running', '新鲜 running 必须维持 R8 拒绝')
+      assert.equal(existsSync(out), true, '正在写的产物不得被删')
+    } finally {
+      rmSync(products, { recursive: true, force: true })
+    }
+  })
 })

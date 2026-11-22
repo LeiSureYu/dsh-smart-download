@@ -105,6 +105,33 @@ function proxyFromEnv(names: readonly string[], env: NodeJS.ProcessEnv): string 
 }
 
 /**
+ * 把代理地址里的凭证脱敏后用于**展示**（1.9.3）。
+ *
+ * 为什么需要它：proxy 会出现在模型可见的工具结果里（结果对象的 `proxy` 字段），
+ * 而代理带 userinfo 是标准的企业配置（`HTTPS_PROXY=http://user:pass@corp:3128`），
+ * 其中环境变量派生的代理调用方甚至从未亲手输入 —— 把带密码的完整 URL 回显到
+ * 对话记录里是纯泄漏。argv 暴露面（aria2 `--all-proxy` / curl `-x` 需要完整值）
+ * 是另一个独立问题，这里先把「结果回显」这条堵上。
+ *
+ * 规则：无 userinfo 时原样返回（不做任何重塑）；有 userinfo 时整段替换成
+ * `***`（不区分 user 与 password —— 有凭据就整体脱敏）。
+ */
+export function redactProxySecret(proxy: string): string {
+  const at = proxy.indexOf('@')
+  if (at === -1) return proxy
+  // 纯字符串处理而不是 URL 解析：`user:pass@not-a-url` 会被 WHATWG 解析成
+  // 「scheme=user 的非特殊 URL」（不抛错、userinfo 为空），解析法会漏掉它；
+  // 字符串法对所有形状成立，且不重塑无凭据部分的格式。
+  const schemeEnd = proxy.indexOf('://')
+  if (schemeEnd !== -1 && at > schemeEnd) {
+    // scheme://***@剩余：保留 scheme 与主机/路径原样，凭据整段抹掉
+    return proxy.slice(0, schemeEnd + 3) + '***@' + proxy.slice(at + 1)
+  }
+  // 没有 scheme:// 却带 @（不是合法代理 URL 的形状）：保守起见整段抹掉
+  return '***@' + proxy.slice(at + 1)
+}
+
+/**
  * 判断目标主机是否命中 NO_PROXY 名单。
  *
  * 规则（与 curl 的 no_proxy 语义对齐，取其常用子集）：
@@ -126,25 +153,42 @@ export function hostMatchesNoProxy(
   const host = targetHost.toLowerCase().replace(/^\[|\]$/g, '')
   const port = targetPort.toLowerCase()
   for (const rawEntry of list.split(',')) {
-    const entry = rawEntry.trim().toLowerCase().replace(/^\[|\]$/g, '')
+    const entry = rawEntry.trim().toLowerCase()
     if (entry === '') continue
     if (entry === '*') return true
-    // 条目自带端口：主机与端口都要相等（不做后缀匹配 —— 带端口通常就是
-    // 想精确指到某一个服务）。判定「是 host:port」必须同时满足：最后一个
-    // 冒号之前**不含**冒号（裸 IPv6 如 `::1` 有多个冒号但不是 host:port）、
-    // 冒号之后是纯数字。
-    const colon = entry.lastIndexOf(':')
-    if (
-      colon !== -1 &&
-      !entry.slice(0, colon).includes(':') &&
-      /^\d+$/.test(entry.slice(colon + 1))
-    ) {
-      const entryHost = entry.slice(0, colon)
-      const entryPort = entry.slice(colon + 1)
+    // 先按 `[host]:port` 拆端口、**再**剥括号（1.9.3 修正）：
+    // `[::1]:8080` 的尾 `]` 在端口之前，旧实现「剥首 `[` 与尾 `]`」的正则会把
+    // host 和 port 粘成 `::1]:8080`，host:port 判定（最后一个冒号前不含冒号）
+    // 与后缀匹配全部落空 —— 带端口的 IPv6 NO_PROXY 条目从不命中（实测）。
+    // curl 对这种条目是按 [host]:port 解析的，这里对齐。
+    let entryHost = entry
+    let entryPort: string | undefined
+    const bracketed = /^\[(.+)\](?::(\d+))?$/.exec(entry)
+    if (bracketed !== null) {
+      entryHost = bracketed[1] as string
+      entryPort = bracketed[2]
+    } else {
+      // 条目自带端口：主机与端口都要相等（不做后缀匹配 —— 带端口通常就是
+      // 想精确指到某一个服务）。判定「是 host:port」必须同时满足：最后一个
+      // 冒号之前**不含**冒号（裸 IPv6 如 `::1` 有多个冒号但不是 host:port）、
+      // 冒号之后是纯数字。
+      const colon = entry.lastIndexOf(':')
+      if (
+        colon !== -1 &&
+        !entry.slice(0, colon).includes(':') &&
+        /^\d+$/.test(entry.slice(colon + 1))
+      ) {
+        entryHost = entry.slice(0, colon)
+        entryPort = entry.slice(colon + 1)
+      }
+    }
+    if (entryPort !== undefined) {
       if (host === entryHost && port === entryPort) return true
       continue
     }
-    const bare = entry.startsWith('.') ? entry.slice(1) : entry
+    // 无端口的条目：剥掉可能残留的 IPv6 方括号（`[::1]`）再做比较
+    entryHost = entryHost.replace(/^\[|\]$/g, '')
+    const bare = entryHost.startsWith('.') ? entryHost.slice(1) : entryHost
     if (bare === '') continue
     if (host === bare || host.endsWith(`.${bare}`)) return true
   }

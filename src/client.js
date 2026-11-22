@@ -211,6 +211,7 @@ window.__ModuleLoader__.load({
 			'pauseRequested': '已暂停，半包已保留；点「重试」即可从断点继续',
 			'retryAll': '重试全部失败',
 			'retryAllStarted': '已对全部可重试的失败项发起重试',
+			'retryAllNone': '当前没有可重试的失败项',
 			'cancelUnknown': '找不到这条任务，可能记录已被删除',
 			'cancelNotRunning': '这条任务已经不在运行中',
 			'retry': '重试',
@@ -293,6 +294,7 @@ window.__ModuleLoader__.load({
 			'pauseRequested': 'Paused; partial file kept — press "Retry" to resume from the breakpoint',
 			'retryAll': 'Retry failed',
 			'retryAllStarted': 'Retry started for every retryable failure',
+			'retryAllNone': 'No retryable failures right now',
 			'cancelUnknown': 'That task could not be found; its record may have been deleted',
 			'cancelNotRunning': 'That task is no longer running',
 			'retry': 'Retry',
@@ -789,9 +791,12 @@ window.__ModuleLoader__.load({
 		/**
 		 * 终态播报器：去重 + 合流。
 		 *
-		 * 去重键 = `id:status`。任务 id 是每次下载新生成的（见 src/progress.ts），
-		 * 所以「同一 id 再次进入同一个终态」在现实中不会发生；把终态拼进键里，
-		 * 是为了万一某条任务被重试、真的又走了一遍终态流程时还能再响一次。
+		 * 去重键 = `id:status:updatedAt`。任务 id 是每次下载新生成的（见
+		 * src/progress.ts），但**重试会复用同一个 id**（startRetry 的设计：面板
+		 * 原地刷新而不是另起一行）—— 所以「同一 id 再次进入同一个终态」是常态
+		 * 而不是万一。只拼 status 的话，失败 → 重试 → 再失败就永远静音；把
+		 * updatedAt（每次终态落盘都会刷新，src/progress.ts toTaskFile）拼进键里，
+		 * 重试后的新一轮终态才能再响一次。
 		 *
 		 * **首屏只播种、不播报**：刷新页面后第一份快照里那些早就结束的历史任务，
 		 * 一条都不该响 —— 用户没有在等它们，全播一遍是最吵的做法。
@@ -819,7 +824,8 @@ window.__ModuleLoader__.load({
 					for (const task of tasks) {
 						const kind = terminalSound(task.status);
 						if (kind === null) continue;
-						const key = String(task.id || '') + ':' + task.status;
+						const key =
+							String(task.id || '') + ':' + task.status + ':' + String(task.updatedAt || 0);
 						if (seen.has(key)) continue;
 						seen.add(key);
 						fresh.push(kind);
@@ -1575,7 +1581,9 @@ window.__ModuleLoader__.load({
 						type: 'checkbox',
 						'data-dsh-smart-dl': 'row-check',
 						'data-task-id': task.id,
-						'aria-label': t('selectAll'),
+						// 逐行勾选框的可达性标签必须能区分行（读屏用户逐行 Tab 时
+						// 听到 N 个「全选」无从分辨），用任务名兜底 id。
+						'aria-label': String(task.name || task.id || ''),
 						checked: Boolean(checked),
 						onChange: () => {
 							if (typeof onToggle === 'function') onToggle(task.id);
@@ -2049,9 +2057,12 @@ window.__ModuleLoader__.load({
 				setChecked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.concat([id])));
 			};
 			const toggleAll = () => {
-				if (allChecked) setChecked(checked.filter((id) => !visibleIds.includes(id)));
-				// 只写**可见**的 id：选择范围本身就是筛选结果，不再靠 checkedVisible 兜底。 
-				setChecked(visibleIds);
+				if (allChecked) {
+					setChecked(checked.filter((id) => !visibleIds.includes(id)));
+				} else {
+					// 只写**可见**的 id：选择范围本身就是筛选结果，不再靠 checkedVisible 兜底。
+					setChecked(visibleIds);
+				}
 			};
 
 			/**
@@ -2084,7 +2095,9 @@ window.__ModuleLoader__.load({
 						fail += 1;
 					}
 				}
-				setChecked(checked.filter((id) => !ids.includes(id)));
+				// 函数式更新：批量循环期间用户仍可勾选/取消勾选其它行，不能用
+				// 渲染时的 checked 快照覆盖掉那些变更。
+				setChecked((prev) => prev.filter((id) => !ids.includes(id)));
 				setBatching(false);
 				await inspectAll();
 				if (fail === 0) {
@@ -2110,11 +2123,16 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			// 任务 id 集合的稳定签名：管理页可能在第一次轮询落库之前就打开
+			// （state.tasks === null -> tasks = []），只在挂载时 inspect 一轮的话，
+			// 之后从 store 到达的行永远拿不到 presence 判定（徽标恒为 unknown、
+			// 「在文件夹中显示」恒置灰）。依赖 id 签名 —— 行集变化时补一轮；
+			// 行内状态变化不触发（presence 针对的是文件在不在磁盘）。
+			const taskIdsSignature = tasks.map((task) => task.id).join('|');
 			react.useEffect(() => {
 				void inspectAll();
-				// 只在挂载时跑一次：任务列表由共享 store 驱动，行内操作后会显式再查。
-				// eslint-disable-next-line no-empty-function
-			}, []);
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, [taskIdsSignature]);
 
 			const revealTask = async (task) => {
 				const verdict = panelStore_PresenceOf(state.presence, task.id);
@@ -2242,18 +2260,20 @@ window.__ModuleLoader__.load({
 			 * 不改动已有产物（是否覆盖仍由记录里的 ifExists 决定）。
 			 */
 			const retryTask = async (task) => {
-				if (acting !== null) return;
+				if (acting !== null) return false;
 				setActing({ id: task.id, op: 'retry' });
 				try {
 					const result = await manage({ op: 'retry', taskId: task.id });
 					const value = result && result.ok ? result.value : null;
 					if (value && value.started === true) {
 						setNotice(t('retryStarted'));
-					} else {
-						setNotice(retryFailureText(value, t));
+						return true;
 					}
+					setNotice(retryFailureText(value, t));
+					return false;
 				} catch {
 					setNotice(t('actionFailed'));
+					return false;
 				} finally {
 					setActing(null);
 				}
@@ -2276,10 +2296,13 @@ window.__ModuleLoader__.load({
 					setNotice(t('retryAllNone'));
 					return;
 				}
+				let started = 0;
 				for (const task of targets) {
-					await retryTask(task);
+					// retryTask 返回是否真的启动：全被拒（如全部 no-request）时不能
+					// 再报「已对全部可重试的失败项发起重试」—— 那是谎报。
+					if (await retryTask(task)) started += 1;
 				}
-				setNotice(t('retryAllStarted'));
+				setNotice(t(started > 0 ? 'retryAllStarted' : 'retryAllNone'));
 			};
 
 			return react.createElement(

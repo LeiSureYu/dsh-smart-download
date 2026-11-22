@@ -76,7 +76,7 @@ execute(args, exec)                       src/index.ts
 
 | 文件 | 行数 | 职责 | 关键点 |
 | --- | --- | --- | --- |
-| `src/index.ts` | ~1379 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面这些步骤 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
+| `src/index.ts` | ~2260 | 插件入口：注册 `smart_download` / `download_status` 两个工具，编排上面这些步骤 | 唯一的流程编排点；`IntegrityError` 让它与「传输失败」在 catch 里可区分 |
 | `src/types.ts` | ~404 | 所有跨模块类型与返回结构 | `verifySkipped` / `reason` / `mirrorSkipped` / `diskCheckSkipped` 语义不同，见下 |
 | `src/url.ts` | ~243 | URL 校验、输出文件名推导与净化 | 纯函数；协议白名单 + 单段文件名 + `Content-Disposition` 解析 |
 | `src/mirror.ts` | ~134 | 镜像前缀归一化、拼接、GitHub 判定、候选表 | 纯函数、不发请求；`auto` 模式与候选表覆盖的入口 |
@@ -92,10 +92,20 @@ execute(args, exec)                       src/index.ts
 | `src/downloader.ts` | ~614 | 参数拼接、子进程执行、进度解析接线 | 随包子包缺失时查 `PATH` 上的 `aria2c` 并跑 `--version` 验证；aria2 / curl 均带重试；curl 重定向仅 http(s)；`-k 1M` 与 `--allow-overwrite=true` 不可删 |
 | `src/progress-parse.ts` | ~73 | aria2 摘要行 / curl 进度条解析、行切分 | 纯函数；真实样本在 `test/fixtures/` |
 | `src/progress.ts` | ~560 | 双轨进度上报（JSONL + JSON）与记录增删 | 异步批量落盘，`awaitFlush()` 给终态兜底；`setTarget()` 在文件名确定后修正 label / outPath；1.4.0 起记 `outPath` / `size` / `fileMtimeMs`，1.6.0 起记不含请求头的 `request` |
+| `src/gate.ts` | ~97 | 进程内全局并发闸：所有条目（前台 / 后台 / 重试）开工前先拿槽位 | 1.7.0 起「批内窗口」升级为进程内约束（容量 = 预算 16 ÷ 单条目最高 8 连接 = 2）；没有后台任务时与 1.6.0 的批内窗口等宽 |
 | `src/tasks.ts` | ~210 | 进程内任务注册表（`taskId → AbortController`）与重试元数据校验 | 只存内存，不持久化；请求头**永不落盘**；`parseRetryRequest` 只接受可安全重放的字段 |
 | `src/status.ts` | ~346 | `download_status` 的只读扫描与两条轨道合并 | 任何读取失败都退化为「少一条任务」，并用 `scanFailedDirs` 如实报出 |
+
+> **⚠️ 1.9.3 审计备注 —— `src/rpc-daemon.ts` / `src/download-rpc.ts` 目前是未接线状态。**
+> 这两个模块（1.9.0 引入的 aria2 常驻 RPC daemon 与其下载路径）在 `src/` 与 `dist/` 里
+> **没有任何 import**（仅 `download-rpc.ts` 自己 import 了 rpc-daemon）—— 也就是说
+> 「aria2 下载优先走 RPC、暂停走 `aria2.pause`」这一 1.9.0 CHANGELOG 所述行为在
+> 运行时从未生效，实际下载一直走 spawn 路径（暂停 = 进程中止 + paused 终态）。
+> 是接线补上还是降级为实验模块，是待决事项；在此之前请勿把这两个文件当作活跃
+> 代码阅读。
+
 | `src/cleanup.ts` | ~291 | `/api/smartdl.cleanup`：按保留窗口删**过期**的进度文件 | 与 `ProgressReporter.cleanup()` 不同 —— 这是给外部的触发入口，不接自动调用 |
-| `src/rpc.ts` | ~880 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`·`cancel`·`retry`） | 路径**只能来自本插件自己的记录**；`cancel` 只作用于本进程，`retry` 只接受 `failed` / `cancelled`；非法请求一律 `ok:false`，绝不按默认值执行 |
+| `src/rpc.ts` | ~900 | 三个 Host 端点：`status`（读快照）/ `cleanup`（清历史）/ `manage`（下载管理器的 `inspect`·`forget`·`delete`·`reveal`·`cancel`·`pause`·`retry`） | 路径**只能来自本插件自己的记录**（1.9.3 起 manage 只读轨道二 —— 轨道一目录来自客户端 payload，不能作为破坏性动作的依据）；`cancel`/`pause` 只作用于本进程，`retry` 只接受 `failed` / `cancelled` / `paused`；非法请求一律 `ok:false`，绝不按默认值执行 | 路径**只能来自本插件自己的记录**；`cancel` 只作用于本进程，`retry` 只接受 `failed` / `cancelled`；非法请求一律 `ok:false`，绝不按默认值执行 |
 | `src/client.js` | ~2333 | 浏览器端：进度浮层 + 侧边栏入口 + 下载管理页（classic script） | 不打包，只依赖 `react`；会话由浮层写进共享 store，供 `manage` 定位轨道一 |
 
 ## 数据流：进度怎么从子进程走到界面
@@ -133,11 +143,11 @@ ProgressReporter.report(pct, msg, spd, eta, state)   src/progress.ts
 
 这些事都必须在**宿主进程**里做（浏览器既拿不到文件系统，也起不了文件管理器，
 更够不到下载的 `AbortController`），所以它们走同一条 `POST /api/smartdl.manage`，
-用 `op` 区分；客户端只发 `taskId`。
+用 `op` 区分；客户端只发 `taskId`（1.8.0 起另有 `pause`：与 `cancel` 同一物理动作，差别只在终态语义 —— paused 而不是 cancelled）。
 
 ```
 浏览器（下载管理页）
-   │  op:'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'retry'  +  taskId  +  session
+   │  op:'inspect' | 'forget' | 'delete' | 'reveal' | 'cancel' | 'pause' | 'retry'  +  taskId  +  session
    ▼
 /api/smartdl.manage ──► readManagePayload（op 白名单 + taskId 白名单 + confirm 检查）
                           │

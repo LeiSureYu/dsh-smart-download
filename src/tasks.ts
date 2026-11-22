@@ -217,6 +217,17 @@ export function parseRetryRequest(raw: unknown, outPath?: string): RetryRequest 
   const url = typeof body.url === 'string' ? body.url.trim() : ''
   if (url === '') return undefined
 
+  // 输出路径里的控制字符与入参路径同一条纪律（1.9.3）：控制字符会成为 aria2
+  // stdin input-file 的选项注入载体（basename 不吞 `\n`）。记录里出现这种
+  // output 说明记录被改坏 / 被植入了奇怪的东西 —— 整条不可重试（返回
+  // undefined），而不是丢掉路径换一个默认名继续跑。
+  const controlFree = (value: string): boolean => !/[\u0000-\u001f\u007f]/.test(value)
+  if (
+    (typeof body.output === 'string' && !controlFree(body.output)) ||
+    (typeof outPath === 'string' && !controlFree(outPath))
+  ) {
+    return undefined
+  }
   const explicitOutput =
     typeof body.output === 'string' && path.isAbsolute(body.output) ? body.output : undefined
   const recordedOutput =

@@ -46,6 +46,16 @@ export interface TaskStatus {
     size: number;
     /** 记录里的 mtime（毫秒，1.4.0 新增）；`0` 表示没有记录。 */
     fileMtimeMs: number;
+    /**
+     * 产物**当前**的落盘字节数（1.9.3 新增，Issue #21）；`0` 表示文件不存在或不可读。
+     *
+     * 只对**非 running** 的任务核对（running 的尺寸本来就在变，核对结果没有意义），
+     * 且仅在记录里有 outPath 时才 stat。记录里的 `size` 是**终态那一刻**的快照，
+     * 而 `diskSize` 是查询时刻的真值 —— 两者不等就说明记录与磁盘脱节了（外部
+     * 脚本补完、用户手工处理过……）。消费方据此把「记录说失败、盘上其实已完整」
+     * 看出来，而不是永远盯着一张过期快照。
+     */
+    diskSize: number;
     /** 最近更新时间戳（毫秒） */
     updatedAt: number;
 }

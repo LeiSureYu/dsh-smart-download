@@ -45,12 +45,37 @@ export function isSupportedProtocol(protocol) {
     return SUPPORTED_PROTOCOLS.includes(protocol.toLowerCase());
 }
 /**
- * 校验待下载 URL：能解析成 URL 且协议在允许列表内。
+ * 校验待下载 URL：能解析成 URL、协议在允许列表内，且**原始字符串**干净。
+ *
+ * ⚠️ 为什么必须检查原始字符串而不只看解析结果（1.9.3，改动前务必先读）：
+ * WHATWG URL 解析会**静默删除**内嵌的 `\n` / `\r` / `\t` 与首尾空白 ——
+ * `new URL("http://a/x\nhttp://b/evil").href` 是干净的 `http://a/xhttp://b/evil`，
+ * 解析层完全看不出注入。但调用方真正交给下载器的是**原始字符串**：
+ * 带自定义请求头时 aria2 走 stdin 的 input-file（每行一个 URI / 选项），
+ * 原始 `\n` 会把这一行拆成任意多条 —— 实测（随包 aria2 1.37.0）可注入额外的
+ * 下载 URI（绕过 http(s) 白名单，aria2 支持 ftp://）与 per-download 选项
+ * （`dir=` 可写绝对路径，把产物写进任意目录）。这是与 0.4.1 file:// 同级的
+ * 协议逃逸，必须在门口拦下。
  *
  * @param rawUrl 调用方传入的原始地址
  * @returns 成功时给出解析后的 URL；失败时给出可直接回给模型的 reason
  */
 export function checkDownloadUrl(rawUrl) {
+    // 原始字符串里不许有任何 C0 控制字符或 DEL：合法 URL 不会包含它们，
+    // 而它们在 argv / stdin / 日志里的含义都不可控（见上方注释的注入路径）。
+    if (/[\u0000-\u001f\u007f]/.test(rawUrl)) {
+        return {
+            ok: false,
+            reason: 'url 含有控制字符（换行 / 制表符等）—— 无法作为安全的下载地址；' +
+                '请核对其来源后重新提供',
+        };
+    }
+    if (rawUrl !== rawUrl.trim()) {
+        return {
+            ok: false,
+            reason: `url 带有首尾空白：${JSON.stringify(rawUrl.slice(0, 80))}—— 请去除后再试`,
+        };
+    }
     let url;
     try {
         url = new URL(rawUrl);

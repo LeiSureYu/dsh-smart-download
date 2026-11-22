@@ -233,6 +233,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify tag matches package.json version
+        # 发布流水线对「npm 上已存在的版本」会静默 skip（npm view 命中即跳过）：
+        # 打错 tag（比如 v1.9.9 对应 package.json 1.9.3）的后果是整个 job 绿灯
+        # 但什么都没发出去。在这里 fail loudly，而不是静默空跑。
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag (v$tag) 与 package.json 版本 ($ver) 不一致 —— 本次 tag 不会发布任何东西。请修正 tag 或版本号。"
+            exit 1
+          fi
+          echo "tag v$tag == package.json $ver OK"
+
       - name: Restore binaries from all runners
         uses: actions/download-artifact@v4
         with:

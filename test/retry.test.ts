@@ -10,9 +10,10 @@ import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { STALE_RUNNING_RECORD_MS } from '../src/progress.js'
 import { startRetry } from '../src/index.js'
 import { readTaskRecord, resolveDownloadProgressDir } from '../src/progress.js'
 import {
@@ -214,4 +215,86 @@ test('重试：后台真正重新下载，最终记录变为 completed，且不�
     resetTaskRegistry()
     await server.close()
   }
+})
+
+test('重试：request.expectedSize 参与校验 —— 与远端声明不一致时拒绝（1.9.3 修正回归项）', async () => {
+  const body = Buffer.alloc(4096, 0x65)
+  const server = await startServer((req, res) => {
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'content-length': String(body.length),
+        'accept-ranges': 'bytes',
+        'content-type': 'application/octet-stream',
+      })
+      res.end()
+      return
+    }
+    res.writeHead(200, {
+      'content-length': String(body.length),
+      'accept-ranges': 'bytes',
+      'content-type': 'application/octet-stream',
+    })
+    res.end(body)
+  })
+  try {
+    const taskId = 'retry-expected-size'
+    const outPath = path.join(tmpRoot, `${taskId}.bin`)
+    writeRecord(taskId, {
+      request: {
+        url: `${server.base}/exp.bin`,
+        output: outPath,
+        expectedSize: 999_999, // 与远端声明的 4096 不一致
+      },
+    })
+    assert.deepEqual(startRetry(taskId), { started: true, taskId })
+    await waitFor(
+      () => readTaskRecord(taskId)?.status === 'failed',
+      '重试任务因 expectedSize 对账失败',
+    )
+    const record = readTaskRecord(taskId)
+    assert.ok(record)
+    assert.ok(
+      String(record.request?.expectedSize ?? '') === '999999',
+      '失败后 request 里的 expectedSize 必须原样保留（下次重试仍参与校验）',
+    )
+    // 字节数校验的失败必须是对账文案（2c-0），而不是别的错误
+    const raw = JSON.stringify(record)
+    assert.ok(
+      raw.includes('expectedSize'),
+      `失败记录应带上 expectedSize 对账信息，实际：${raw.slice(0, 400)}`,
+    )
+  } finally {
+    await server.close()
+  }
+})
+
+test('重试：过期 running 残迹（宿主中断）-> started:true（1.9.3 豁免）', async () => {
+  const taskId = 'retry-stale-running'
+  const outPath = writeRecord(taskId, {
+    status: 'running',
+    progress: 0.5,
+    updatedAt: Date.now() - STALE_RUNNING_RECORD_MS - 1000,
+    request: { url: 'http://127.0.0.1:9/never', output: path.join(tmpRoot, `${taskId}.bin`) },
+  })
+  const first = startRetry(taskId)
+  assert.deepEqual(first, { started: true, taskId }, '中断残迹必须可重试（从半包续传）')
+  await waitFor(
+    () => readTaskRecord(taskId)?.status === 'failed',
+    '重试对死端口会很快失败并写回终态',
+  )
+  assert.equal(existsSync(outPath), false, '死端口连不上，产物本来就不存在')
+})
+
+test('重试：新鲜 running 依旧 not-retryable（豁免只针对过期残迹）', () => {
+  writeRecord('retry-fresh-running', {
+    status: 'running',
+    progress: 0.5,
+    updatedAt: Date.now(),
+    request: { url: 'http://127.0.0.1:9/never', output: path.join(tmpRoot, 'retry-fresh-running.bin') },
+  })
+  assert.deepEqual(startRetry('retry-fresh-running'), {
+    started: false,
+    taskId: 'retry-fresh-running',
+    reason: 'not-retryable',
+  })
 })

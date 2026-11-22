@@ -65,14 +65,22 @@ export declare function aria2PathOverride(value?: string | undefined): string | 
  * 一个损坏的二进制，或一个不兼容的旧版本。直接把路径交给下载流程，失败会发生在
  * 「已经开始下载」之后；先验证则能在探测前就决定回退 curl，错误路径更短。
  *
+ * 为什么随包二进制也要过同一条 `--version` 判定（1.9.2，Issue #17）：resolve
+ * 成功 ≠ 能跑 —— 子包可能装了但二进制是坏的（darwin 1.37.0 先是 tarball 里
+ * 644 没执行位，补上执行位后又因静态链的 OpenSSL 缺 legacy provider 启动即
+ * 崩）。坏二进制若不拦截，每次下载都要先吃一次失败才退化 curl；先验证、
+ * 不过就落回 PATH（Homebrew 等用户自装来源），坏子包从此不再拖累探测。
+ *
  * 为什么环境变量被拒绝时不回落到子包 / PATH（1.9.1）：自动换一个来源会把
  * 配置错误静默掩盖掉 —— 用户以为在用自己指定的二进制，实际在用别的。
  * 返回 null 让调用方回退 curl，失败是显式的（decide() 的 reason 会提示
  * 检查该环境变量），而不是换一个来源悄悄继续。
  *
+ * @param resolveBundled 随包模块解析函数，默认 `require.resolve`；测试经此
+ *   注入「resolve 成功但二进制损坏 / 子包未安装」等场景，不必真实安装子包。
  * @returns 可执行的 aria2 路径；找不到或验证失败时返回 null（调用方回退 curl）
  */
-export declare function getAria2Path(): string | null;
+export declare function getAria2Path(resolveBundled?: (mod: string) => string): string | null;
 /**
  * 在 PATH 上查找可用的 aria2c，并验证它确实能执行。
  *
@@ -172,6 +180,46 @@ export interface ExitCodeDescription {
 }
 /** 退出码映射表（两个下载工具各一张，来源见上方说明） */
 export declare const EXIT_CODE_DESCRIPTIONS: Readonly<Record<DownloadMethod, Readonly<Record<number, ExitCodeDescription>>>>;
+/**
+ * 值得「自动续传重试一次」的 curl 退出码（1.9.3，Issue #21）。
+ *
+ * 背景（Issue #21 实测）：代理中继在传输尾部断开时，curl 先报 56（此时字节可能
+ * 已经全部落盘），随后 `--retry` 的重连全部撞上已死的中继端口报 7，最终以 7 收场。
+ * 这类「对端 / 代理暂时不可达、传输中途被掐」的故障，隔一小段时间再续传是有机会
+ * 成功的 —— 而确定性失败（22 = HTTP 4xx/5xx、33/36 = Range 被拒）重试同样的地址
+ * 只会再失败一次，不进这张表。
+ *
+ * 逐条来源（curl 官方 man page，与上方 EXIT_CODE_DESCRIPTIONS 同源核对）：
+ * - 7  无法建立连接（对端 / 代理拒绝或不可达）；
+ * - 18 传输不完整（PARTIAL_FILE：连接在收完数据前被断开）；
+ * - 28 超时（操作在时限内未完成）；
+ * - 52 服务器空回复（EMPTY_REPLY：连接开了但什么都没给）；
+ * - 55 发送数据失败（couldnt_send）；
+ * - 56 接收数据失败（couldnt_recv：连接被重置 / 对端中途关闭）。
+ *
+ * 刻意**不含** 35（SSL 握手失败）：握手失败绝大多数是证书 / 协议套件一类的
+ * 确定性配置问题，重试极小概率改变结果；而 7/18/28/52/55/56 在「代理刚重连、
+ * 对端抖动」场景下实测可自愈。
+ */
+export declare const TRANSIENT_CURL_EXIT_CODES: ReadonlySet<number>;
+/**
+ * 从 `describeExitCode` 生成的错误信息里解析退出码。
+ *
+ * 为什么解析自己的文案而不是改 `runProcess` 的签名传结构化错误：非零退出的
+ * 错误信息沿途要经过多层 catch（aria2 → curl 回退、批量编排、进度轨道），全部
+ * 改成自定义 Error 类型是一次大动干戈的重构；而这份文案是本仓库**唯一**的
+ * 生成源（`退出码 ${code}` 前缀固定），就地解析是最小的可靠接缝。
+ * 解析不出（spawn 失败的原始 Node 错误、取消文案、退出码 `未知`）返回 null。
+ */
+export declare function exitCodeFromMessage(message: string): number | null;
+/**
+ * 判定一次下载失败是否是「续传重试可能成功」的瞬时连接故障。
+ *
+ * 只认 curl 退出码（见 `TRANSIENT_CURL_EXIT_CODES`）：aria2 的终局失败必然已经
+ * 走过 curl 回退，终端错误是 curl 的；spawn 失败（ENOENT 等）与取消、完整性
+ * 校验失败都没有退出码，一律不算瞬时故障。
+ */
+export declare function isTransientDownloadError(err: unknown): boolean;
 /**
  * 把退出码翻译成给用户看的错误消息；退出码为 0 时返回 `null`。
  *

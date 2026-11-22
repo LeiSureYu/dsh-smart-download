@@ -21,12 +21,20 @@ import { DEFAULT_STATUS_LIMIT, MAX_STATUS_LIMIT, readDownloadStatus } from './st
 import { cleanupHistory, readCleanupQuery } from './cleanup.js'
 import {
   isSafeTaskId,
+  readTaskRecord,
   removeTaskRecords,
   resolveDownloadProgressDir,
   resolveTaskProgressDir,
+  STALE_RUNNING_RECORD_MS,
 } from './progress.js'
 import type { ProgressSession } from './progress.js'
-import { cancelRunningTask, getRetryHandler, isKnownTask, pauseRunningTask } from './tasks.js'
+import {
+  cancelRunningTask,
+  getRetryHandler,
+  isKnownTask,
+  isRunning,
+  pauseRunningTask,
+} from './tasks.js'
 import type { RetryStartResult } from './tasks.js'
 
 /** 共享 API 载体的路径前缀（与 @deepseek-ai/dsh-client-connection 的 API_PATH 一致）。 */
@@ -162,10 +170,16 @@ function readPayload(payload: unknown): StatusQuery {
   }
   const body = payload as { limit?: unknown; session?: unknown }
   const n = Number(body.limit)
+  // limit 是只读查询的「最多返回几条」：显式给了数字（含 0）就按字面截断，
+  // 没给（undefined / null —— JSON 里两者都是「没给」）/ 给了非数字才回落
+  // 默认。注意 Number(null) === 0，必须先把 null 当成缺席处理，否则一条
+  // limit:null 的查询会静默变成「返回 0 条」（1.9.3）。
   const limit =
-    Number.isFinite(n) && n > 0
-      ? Math.min(MAX_STATUS_LIMIT, Math.floor(n))
-      : DEFAULT_STATUS_LIMIT
+    body.limit === undefined || body.limit === null
+      ? DEFAULT_STATUS_LIMIT
+      : Number.isFinite(n)
+        ? Math.max(0, Math.min(MAX_STATUS_LIMIT, Math.floor(n)))
+        : DEFAULT_STATUS_LIMIT
 
   const session = readSession(body.session)
   return session === undefined ? { limit } : { limit, session }
@@ -460,7 +474,12 @@ type TargetCheck =
 
 /** `path.relative` 判定「child 是否在 parent 之内」（含相等）。 */
 function isUnder(parent: string, child: string): boolean {
-  const rel = path.relative(parent, child)
+  // Windows 的路径比较必须大小写不敏感（1.9.3 加固）：NTFS / Win32 的文件查找
+  // 对大小写不敏感，而 `path.relative` 是纯字符串比较 —— 不折叠的话，
+  // `C:\Users\X\.DSH\DOWNLOADS\TASKS\t.json` 这种记录能绕过 R9 的「不许删自己
+  // 的记录目录」再被正常 unlink。POSIX 大小写敏感，原样比较。
+  const fold = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p)
+  const rel = path.relative(fold(parent), fold(child))
   if (rel === '') return true
   return !rel.startsWith('..') && !path.isAbsolute(rel)
 }
@@ -536,10 +555,37 @@ function presenceOf(check: TargetCheck, found: boolean): ManagePresence {
   }
 }
 
-/** 按 taskId 读记录（合并两条轨道），返回 TaskStatus 或 undefined。 */
+/**
+ * 按 taskId 读记录，供 manage 端点做**路径性 / 破坏性**动作（inspect / delete /
+ * reveal / cancel / pause）。只读**轨道二**（`readTaskRecord`）。
+ *
+ * ⚠️ 为什么不能像状态展示那样合并两条轨道（1.9.3 安全加固，改动前务必先读）：
+ * 轨道一的目录由**客户端 payload 里的 `session.cwd`** 推导（`resolveTaskProgressDir`
+ * 只校验 `id` 的形状，`cwd` 是任意客户端字符串）。合并两条轨道意味着一条客户端
+ * 指定目录下被植入的 `.jsonl`（内容含任意 `outPath`，且可以不带 `size` 让 R6
+ * 尺寸核对整个被跳过）会**覆盖**轨道二里本插件自己写下的同 id 记录 —— 于是
+ * `delete` 的 `unlinkSync(task.outPath)` 与 `retry` 的输出路径都能被指向任何
+ * 绝对路径，R1「删除目标只能来自本插件自己写下的记录」的前提被架空。
+ *
+ * 轨道二的目录（`resolveDownloadProgressDir`）由服务端配置（DSH_HOME / env）
+ * 推导，客户端影响不到 —— 本插件写下的记录必然在这里，manage 动作以它为唯一
+ * 事实来源是**无损**的（展示层的 `readDownloadStatus` 仍合并两条轨道，不受影响）。
+ */
 function findTask(taskId: string, session?: ProgressSession) {
-  // limit 传 1：已经按 taskId 过滤过，过滤发生在截断之前（见 readDownloadStatus）
-  return readDownloadStatus(1, taskId, session).tasks[0]
+  void session
+  const record = readTaskRecord(taskId)
+  if (!record) return undefined
+  // 归一成 manage 消费方用到的字段形状（readTaskRecord 的可选字段在这里收敛，
+  // 与 TaskStatus 的空串 / 0 哨兵同口径：checkManagedTarget 对 0 尺寸跳过 R6）
+  return {
+    id: record.id,
+    name: record.name ?? '',
+    status: record.status,
+    outPath: typeof record.outPath === 'string' ? record.outPath : '',
+    size: typeof record.size === 'number' && record.size > 0 ? record.size : 0,
+    fileMtimeMs: typeof record.fileMtimeMs === 'number' ? record.fileMtimeMs : 0,
+    updatedAt: typeof record.updatedAt === 'number' ? record.updatedAt : 0,
+  }
 }
 
 /**
@@ -685,7 +731,12 @@ export async function revealManagedTask(
  * 推导（R2 + `taskRecordFiles` 的 lstat 校验），不接受调用方给路径。
  */
 export function forgetManagedTask(taskId: string, session?: ProgressSession): string[] {
-  return removeTaskRecords(taskId, session)
+  // 1.9.3 安全加固：不再按客户端 payload 的 `session.cwd` 去清理轨道一 ——
+  // 与 findTask 只读轨道二同一条理由（轨道一目录由客户端字符串推导，能被指向
+  // 任意目录）。轨道二目录由服务端配置推导，本插件写下的记录必然在那里；
+  // 轨道一的会话记录本来就是临时产物，随会话目录一起消失即可。
+  void session
+  return removeTaskRecords(taskId)
 }
 
 /**
@@ -792,9 +843,22 @@ export function deleteManagedTask(
   if (!task) {
     return { fileDeleted: false, reason: 'no-path', recordRemoved: [], irreversible }
   }
+  // **R8 前置（1.9.3 加固）**：进程内注册表是「正在跑」的**权威**信号。进度
+  // 记录是异步落盘的快照 —— 重试刚发起的瞬间，磁盘上的记录可能还停在 failed
+  // （终态尚未被改写），只看记录会漏判；而此刻产物恰好与记录尺寸一致（续传
+  // 从断点开始，第一个字节落地前 R6 也会通过），删下去就是删掉正在写的文件。
+  if (isRunning(taskId)) {
+    return { fileDeleted: false, reason: 'running', recordRemoved: [], irreversible }
+  }
   // **R8**：任务还在跑。此时删产物会让正在写的 aria2 进入诡异状态，也不符合
   // 用户此刻的本意（他多半想取消，而不是删除）。记录同样保留。
-  if (task.status === 'running') {
+  // 豁免（1.9.3）：不在本进程注册表（isRunning 已在上面排除）且记录超过
+  // STALE_RUNNING_RECORD_MS 没有更新 —— 这是宿主中断留下的残迹（或共享
+  // DSH_HOME 的另一个实例没来得及被启动清扫覆盖），不再是「正在跑」。
+  if (
+    task.status === 'running' &&
+    Date.now() - task.updatedAt <= STALE_RUNNING_RECORD_MS
+  ) {
     return { fileDeleted: false, reason: 'running', recordRemoved: [], irreversible }
   }
 

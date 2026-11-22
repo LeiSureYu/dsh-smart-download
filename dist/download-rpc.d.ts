@@ -1,10 +1,7 @@
+import type { Aria2Observation } from './downloader.js';
 import type { ProgressReporter } from './progress.js';
 import type { RequestHeaders } from './types.js';
-export interface Aria2RpcObservation {
-    throughput: number;
-    concurrency: number;
-    cn: number;
-}
+export type Aria2RpcObservation = Aria2Observation;
 export declare function downloadWithAria2Rpc(opts: {
     url: string;
     outputPath: string;
@@ -15,4 +12,4 @@ export declare function downloadWithAria2Rpc(opts: {
     headers?: RequestHeaders;
     maxDownloadLimitBytes?: number;
     proxy?: string;
-}): Promise<Aria2RpcObservation | undefined>;
+}): Promise<Aria2Observation | undefined>;

@@ -418,6 +418,9 @@ test('smart_download.output schema：单条与批量都声明新增字段（1.5.
       items: { properties: Record<string, unknown>; additionalProperties?: boolean }
     }
   ).items
+  // 1.9.3 补测：paused 只在批量 item 上出现（单条目路径暂停时直接抛错，不返回结果对象）
+  assert.ok(item.properties['paused'], '批量 item output 必须声明 paused（runBatch 会真的发出它）')
+  assert.equal(single!.properties['paused'], undefined, '单条 output 不声明 paused（暂停走抛错路径）')
   for (const key of ['checksum', 'checksumAlgorithm', 'skipped', 'diskCheckSkipped']) {
     assert.ok(single!.properties[key], `单条 output 必须声明 ${key}`)
     assert.ok(item.properties[key], `批量 item output 必须声明 ${key}`)

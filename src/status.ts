@@ -70,6 +70,16 @@ export interface TaskStatus {
   size: number
   /** 记录里的 mtime（毫秒，1.4.0 新增）；`0` 表示没有记录。 */
   fileMtimeMs: number
+  /**
+   * 产物**当前**的落盘字节数（1.9.3 新增，Issue #21）；`0` 表示文件不存在或不可读。
+   *
+   * 只对**非 running** 的任务核对（running 的尺寸本来就在变，核对结果没有意义），
+   * 且仅在记录里有 outPath 时才 stat。记录里的 `size` 是**终态那一刻**的快照，
+   * 而 `diskSize` 是查询时刻的真值 —— 两者不等就说明记录与磁盘脱节了（外部
+   * 脚本补完、用户手工处理过……）。消费方据此把「记录说失败、盘上其实已完整」
+   * 看出来，而不是永远盯着一张过期快照。
+   */
+  diskSize: number
   /** 最近更新时间戳（毫秒） */
   updatedAt: number
 }
@@ -241,6 +251,9 @@ function collectFromDir(
         outPath: str(rec.outPath),
         size: num(rec.size),
         fileMtimeMs: num(rec.fileMtimeMs),
+        // 1.9.3：先落 0，磁盘核对统一在 readDownloadStatus 合并之后做
+        // （一个任务可能同时出现在两条轨道，逐轨道 stat 会白查一遍）
+        diskSize: 0,
         updatedAt: mtimeMs,
       })
       continue
@@ -268,8 +281,9 @@ function collectFromDir(
       id,
       name: str(rec.name),
       pct,
-      // 轨道二没有独立的状态文案，沿用旧行为用任务名兜底
-      msg: str(rec.name),
+      // 轨道二通常没有独立的状态文案（用任务名兜底）；1.9.3 起启动清扫会在
+      // 中断记录里写显式 msg（见 progress.ts 的 DownloadTaskFile.msg），有就优先
+      msg: str(rec.msg) || str(rec.name),
       status,
       spd: str(rec.speed),
       eta: str(rec.eta),
@@ -279,6 +293,8 @@ function collectFromDir(
       outPath: str(rec.outPath),
       size: num(rec.size),
       fileMtimeMs: num(rec.fileMtimeMs),
+      // 与轨道一同一处先落 0，合并后统一核对（见上方分支的注释）
+      diskSize: 0,
       updatedAt: Number.isFinite(updatedRaw) && updatedRaw > 0 ? updatedRaw : mtimeMs,
     })
   }
@@ -326,20 +342,35 @@ export function readDownloadStatus(
       // 仍然拿得到较新的那个轨道已经写下来的信息。
       // 1.4.0 的 outPath / size / fileMtimeMs 同理：任一轨道缺就在另一条里找，
       // 否则「轨道一先写、轨道二还没写」的瞬间会让管理端点误判成「没记录路径」。
-      merged.set(
-        id,
-        existing
-          ? {
-              ...existing,
-              ...task,
-              name: task.name || existing.name,
-              batch: task.batch || existing.batch,
-              outPath: task.outPath || existing.outPath,
-              size: task.size || existing.size,
-              fileMtimeMs: task.fileMtimeMs || existing.fileMtimeMs,
-            }
-          : task,
-      )
+      const mergedTask = existing
+        ? {
+            ...existing,
+            ...task,
+            name: task.name || existing.name,
+            batch: task.batch || existing.batch,
+            outPath: task.outPath || existing.outPath,
+            size: task.size || existing.size,
+            fileMtimeMs: task.fileMtimeMs || existing.fileMtimeMs,
+          }
+        : task
+      // 终态权威（1.9.3）：任一轨道给了终态，状态取那个终态。跨轨道写盘的间隙
+      // 会产生「一边终态、一边还在运行中」的组合 —— 宿主崩溃后启动清扫把轨道二
+      // 改写成 failed，而轨道一（残留在已消失的会话目录里）最后一行还是 running；
+      // 若按轨道一覆盖，面板会永远显示下载中。终态记录是更强的信号：它只有在
+      // 下载器真正结束（或启动清扫判定中断）时才会被写下。
+      if (
+        existing !== undefined &&
+        existing.status !== 'running' &&
+        task.status === 'running'
+      ) {
+        mergedTask.status = existing.status
+        // 轨道二的 msg 只有显式写入（启动清扫的中断说明）才优于轨道一的最后
+        // 运行文案；名字兜底（无 msg 字段的旧记录）不如轨道一的信息量大。
+        mergedTask.msg =
+          existing.msg !== '' && existing.msg !== existing.name ? existing.msg : task.msg
+        mergedTask.updatedAt = Math.max(existing.updatedAt, task.updatedAt)
+      }
+      merged.set(id, mergedTask)
     }
   }
 
@@ -348,11 +379,45 @@ export function readDownloadStatus(
   if (batchId) tasks = tasks.filter((t) => t.batch === batchId)
 
   const total = tasks.length
+  // cap 语义 = 参数文档的「Maximum number of tasks to return」：显式给了数字
+  // （含 0 与小数）就按字面截断 —— limit: 0 返回空列表，而不是被静默改写成
+  // 默认的 10 条（1.9.3 修正）；没给 / 给了非数字才回落默认值。
   const cap =
-    Number.isFinite(limit) && limit > 0
-      ? Math.min(MAX_STATUS_LIMIT, Math.floor(limit))
-      : DEFAULT_STATUS_LIMIT
+    limit === undefined
+      ? DEFAULT_STATUS_LIMIT
+      : Number.isFinite(limit)
+        ? Math.max(0, Math.min(MAX_STATUS_LIMIT, Math.floor(limit)))
+        : DEFAULT_STATUS_LIMIT
   tasks = tasks.slice(0, cap)
+
+  // 1.9.3（Issue #21）：终态任务的记录与磁盘可能已经脱节 —— Issue #21 里那条
+  // 「57% 失败」的记录，几分钟后被外部脚本补完了，记录却永远停在失败。这里做
+  // 一次**只读**的核对（lstat，不跟进符号链接、不写任何文件）：把当前落盘字节
+  // 数带给消费方；文件在记录之后变大了的，再在文案上补一句「可能已被外部补完」，
+  // 面板与模型不用再去磁盘上猜。只核对返回的这一页（上限 50 条），一次查询
+  // 最多 50 个 lstat，对轮询中的面板可以忽略不计。
+  for (const task of tasks) {
+    if (task.status === 'running') continue
+    if (task.outPath === '') continue
+    let diskSize = 0
+    try {
+      const st = fs.lstatSync(task.outPath)
+      if (st.isFile()) diskSize = st.size
+    } catch {
+      // 不存在 / 不可读：保持 0（= 没有可读文件），不做任何断言
+    }
+    task.diskSize = diskSize
+    // 「记录过期」的文案只标注终态非完成的三种状态：completed 之后文件被外部
+    // 改动属于另一类问题（管理端点 inspect 的 presence 已覆盖），且对完成记录
+    // 说「可能已被外部补完」是自相矛盾的。
+    if (
+      diskSize > task.size &&
+      task.size > 0 &&
+      (task.status === 'failed' || task.status === 'cancelled' || task.status === 'paused')
+    ) {
+      task.msg = `${task.msg}（注：记录之后文件已增长到 ${diskSize} 字节 —— 可能已被外部补完，可重试核对）`
+    }
+  }
 
   // 只有「两个目录都读不到」才判失败：那时调用方拿到的空列表是**无信息**的，
   // 必须能与「扫过了、确实没有任务」区分开。没有会话上下文时 taskDir 为 null

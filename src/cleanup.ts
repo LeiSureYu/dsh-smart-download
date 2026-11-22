@@ -24,6 +24,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {
+  isSafeTaskId,
   resolveDownloadProgressDir,
   resolveTaskProgressDir,
 } from './progress.js'
@@ -206,6 +207,12 @@ function collectCandidates(
     if (!name.endsWith(ext)) continue
     const id = name.slice(0, -ext.length)
     if (!id) continue
+    // 文件名白名单（1.9.3 加固）：本插件写下的记录文件名**必然**是合法 taskId
+    // （progress.ts 的 TASK_ID_RE）。轨道一目录可能来自客户端 payload 的
+    // session.cwd（任意客户端字符串），不做这道闸的话，一个被指到任意目录的
+    // 清理请求就能删掉该目录结构下任意命名的 *.jsonl —— 只有「长得像本插件
+    // 记录」的文件才有资格进候选。
+    if (!isSafeTaskId(id)) continue
     const file = path.join(dir, name)
     try {
       // lstat（而非 stat）：符号链接要按链接本身判断，不能跟进目标

@@ -11,6 +11,145 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-23
+
+**Issue #21 修复：失败定案前先核对落盘字节 —— 连接中断但文件已完整时按成功收尾，
+不再记成（永不复核的）failed；瞬时连接故障退避后自动续传重试一次；失败记录与
+`download_status` 写明落盘字节真相。**
+
+**Issue #21 fixed: verify on-disk bytes before finalizing a failure — a download
+whose bytes are already complete despite the dropped connection now finishes as a
+success instead of a permanently stale failed record; transient connection errors
+get one automatic resume retry after a short backoff; failure records and
+`download_status` now carry the disk truth.**
+
+**2.0.0 —— 接线 1.9.0 的 aria2 常驻 RPC daemon（修复其三个隐患后），连同全项目
+审计修复一并发布。major 版本号对应两处行为变化：下载默认经常驻 daemon
+（`DSH_SMARTDL_ARIA2_RPC=off` 可完全回到 2.0 之前的 spawn 路径）；manage 端点
+只认轨道二记录（安全加固，见下）。**
+
+**2.0.0 — wires up the aria2 resident RPC daemon from 1.9.0 (after fixing its
+three latent defects), shipping together with the project-wide audit fixes.
+The major version reflects two behavior changes: downloads now go through a
+resident daemon by default (`DSH_SMARTDL_ARIA2_RPC=off` restores the pre-2.0
+spawn path), and the manage endpoints trust only track-2 records (see Security
+below).**
+
+### 特性 / Added
+
+- **aria2 常驻 RPC daemon 正式接线（1.9.0 遗留项，勘误见下）**：`smart_download`
+  的 aria2 路径默认改为「RPC 优先」—— `addUri` + `tellStatus` 结构化轮询取代
+  stdout 摘要解析，暂停/继续为 `aria2.pause` 原地语义。接线前修掉审计发现的三个
+  隐患：① daemon 崩溃检测（传输层失败即作废状态、清理残骸，auto 模式下 spawn
+  从 `.aria2` 控制文件断点接续，下一次下载自动重建 daemon；1.9.0 的实现会对着
+  死端口永远失败）；② `rpc-secret` 改走一次性 conf 文件（`--conf-path`，启动
+  就绪后立即删除——argv 与磁盘都不再有 secret；1.9.0 把它放在进程命令行上，
+  本机任意同权限进程可读）；③ pause/remove 打在已完成 gid 上的完成竞态按真实
+  完成收尾（1.9.0 会给已完成的下载盖 cancelled 终态），且 paused gid 会从 daemon
+  队列移除（控制文件在盘上，重试据此续传；1.9.0 会让它们永远滞留内存）。
+  模式开关 `DSH_SMARTDL_ARIA2_RPC=auto|on|off`：`auto`（缺省）daemon 层失败自动
+  降级 spawn，`on` 强制 RPC，`off` 完全回到 2.0 之前的 spawn 路径。RPC 路径的
+  `all-proxy` 经 `addUri` 选项传递，不再出现在 aria2 进程命令行上。
+
+### 勘误 / Errata
+
+> **`src/rpc-daemon.ts` / `src/download-rpc.ts`（1.9.0 引入的 aria2 常驻 RPC daemon）自发布以来从未被接线运行。**
+> 全仓库审计（1.9.3）确认：`src/` 与 `dist/` 中没有任何模块 import 它们（1.9.0 提交信息
+> 所称「index.ts: RPC preferred, spawn as fallback」与事实不符）。因此 1.9.0 至 1.9.3
+> CHANGELOG 中「aria2 下载优先走 RPC daemon、暂停为 `aria2.pause` 原地语义（23ms）、
+> daemon 不可用降级 spawn」的表述在**运行时从未生效** —— 下载始终走 spawn 路径，
+> 暂停始终是「进程中止 + paused 终态」（1.8.0 行为，真实存在）。两个模块与其测试
+> 作为代码存在且测试通过，但属于死代码。1.10.0 的待决事项：修掉审计发现的三个
+> 隐患（daemon 崩溃无检测、rpc-secret 在 argv 上可被本机进程读取、`aria2.pause`
+> 打在已完成 gid 上会误写 cancelled 终态）后接线（`DSH_SMARTDL_ARIA2_RPC=auto|on|off`
+> 灰度），或降级移除。详见 docs/ARCHITECTURE.md 的审计备注。 2.0.0 已完成接线：三个隐患全部修复，模式开关
+> `DSH_SMARTDL_ARIA2_RPC=auto|on|off` 见「特性」段；本段保留作为 1.9.0–1.9.3 的历史勘误。
+
+### 安全 / Security
+
+> 以下各项来自 1.9.3 的全项目审计（含独立审计代理 + 真实 aria2/curl 端到端验证）。
+
+- **URL 控制字符注入（P1，实测可复现）**：WHATWG URL 解析会静默删掉内嵌的换行 / 制表符，而调用方真正交给下载器的是**原始字符串** —— 带自定义请求头时 aria2 走 stdin 的 input-file（每行一个 URI / 选项），原始换行会把这一行拆成任意多条。实测（随包 aria2 1.37.0）：内嵌换行的 URL 会下载两个 URI（**绕过 http(s) 协议白名单**，aria2 支持 ftp://）；`换行 + dir=C:目标目录` 能把 `-d` 覆盖掉、把攻击者字节写进任意绝对路径。现在 `checkDownloadUrl` 对**原始字符串**拒绝一切 C0 控制字符与首尾空白。
+- **output 参数同源注入（P2，实测可复现）**：output 里内嵌换行的 basename 不吞换行，能往 aria2 的本次下载注入 `header=` 等选项。preflight 与 `parseRetryRequest` 均拒绝带控制字符的输出路径（后者整条不可重试）。
+- **manage 端点只认轨道二（session.cwd 加固）**：`inspect` / `delete` / `reveal` / `cancel` / `pause` 此前合并两条轨道，而轨道一目录由客户端 payload 的 `session.cwd` 推导（任意客户端字符串）—— 一条被指到任意目录的植入记录（内容含任意 outPath、可不带 size 让尺寸核对整个被跳过）会覆盖轨道二的同 id 记录，让 `delete` 的 unlink 与 `retry` 的输出路径指向任意绝对路径。现在 manage 只读轨道二（目录由服务端配置推导，客户端影响不到）；`forget` 同理不再清理客户端 session 指向的目录。展示层的 `download_status` 不变。
+- **代理凭据不再回显**：带 userinfo 的代理（`http://user:pass@corp:3128` 是标准企业配置）此前会整串出现在工具结果的 `proxy` 字段里。现在结果层脱敏为 `http://***@corp:3128`（子进程 argv 仍需完整值，属已知限制，见 TROUBLESHOOTING）。
+- **Windows 大小写绕过**：`checkManagedTarget` 的「不许删自己记录目录」判定（R9）改为 win32 上大小写不敏感比较，堵住 `.DSHDOWNLOADSTASKS...` 这类变体绕过。
+
+### 修复 / Fixed
+
+- **aria2 分片半包不再被 curl 续传（回退安全闸）**：aria2 分片写入 —— 未完成分片
+  之间是零字节空洞，**文件长度只反映写得最远的分片**。实测（随包 aria2 1.37.0
+  @ win32）：64MB、8 连接、`--file-allocation=none`，中途硬杀后落盘 92%，但内部有
+  35MB 空洞。aria2 失败回退 curl 时若带着 `-C -`（续传已被 planResume 批准的场景），
+  curl 会从「文件长度」接着写，拼出**长度正确、内容错误**的文件 —— 字节数校验拦不住
+  （长度恰好对），只有调用方给了摘要才可能被发现。现在回退前检查 `.aria2` 控制文件：
+  在（= aria2 真的写过分片）→ 整体丢弃半包、curl 全量重下，进度轨道写明丢弃原因；
+  不在（= aria2 一个字节都没碰）→ 磁盘上仍是 planResume 批准过的连续前缀，维持原
+  续传决定。与 0.6.0「宁可重下，不拿坏文件」同一哲学；只有 aria2 能按分片续这种
+  半包，而走到回退恰恰说明 aria2 刚刚失败。
+- **失败定案前的落盘核对（Issue #21 核心）**：`smart_download` 的 curl 失败分支
+  （含 aria2 失败回退 curl 后仍失败）此前只看退出码 —— Issue #21 实测传输尾部断开
+  （curl 56 → 重试撞上已死代理 → 7）时 239 MB 文件已完整落盘（SHA-256 与上游 LFS
+  oid 一致），却被记成「100% 失败」且永远不会被复核。现在失败定案前先用与成功路径
+  **同一把尺子**（`verifySize`，含 expectedSize 基准与压缩编码豁免）核对落盘字节：
+  - 字节已完整 → 按成功收尾（给了 `sha256` / `checksum` 时仍做哈希校验），完成文案
+    写明「下载完成（连接中断，但落盘字节已完整）」，旁车指纹照常清除；
+  - 字节不完整 / 没有可比基准 → 维持失败语义，但失败文案带上落盘事实：
+    「已落盘 X / 应为 Y 字节，半包与旁车指纹已保留，可续传」。
+- **瞬时连接故障自动续传一次**：curl 退出码 7（无法连接）/ 18（传输不完整）/
+  28（超时）/ 52（空回复）/ 55 / 56（收发失败）判定为瞬时故障，退避 3 秒后
+  **自动续传重试一次**（复用本次调用 `planResume()` 的指纹核对结论与 `-C -`）。
+  重试成功按「下载完成（自动续传）」记录；恰好一次，不会反复重试；确定性失败
+  （22 = HTTP 4xx/5xx、33/36 = Range 被拒）不重试。进度轨道在等待期以 `note()`
+  保持当前百分比（`report(0, …)` 会把进度归零，半包还在时那是谎报）。
+- **curl 退出码 7 进了翻译表**：Issue #21 的日志形态正是 7（代理中继死后 `--retry`
+  全部撞上拒绝连接），此前它是未知码、只有裸退出码与 stderr。现在给出原因与下一步
+  （确认地址与代理；瞬时故障会自动续传重试一次）。
+- **`download_status` / 下载管理器的只读落盘核对（Issue #21 建议 3）**：非 running
+  任务且记录里有 `outPath` 时，读取端 lstat 一次产物，新增 `diskSize` 字段（当前落盘
+  字节数；0 = 没有可读文件）。记录里的 `size` 是终态那一刻的快照，两者不等即「记录与
+  磁盘脱节」；失败 / 取消 / 暂停记录的文件在记录之后**变大**过时，文案追加「记录之后
+  文件已增长到 N 字节 —— 可能已被外部补完，可重试核对」（Issue #21 的第二个文件被
+  外部脚本补完后记录永远停在 57% 失败，就是这种形态）。状态本身不翻转 —— 读取端
+  是纯只读展示层，改写历史与重试/删除属于管理端点。
+- **前台批量 + 管理器暂停 = 整批结果被校验拒掉（P1）**：`runBatch` 会给被暂停
+  的条目发 `paused: true`，而批量 item 的 output schema（additionalProperties:
+  false）从未声明过它 —— 用户在前台批量运行中点「暂停」，整批调用结果（含成功
+  条目）会被宿主的输出校验整体丢弃，模型只看到校验错误。schema 补上该字段；
+  `renderBatch` 的文案标签也补上 `[paused]`（此前被标成 `[failed]`，正是
+  1.0.0 修过的「取消与失败混为一谈」在第三个终态上的复发）。
+- **重试丢失 expectedSize**：`parseRetryRequest` 持久化了它、类型注释也写着
+  「重试时同样参与字节数校验」，但 `startRetry` 构造下载条目时没带上 —— 从
+  管理器重试一条带 expectedSize 的任务会静默失去字节数校验与远端长度对账。
+- **下载管理器四则**：全选框点第二次无法取消全选（无条件覆盖了取消分支）；
+  「重试全部失败」在全被拒时仍报「已发起重试」且词典缺 `retryAllNone` 键；
+  终态音效去重键缺 `updatedAt`（失败 → 重试 → 再失败永远静音，与代码自述意图
+  相反）；逐行勾选框的 aria-label 全是「全选」；批量删除用渲染期快照覆盖用户
+  批量期间的勾选变更；管理页在首轮轮询落库前打开时，行集变化会补一轮 inspect
+  （此前那些行的 presence 恒为 unknown、「在文件夹中显示」恒置灰）。
+- **吞吐缓存 TTL 只对「会被再次下载的主机」成立**：下过一次就再也没碰过的主机
+  的缓存文件此前永不清理（隐私口径与 24h TTL 都只剩一半）。写入侧每次顺手清扫
+  全目录中早于 TTL 的条目。
+- **`download_status` 的 limit 语义对齐文档**：显式 `limit: 0` / 负数此前被
+  静默改写成默认的 10 条；现在按字面返回空列表（非数字仍回落默认；RPC 侧
+  `limit: null` 视为未给，避免 `Number(null) === 0` 误判）。
+- **决策层注释过期**：`decide()` 的注释仍称吞吐缓存「还没有写入者」—— 写入侧
+  1.3.0 就已接通，照注释维护会把抬档当死代码删掉。已更正。
+- **宿主中断的 running 残迹不再永久卡死**：崩溃 / 被杀后，正在下载的任务记录停在
+  running —— 面板显示下载中、删除被 R8 拒、重试被 not-retryable 拒。现在 `apply`
+  时清扫轨道二：超过 30 分钟（`STALE_RUNNING_RECORD_MS`）没有更新的 running 记录
+  改写为 failed，msg 写明「宿主中断，任务已终止（半包保留，可在管理器重试续传）」；
+  manage 的 `delete` 与重试入口对「不在本进程注册表且已过期」的 running 记录另有
+  豁免（覆盖多实例共享 `DSH_HOME` 时清扫窗口的缝隙）。误伤活下载由活进程的下一条
+  进度写盘自愈（last-write-wins）。配套：轨道二记录新增可选 `msg` 字段（清扫的
+  中断说明），`download_status` 的合并规则改为「终态权威于运行态」—— 任一轨道给了
+  终态，状态取终态（此前轨道一的 running 最后一行会把清扫结果盖回下载中）。
+
+### 文档 / Docs
+
+- 排错文档新增「下载记成失败但文件其实已经完整」条目（修复行为、三种出路、以及
+  大文件建议携带 `expectedSize` / 官方摘要 —— Issue #21 建议 4）。
+
 ## [1.9.2] - 2026-11-10
 
 **Issue #17 双缺陷修复：① 子包 `bin` 字段从安装侧兜底补回可执行位；② darwin

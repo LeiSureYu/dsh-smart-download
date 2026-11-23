@@ -11,7 +11,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 分支 | `main` = `efcdbdc`，工作区干净，与 origin 同步 |
+| 分支 | 2.0.0 的发布提交是 `efcdbdc`；`main` 头在它之后还有 docs 提交（`9b2f8a1`、`8cb4a1d`…）。
+  **main 头 ≠ 发布 tag 指向的提交，属正常**，docs-only 提交不需要为新版本重新打 tag |
 | 发布 tag | `v2.0.0`（轻量 tag）**指向 `efcdbdc`** |
 | npm | `@leisureyu/dsh-smart-dl@2.0.0` 已发布，`dist-tags.latest` = `2.0.0` |
 | GitHub Release | `v2.0.0` 已建（2026-11-23），target `main`、无附件；**这一步不在 CI 里**，见第 4 节 |

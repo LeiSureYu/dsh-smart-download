@@ -20,7 +20,9 @@
  *      已完成的下载盖成 cancelled（见 download-rpc.ts 的 RpcCompletedRace）。
  *
  * 生命周期绑定（SPIKE Q1 实测）：
- * - POSIX：daemon 带 `--stop-with-pid=<插件进程 pid>`，插件死亡 daemon 跟随退出；
+ * - POSIX：daemon 带 `--stop-with-process=<插件进程 pid>`，插件死亡 daemon 跟随退出；
+ *   选项名是 `--stop-with-process`（aria2 1.36+），**不是** `--stop-with-pid`——
+ *   后者不存在，aria2 会以 `unrecognized option` 直接退出，daemon 一次都起不来；
  * - Windows：该选项不存在，改为 stdin-EOF watchdog——插件持有 watchdog 的
  *   stdin 管道，插件死亡 → EOF → watchdog 杀 daemon 后退出。两平台都保证
  *   「daemon 绝不比插件进程活得更久」。
@@ -123,7 +125,7 @@ export async function ensureDaemon() {
             // 端口：随机起一个，绑定失败换端口重试（最多 3 次）
             for (let attempt = 0; attempt < 3; attempt++) {
                 const port = 17800 + Math.floor(Math.random() * 1000) + attempt * 7;
-                const stopWithPid = process.platform !== 'win32';
+                const useStopWithProcess = process.platform !== 'win32';
                 const args = [
                     '--enable-rpc=true',
                     '--rpc-listen-port=' + port,
@@ -134,15 +136,19 @@ export async function ensureDaemon() {
                     '--max-connection-per-server=8',
                     '--console-log-level=warn',
                 ];
-                if (stopWithPid) {
-                    // POSIX：--stop-with-pid 存在且实测可用；插件死亡 daemon 跟随退出
-                    args.push('--stop-with-pid=' + process.pid);
+                if (useStopWithProcess) {
+                    // POSIX：--stop-with-process=PID 存在（aria2 1.36+）；插件死亡 daemon 跟随退出。
+                    // 选项名不能写成 --stop-with-pid：aria2 不认识它，会立刻以
+                    // "unrecognized option" 退出，pollReady 三次全超时 —— 2.0.0 交付时
+                    // Linux/macOS 上 RPC daemon 就是这么一次都没起来过（CI 的 Test 步骤红在
+                    // test/rpc-daemon.test.ts 的 4 条用例）。
+                    args.push('--stop-with-process=' + process.pid);
                 }
                 // Windows：该选项不存在（SPIKE Q1b 实测）。watchdog 模式：
                 // 插件持有 watchdog 的 stdin，插件死亡 → EOF → watchdog 杀 daemon。
                 let child;
                 let watchdog;
-                if (stopWithPid) {
+                if (useStopWithProcess) {
                     child = spawn(aria2Path_, args, { stdio: 'ignore', windowsHide: true });
                 }
                 else {

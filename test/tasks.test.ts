@@ -170,7 +170,11 @@ test('parseRetryRequest：output 带控制字符 -> 整条不可重试（1.9.3 �
   assert.equal(parseRetryRequest({ url: 'https://a/b', output: 'C:\\x' + TAB }), undefined)
   // outPath（轨道二记录的产物路径）同样受检
   assert.equal(parseRetryRequest({ url: 'https://a/b' }, 'C:\\x' + LF), undefined)
-  // 干净路径不受影响
-  const ok = parseRetryRequest({ url: 'https://a/b', output: 'C:\\x\\b.bin' })
-  assert.equal(ok?.output, 'C:\\x\\b.bin')
+  // 干净路径不受影响。这里必须用「本机平台的绝对路径」：字面量 'C:\\x\\b.bin'
+  // 在 POSIX 上 path.isAbsolute 为 false，会被当作相对路径丢弃 —— 那是正确行为
+  // （相对路径记下来也删不得），不是缺陷。path.resolve('/x/b.bin') 在 POSIX 得
+  // /x/b.bin、在 Windows 得 C:\x\b.bin，两个平台都能验到"原样保留"。
+  const clean = path.resolve('/x/b.bin')
+  const ok = parseRetryRequest({ url: 'https://a/b', output: clean })
+  assert.equal(ok?.output, clean)
 })

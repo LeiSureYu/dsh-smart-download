@@ -20,7 +20,9 @@
  *      已完成的下载盖成 cancelled（见 download-rpc.ts 的 RpcCompletedRace）。
  *
  * 生命周期绑定（SPIKE Q1 实测）：
- * - POSIX：daemon 带 `--stop-with-pid=<插件进程 pid>`，插件死亡 daemon 跟随退出；
+ * - POSIX：daemon 带 `--stop-with-process=<插件进程 pid>`，插件死亡 daemon 跟随退出；
+ *   选项名是 `--stop-with-process`（aria2 1.36+），**不是** `--stop-with-pid`——
+ *   后者不存在，aria2 会以 `unrecognized option` 直接退出，daemon 一次都起不来；
  * - Windows：该选项不存在，改为 stdin-EOF watchdog——插件持有 watchdog 的
  *   stdin 管道，插件死亡 → EOF → watchdog 杀 daemon 后退出。两平台都保证
  *   「daemon 绝不比插件进程活得更久」。

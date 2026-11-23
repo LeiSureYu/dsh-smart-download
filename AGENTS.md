@@ -77,6 +77,13 @@ curl 7.81 按 `--fail` 报错（exit 22）。CI 的 curl 8.x 与本机 Windows 8
 - **`npm view` 有本地 metadata 缓存**：刚发布后仍显示旧版本是正常现象，以
   `https://registry.npmjs.org/-/package/@leisureyu%2Fdsh-smart-dl/dist-tags` 为准。
 - 全量套件在本机 2 核 Linux 上约 4 分钟（727 条）；CI 上约 2 分钟。
+- **push 走镜像偶发被拒**：`origin` 是 `https://ghfast.top/https://github.com/...`（全局
+  `url.…insteadOf` 把 github.com 改写到这个镜像）。镜像有时对 `main` 返回
+  `cannot lock ref 'refs/heads/main': is at <新 sha> but expected <旧 sha>`，此时
+  直连推一次即可：临时 `git config --global --unset "url.https://ghfast.top/https://github.com/.insteadof"`，
+  `git push https://github.com/LeiSureYu/dsh-smart-download.git main:main`，推完把
+  insteadOf 加回去。push 时那句 `git-credential-wincred.exe … No such file or directory`
+  是全局 helper 路径还指着旧版本的噪声，不影响结果。
 
 ---
 

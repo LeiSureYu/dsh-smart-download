@@ -206,6 +206,18 @@ export async function ensureDaemon(): Promise<DaemonState> {
           child = watchdog
         }
 
+        // 常驻 daemon 不能把宿主进程的事件循环钉住（2.0.0 修掉选项名之后暴露的
+        // 第一个 CI 症状：用例全绿、测试文件却永不退出，check job 15 分钟被
+        // timeout 取消 —— 父进程被这个 child 句柄挂着，事件循环永远排不空）。
+        // unref 的语义正是需要的：daemon 该活多久活多久，「父进程能不能自然退出」
+        // 不再由它决定 —— 父进程退出后，POSIX 的 --stop-with-process 与 Windows
+        // 的 watchdog stdin-EOF 各自收尸，生命周期绑定不受影响。
+        child.unref()
+        // Windows：stdin 管道是父进程侧的真实句柄，光 unref 子进程不够。
+        // unref 管道不影响 EOF 语义（父进程一退出，fd 关闭，watchdog 照常收尸）。
+        const watchdogStdin = watchdog?.stdin as unknown as { unref?: () => void } | null
+        watchdogStdin?.unref?.()
+
         // RPC 就绪探测：3s 内 getVersion 成功即视为启动成功
         const ready = await pollReady(port, secret, 3000).catch(() => false)
         if (ready) {

@@ -14,6 +14,7 @@
 | 分支 | `main` = `efcdbdc`，工作区干净，与 origin 同步 |
 | 发布 tag | `v2.0.0`（轻量 tag）**指向 `efcdbdc`** |
 | npm | `@leisureyu/dsh-smart-dl@2.0.0` 已发布，`dist-tags.latest` = `2.0.0` |
+| GitHub Release | `v2.0.0` 已建（2026-11-23），target `main`、无附件；**这一步不在 CI 里**，见第 4 节 |
 | 6 个二进制子包 | 仍是 1.37.x（各自独立版本号，早已发布；发布时会按“已存在”跳过，正常） |
 
 2.0.0 的 tag 最初打在 `8be7b78`（那次 tag 流水线在 Test 步骤红了、什么都没发出去），
@@ -93,3 +94,9 @@ node --test --import tsx "test/**/*.test.ts"                      # 全量；单
 
 **发新版本**：改版本号 → 重建 dist → 提交 → 打**新** tag（不要复用已发过的 tag）→
 push tag。tag 与 `package.json` 版本不一致时第一步就会红，不会静默空跑。
+
+**发完 npm 还要单独建 GitHub Release**：`publish.yml` 从头到尾只做「取二进制 → 测试 →
+npm publish」，没有建 Release 的步骤，1.x 的 release 都是网页手工建的。漏了这一步的形态是
+tag 有、npm 有、releases 页面缺这一版（2.0.0 就这样漏过一次，隔天才补）。做法：
+选已有的 tag、target `main`、不勾 pre-release、附件留空，正文按 CHANGELOG 对应小节改写
+（章节用 `## 破坏性变更` / `## 新增` / `## 修复` / `## 安全` / `## 升级`，结尾写升级路径）。

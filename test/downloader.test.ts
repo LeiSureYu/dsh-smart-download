@@ -34,6 +34,7 @@ import {
   findAria2OnPath,
   getAria2Path,
   isTransientDownloadError,
+  isResumeAlreadyCompleteError,
   runProcess,
   summarySpeedBytes,
   TRANSIENT_CURL_EXIT_CODES,
@@ -951,4 +952,26 @@ test('isTransientDownloadError: 连接类退出码算瞬时，确定性失败与
   assert.equal(isTransientDownloadError('curl 退出码 56：字符串也认'), true)
   assert.equal(isTransientDownloadError(null), false)
   assert.equal(isTransientDownloadError(undefined), false)
+})
+
+test('isResumeAlreadyCompleteError: 只认 curl 的退出码 22 + 416', () => {
+  // 真实形态：curl 7.81 续传已完成的文件（`-C -` → Range 起点 == 资源长度）
+  const real =
+    'curl 退出码 22：HTTP 错误：服务器返回了 400 及以上的状态码（本插件固定带 --fail）\n' +
+    '下一步：确认地址是否有效、是否已过期；需要鉴权时用 headers / referer 传凭证\n' +
+    'stderr:\ncurl: (22) The requested URL returned error: 416'
+  assert.equal(isResumeAlreadyCompleteError(real), true)
+  // 同样退出码但不是 416：普通 404 / 403 不能被这条豁免吞掉
+  assert.equal(
+    isResumeAlreadyCompleteError(new Error('curl 退出码 22：HTTP 错误\nstderr:\ncurl: (22) 404')),
+    false,
+  )
+  // 416 出现在别的退出码上：不认（33 是「服务端不支持 Range」，那是真失败）
+  assert.equal(isResumeAlreadyCompleteError(new Error('curl 退出码 33：Range 未被接受 416')), false)
+  // aria2 的 416 由 aria2 自己重试，不走这条豁免
+  assert.equal(isResumeAlreadyCompleteError(new Error('aria2c 退出码 22（信号 null）：416')), false)
+  // 无退出码 / 非错误对象
+  assert.equal(isResumeAlreadyCompleteError(new Error('HTTP 416')), false)
+  assert.equal(isResumeAlreadyCompleteError(null), false)
+  assert.equal(isResumeAlreadyCompleteError(undefined), false)
 })

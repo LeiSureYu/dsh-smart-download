@@ -640,6 +640,31 @@ export function isTransientDownloadError(err: unknown): boolean {
 }
 
 /**
+ * 判定一次续传失败其实是「本地已经完整」：curl 退出码 22（`--fail` 命中 4xx）
+ * 且 stderr 里有 416。
+ *
+ * 为什么会遇到 416：`-C -` 让 curl 带上 `Range: bytes=<本地长度>-`，本地已经
+ * 拿到完整文件时起点等于资源长度，服务端按规定回 416（RFC 7233：Range 不可满足）。
+ * 这时的语义是「没有东西可下」，不是失败。
+ *
+ * 为什么要专门处理：两个 curl 版本对同一个响应给出相反的结论 —— 实测
+ * curl 8.13（Windows）对续传 416 自行按成功收场（exit 0、文件不改），
+ * curl 7.81（Ubuntu）按 `--fail` 报错退出（exit 22，文案 "HTTP error 416"）。
+ * 不判这一下，同一份代码在旧发行版上会把「重跑一次已完成的下载」判成失败。
+ *
+ * 只认 curl + 退出码 22：aria2 的 416 文案形状完全不同，且 aria2 自己会重试；
+ * 退出码 22 之外的 416 文本（比如 URL 里刚好有 416）不该被这条豁免吞掉。
+ * 文件是否真的完整不在这里断言 —— 后续 verifySize / checksum 才是判据，
+ * 本地比远端多字节的畸形文件照样会在那里失败。
+ */
+export function isResumeAlreadyCompleteError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  if (exitCodeFromMessage(message) !== 22) return false
+  if (/aria2/i.test(message)) return false
+  return /\b416\b/.test(message)
+}
+
+/**
  * 从命令行取可执行文件名（去掉目录与 `.exe`）：用户不需要看到绝对路径。
  *
  * 为什么不用 `path.basename`：**它是平台相关的**。Linux 上的 `basename` 不认
@@ -936,18 +961,38 @@ export async function downloadWithCurl(
     maxDownloadLimitBytes,
     proxy,
   )
-  await runProcess(
-    'curl',
-    args,
-    signal,
-    {
-      onStderr: (line) => {
-        const pct = parseCurlProgress(line)
-        if (pct !== null && reporter) {
-          reporter.report(pct, '下载中（curl）')
-        }
+  try {
+    await runProcess(
+      'curl',
+      args,
+      signal,
+      {
+        onStderr: (line) => {
+          const pct = parseCurlProgress(line)
+          if (pct !== null && reporter) {
+            reporter.report(pct, '下载中（curl）')
+          }
+        },
       },
-    },
-    stdin,
-  )
+      stdin,
+    )
+  } catch (err) {
+    // 续传撞 416 = 本地已完整（详见 isResumeAlreadyCompleteError 的注释）。
+    // 只在续传模式下豁免，且要求本地确实有内容 —— 空文件配 416 说明对方不认
+    // Range 而本地又什么都没下，那不是「已完成」。
+    if (resume && isResumeAlreadyCompleteError(err) && localBytes(outputPath) > 0) {
+      reporter?.report(100, '已完成（本地字节已完整）')
+      return
+    }
+    throw err
+  }
+}
+
+/** 本地已落盘字节数；文件不存在/读不到算 0（判定用，不吞业务错误）。 */
+function localBytes(file: string): number {
+  try {
+    return statSync(file).size
+  } catch {
+    return 0
+  }
 }

@@ -221,6 +221,25 @@ export declare function exitCodeFromMessage(message: string): number | null;
  */
 export declare function isTransientDownloadError(err: unknown): boolean;
 /**
+ * 判定一次续传失败其实是「本地已经完整」：curl 退出码 22（`--fail` 命中 4xx）
+ * 且 stderr 里有 416。
+ *
+ * 为什么会遇到 416：`-C -` 让 curl 带上 `Range: bytes=<本地长度>-`，本地已经
+ * 拿到完整文件时起点等于资源长度，服务端按规定回 416（RFC 7233：Range 不可满足）。
+ * 这时的语义是「没有东西可下」，不是失败。
+ *
+ * 为什么要专门处理：两个 curl 版本对同一个响应给出相反的结论 —— 实测
+ * curl 8.13（Windows）对续传 416 自行按成功收场（exit 0、文件不改），
+ * curl 7.81（Ubuntu）按 `--fail` 报错退出（exit 22，文案 "HTTP error 416"）。
+ * 不判这一下，同一份代码在旧发行版上会把「重跑一次已完成的下载」判成失败。
+ *
+ * 只认 curl + 退出码 22：aria2 的 416 文案形状完全不同，且 aria2 自己会重试；
+ * 退出码 22 之外的 416 文本（比如 URL 里刚好有 416）不该被这条豁免吞掉。
+ * 文件是否真的完整不在这里断言 —— 后续 verifySize / checksum 才是判据，
+ * 本地比远端多字节的畸形文件照样会在那里失败。
+ */
+export declare function isResumeAlreadyCompleteError(err: unknown): boolean;
+/**
  * 把退出码翻译成给用户看的错误消息；退出码为 0 时返回 `null`。
  *
  * 返回 `null` 而不是空串：调用方据此决定「正常结束、不产生任何文案」，
